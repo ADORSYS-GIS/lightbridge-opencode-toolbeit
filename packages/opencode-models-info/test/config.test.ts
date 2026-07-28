@@ -27,8 +27,25 @@ describe("parseMetaOptions", () => {
       modelsInfoTtlSeconds: DEFAULT_TTL_SECONDS,
       modelsInfoTimeoutMs: DEFAULT_TIMEOUT_MS,
       modelsInfoHeaders: undefined,
+      modelsInfoHideTextOnly: false,
       modelsInfoFormat: "openrouter"
     });
+  });
+
+  it("parses modelsInfoHideTextOnly, defaulting to false for anything but a literal true", () => {
+    expect(
+      parseMetaOptions({
+        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideTextOnly: true }
+      })?.modelsInfoHideTextOnly
+    ).toBe(true);
+    expect(
+      parseMetaOptions({
+        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideTextOnly: "true" }
+      })?.modelsInfoHideTextOnly
+    ).toBe(false);
+    expect(
+      parseMetaOptions({ meta: { modelsInfoUrl: "https://x.test/m" } })?.modelsInfoHideTextOnly
+    ).toBe(false);
   });
 
   it("coerces positive integers and ignores invalid numeric inputs", () => {

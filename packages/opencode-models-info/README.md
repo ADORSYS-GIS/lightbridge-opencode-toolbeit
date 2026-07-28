@@ -79,6 +79,7 @@ Two practical rules: drop the leading `/` to keep the metadata path under your i
 | `meta.modelsInfoTimeoutMs`      | `5000`             | Per-fetch HTTP timeout.                                               |
 | `meta.modelsInfoHeaders`        | _(none)_           | Extra request headers. Override `options.headers` on conflict. Included in the cache key, so a tenant switch busts the cache. |
 | `meta.modelsInfoOverwrite`      | _(none)_           | Array of field names (`name`, `attachment`, `reasoning`, `temperature`, `tool_call`, `cost`, `limit`, `modalities`) that the endpoint is allowed to overwrite even when already set. Opts those fields out of upstream-wins — see [Forcing endpoint values to win](#forcing-endpoint-values-to-win). Unknown names are ignored. |
+| `meta.modelsInfoHideTextOnly`   | `false`             | When `true`, makes the `modelsInfoUrl` catalog authoritative for which models are shown: drops a model from `provider.models` entirely if the catalog reports it as text-in/text-out only, **or** if the catalog doesn't mention it at all — see [Hiding text-only models](#hiding-text-only-models). |
 
 ### Auth composition
 
@@ -138,6 +139,30 @@ The merge is **upstream-wins** by default: a field already present on a model en
 Listed fields still only change when the endpoint actually provides a value (a missing field never blanks an existing one), and unlisted fields keep the default upstream-wins behavior. Valid names are the mapped fields: `name`, `attachment`, `reasoning`, `temperature`, `tool_call`, `cost`, `limit`, `modalities`.
 
 > **Forcing a capability flag *off*.** The boolean flags (`tool_call`, `reasoning`, `temperature`, `attachment`) are normally emitted *true-only*. Listing one in `modelsInfoOverwrite` also lets the endpoint assert `false` (to clear a stale `true`) — but only when the endpoint actually reports the underlying data (`supported_parameters`, or `architecture.input_modalities` for `attachment`). If that data is absent the plugin can't tell true from false, so it leaves the field alone rather than inventing a `false`.
+
+### Hiding text-only models
+
+Some catalogs mix chat-only models in with multimodal ones, and you may only want to offer the multimodal set (vision, audio, etc.) in OpenCode's model picker. Set `meta.modelsInfoHideTextOnly: true` to make the **`modelsInfoUrl` catalog authoritative for which models exist**, not just their metadata:
+
+```jsonc
+{
+  "options": {
+    "meta": {
+      "modelsInfoUrl": "models/info",
+      "modelsInfoHideTextOnly": true
+    }
+  }
+}
+```
+
+With the flag on, a model's entry is **deleted** from `provider.models` outright in either of two cases:
+
+1. **The catalog reports it as text-only** — `architecture.input_modalities` / `.output_modalities` are both present and resolve to exactly `["text"]`.
+2. **The catalog doesn't mention it at all** — no entry in the `modelsInfoUrl` response matches the model's `id` (or declared `id`). This is what makes the catalog take total precedence over whatever populated `provider.models` first (a static `opencode.json`, or `@vymalo/opencode-oauth2`'s own `/v1/models` discovery) — anything the richer catalog doesn't vouch for is dropped, not just left un-enriched.
+
+This is a hard delete, not a flag — a hidden model can't be selected at all, the same as if it had never been listed in `models` to begin with. It never *adds* a model the catalog knows about but discovery/config didn't already list — only membership already present in `provider.models` can be pruned. Case 1 only fires when the endpoint's modality data is actually present; a model the plugin can't classify (missing `architecture`) but that *is* matched in the catalog is left alone rather than hidden on a guess. Case 2 fires purely on absence from the catalog, independent of modality data. Both cases log at debug (`models_info_model_hidden_text_only`, `models_info_model_hidden_unmatched`) and are reflected in the `hiddenCount` on the summary `models_info_enriched` event.
+
+> **Composes with `modelsInfoOverwrite`.** Turning on `modelsInfoHideTextOnly` doesn't change how surviving models are merged — upstream-wins (or your `modelsInfoOverwrite` list) still governs individual fields. It only changes which model entries survive to be merged at all.
 
 ### Expected response shape (OpenRouter)
 

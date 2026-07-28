@@ -181,6 +181,129 @@ describe("enrichConfig", () => {
     expect(getModel(config, "custom", "model-a").name).toBe("Model A (normalized)");
   });
 
+  it("hides a text-only model when modelsInfoHideTextOnly is set", async () => {
+    const textOnlyEntry: OpenRouterModel = {
+      id: "model-text",
+      architecture: { input_modalities: ["text"], output_modalities: ["text"] }
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: [openRouterEntry, textOnlyEntry] }), {
+        status: 200
+      })
+    );
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideTextOnly: true }
+      },
+      models: { "model-a": {}, "model-text": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    // Multimodal model stays and is enriched as usual.
+    expect(getModel(config, "custom", "model-a").limit).toEqual({ context: 128_000, output: 4096 });
+    // Text-only model is dropped from the provider's `models` map entirely.
+    expect(config.provider?.custom.models?.["model-text"]).toBeUndefined();
+  });
+
+  it("drops a model the catalog doesn't mention at all when modelsInfoHideTextOnly is set", async () => {
+    // modelsInfoHideTextOnly makes the catalog authoritative for membership,
+    // not just modality: a model discovery/config produced that the catalog
+    // never confirms should be dropped too, not merely left un-enriched.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [openRouterEntry] }), { status: 200 })
+      );
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideTextOnly: true }
+      },
+      models: { "model-a": {}, "not-in-catalog": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(getModel(config, "custom", "model-a").limit).toEqual({ context: 128_000, output: 4096 });
+    expect(config.provider?.custom.models?.["not-in-catalog"]).toBeUndefined();
+  });
+
+  it("keeps an unmatched model when modelsInfoHideTextOnly is not set", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [openRouterEntry] }), { status: 200 })
+      );
+    const config = withProvider("custom", {
+      options: { baseURL: "https://x.test/v1", meta: { modelsInfoUrl: "models/info" } },
+      models: { "not-in-catalog": { name: "Untouched" } }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(getModel(config, "custom", "not-in-catalog").name).toBe("Untouched");
+  });
+
+  it("keeps a text-only model when modelsInfoHideTextOnly is not set", async () => {
+    const textOnlyEntry: OpenRouterModel = {
+      id: "model-text",
+      architecture: { input_modalities: ["text"], output_modalities: ["text"] }
+    };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [textOnlyEntry] }), { status: 200 }));
+    const config = withProvider("custom", {
+      options: { baseURL: "https://x.test/v1", meta: { modelsInfoUrl: "models/info" } },
+      models: { "model-text": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(config.provider?.custom.models?.["model-text"]).toBeDefined();
+  });
+
+  it("does not hide a model when hideTextOnly is set but modalities are unknown", async () => {
+    // No architecture on the source entry at all → we genuinely don't know
+    // the modalities, so hiding must not fire on a guess.
+    const noArchEntry: OpenRouterModel = { id: "model-unknown" };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [noArchEntry] }), { status: 200 }));
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideTextOnly: true }
+      },
+      models: { "model-unknown": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(config.provider?.custom.models?.["model-unknown"]).toBeDefined();
+  });
+
   it("does not refetch when a non-expired cache entry exists", async () => {
     const seed = new Map<string, CachedModelsRecord>();
     const fetchImpl = vi.fn();

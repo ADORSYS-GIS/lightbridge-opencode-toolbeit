@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { mapOpenRouterEntry, mergeIntoModel } from "../src/mapping.js";
+import { isTextOnlyModality, mapOpenRouterEntry, mergeIntoModel } from "../src/mapping.js";
 import type { OpenRouterModel } from "../src/types.js";
 
 describe("mapOpenRouterEntry", () => {
@@ -86,6 +86,21 @@ describe("mapOpenRouterEntry", () => {
     const out = mapOpenRouterEntry({ id: "x" }, new Set(["tool_call", "attachment"]));
     expect(out.tool_call).toBeUndefined();
     expect(out.attachment).toBeUndefined();
+  });
+});
+
+describe("isTextOnlyModality", () => {
+  it("is false when modalities is undefined (source never reported it)", () => {
+    expect(isTextOnlyModality(undefined)).toBe(false);
+  });
+
+  it("is true when input and output are both exactly text", () => {
+    expect(isTextOnlyModality({ input: ["text"], output: ["text"] })).toBe(true);
+  });
+
+  it("is false when either side carries a non-text modality", () => {
+    expect(isTextOnlyModality({ input: ["text", "image"], output: ["text"] })).toBe(false);
+    expect(isTextOnlyModality({ input: ["text"], output: ["audio"] })).toBe(false);
   });
 });
 

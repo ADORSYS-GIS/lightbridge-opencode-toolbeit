@@ -156,6 +156,21 @@ function roundTo(value: number, decimals: number): number {
   return Math.round(value * factor) / factor;
 }
 
+/**
+ * A model is "text-only" when the source reported modalities and both input
+ * and output are exactly `["text"]` — no vision/audio/video/pdf on either
+ * side. Undefined `modalities` means the source never told us, so we can't
+ * claim text-only (consistent with the true-only / "known" pattern above).
+ */
+export function isTextOnlyModality(modalities: ModelMetadata["modalities"]): boolean {
+  if (!modalities) {
+    return false;
+  }
+  const isTextOnlyList = (mods: OpenCodeModality[]): boolean =>
+    mods.length === 1 && mods[0] === "text";
+  return isTextOnlyList(modalities.input) && isTextOnlyList(modalities.output);
+}
+
 function filterModalities(values: OpenRouterModality[] | undefined): OpenCodeModality[] {
   if (!values) {
     return [];

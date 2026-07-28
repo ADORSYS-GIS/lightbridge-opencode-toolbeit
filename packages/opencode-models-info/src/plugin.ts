@@ -2,7 +2,7 @@ import { cacheKey, type CacheStore, FileCacheStore, isExpired } from "./cache.js
 import { parseMetaOptions } from "./config.js";
 import { fetchOpenRouterModels } from "./fetcher.js";
 import type { Logger } from "./logging.js";
-import { mapOpenRouterEntry, mergeIntoModel } from "./mapping.js";
+import { isTextOnlyModality, mapOpenRouterEntry, mergeIntoModel } from "./mapping.js";
 import type { CachedModelsRecord, MetaProviderOptions, OpenRouterModel } from "./types.js";
 
 export type ProviderOptions = Record<string, unknown> | undefined;
@@ -101,13 +101,28 @@ async function enrichProvider(
       overwriteFields: overwrite ? [...overwrite] : []
     });
 
+    const totalModels = Object.keys(models).length;
     let enrichedCount = 0;
+    let hiddenCount = 0;
     for (const [modelId, modelConfig] of Object.entries(models)) {
       const declaredId = typeof modelConfig.id === "string" ? modelConfig.id : undefined;
       const matchById = byId.has(modelId);
       const match = byId.get(modelId) ?? (declaredId ? byId.get(declaredId) : undefined);
       if (!match) {
-        deps.logger.trace("models_info_model_unmatched", { providerId, modelId, declaredId });
+        // With modelsInfoHideTextOnly on, the catalog is authoritative for
+        // membership too: a model discovery/config produced that the catalog
+        // doesn't even mention is dropped, not just left un-enriched.
+        if (opts.modelsInfoHideTextOnly) {
+          delete models[modelId];
+          hiddenCount += 1;
+          deps.logger.debug("models_info_model_hidden_unmatched", {
+            providerId,
+            modelId,
+            declaredId
+          });
+        } else {
+          deps.logger.trace("models_info_model_unmatched", { providerId, modelId, declaredId });
+        }
         continue;
       }
       deps.logger.trace("models_info_model_matched", {
@@ -116,6 +131,17 @@ async function enrichProvider(
         matchedBy: matchById ? "id" : "declaredId"
       });
       const derived = mapOpenRouterEntry(match, overwrite);
+
+      // A matched-but-text-only model is dropped the same way — before the
+      // merge, since there's no point enriching an entry we're about to
+      // delete from the provider's `models` map.
+      if (opts.modelsInfoHideTextOnly && isTextOnlyModality(derived.modalities)) {
+        delete models[modelId];
+        hiddenCount += 1;
+        deps.logger.debug("models_info_model_hidden_text_only", { providerId, modelId });
+        continue;
+      }
+
       const derivedFields = Object.keys(derived);
       const appliedFields = derivedFields.filter(
         (f) => modelConfig[f] === undefined || overwrite?.has(f)
@@ -135,12 +161,14 @@ async function enrichProvider(
     deps.logger.trace("models_info_provider_done", {
       providerId,
       enrichedCount,
-      totalModels: Object.keys(models).length
+      hiddenCount,
+      totalModels
     });
     deps.logger.debug("models_info_enriched", {
       providerId,
       enrichedCount,
-      totalModels: Object.keys(models).length,
+      hiddenCount,
+      totalModels,
       sourceModels: record.models.length
     });
   } catch (error) {

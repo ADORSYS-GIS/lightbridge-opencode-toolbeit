@@ -51,6 +51,17 @@ Upstream-wins assumes a value already on a model entry is there on purpose — t
 
 **Capability flags can be forced *off*, but only when the endpoint reports them.** Normally the mapper emits the boolean flags (`tool_call`, `reasoning`, `temperature`, `attachment`) as *true-only* — an absent capability stays unset. Listing one in `overwrite` lets the endpoint also assert `false` and clear a stale `true` another plugin stamped — **but only when the source actually carried the signal** (`supported_parameters` for the three parameter flags, `architecture.input_modalities` for `attachment`). If the endpoint omits that data entirely, the plugin genuinely doesn't know the answer, so it leaves the field untouched rather than fabricating a `false`. To force a capability off, make sure your endpoint emits the relevant array (even an empty `supported_parameters: []` counts as "no params").
 
+## Hiding text-only models / catalog-authoritative membership
+
+`meta.modelsInfoHideTextOnly: true` makes the `modelsInfoUrl` catalog authoritative for which models exist, not just their metadata — useful when you only want to offer multimodal models in OpenCode's picker, or when you want the richer catalog to take total precedence over whatever populated `provider.models` first (a hand-written `opencode.json`, or `@vymalo/opencode-oauth2`'s own `/v1/models` discovery).
+
+With the flag on, a model's entry is **deleted** from `provider.models` (not just left un-enriched) in either case:
+
+- The catalog matches it and reports modalities as exactly text-in/text-out (`architecture.input_modalities` / `.output_modalities` both present and resolve to `["text"]`).
+- The catalog has no entry matching its `id` (or declared `id`) at all.
+
+Both are "known before we assert" — same rule as the capability flags in [Overriding upstream-wins](#overriding-upstream-wins): a matched model the catalog gives no modality data for is left alone rather than hidden on a guess, and the flag never *invents* a model the catalog knows about but discovery/config never listed — it only prunes what's already in `provider.models`. It's a hard delete: a hidden model becomes unselectable, same as if it were never in `models` to begin with. See the [package README](../packages/opencode-models-info/README.md#hiding-text-only-models) for the full example.
+
 ## Auth composition
 
 The fetch sends the union of the provider's `options.headers` and the meta-specific `meta.modelsInfoHeaders` (meta wins on conflict). That single rule covers the three common setups:
@@ -112,7 +123,9 @@ All structured, `snake_case`, emitted through both the JSON console and OpenCode
 
 | Event | Level | Meaning |
 | --- | --- | --- |
-| `models_info_enriched` | info | A provider's models were enriched (`enrichedCount` / `totalModels` / `sourceModels`). |
+| `models_info_enriched` | info | A provider's models were enriched (`enrichedCount` / `hiddenCount` / `totalModels` / `sourceModels`). |
+| `models_info_model_hidden_text_only` | debug | A model was deleted from `provider.models` because `meta.modelsInfoHideTextOnly` is set and the catalog reported it as text-only. |
+| `models_info_model_hidden_unmatched` | debug | A model was deleted from `provider.models` because `meta.modelsInfoHideTextOnly` is set and the catalog has no entry for it at all. |
 | `models_info_fetched` | info | A live fetch succeeded and the cache was written. |
 | `models_info_cache_hit` | debug | Served from a fresh cache entry; no network. |
 | `models_info_not_modified` | debug | `304` revalidation; cached models reused. |
