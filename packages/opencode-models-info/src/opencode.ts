@@ -10,7 +10,8 @@ import {
   type Logger,
   type LogLevel
 } from "./logging.js";
-import { type EnrichConfigInput, enrichConfig } from "./plugin.js";
+import { type EnrichConfigInput, enrichConfig, startCacheRefreshSchedulers } from "./plugin.js";
+import type { SchedulerHandle } from "./scheduler.js";
 
 const PLUGIN_SERVICE_NAME = "opencode-models-info-plugin";
 
@@ -77,15 +78,30 @@ export function createOpencodeModelsInfoPlugin(
     let currentLogLevel: LogLevel = DEFAULT_LOG_LEVEL;
     const logger = factoryOptions.logger ?? createOpenCodeLogger(client, () => currentLogLevel);
     const cache = factoryOptions.cache ?? new FileCacheStore(factoryOptions.cacheDir);
+    let schedulers: SchedulerHandle[] = [];
+
+    const stopSchedulers = (): void => {
+      for (const handle of schedulers) {
+        handle.stop();
+      }
+      schedulers = [];
+    };
 
     return {
       config: async (config: OpenCodeConfig) => {
         currentLogLevel = fromOpenCodeLogLevel(config.logLevel) ?? DEFAULT_LOG_LEVEL;
-        await enrichConfig(config as EnrichConfigInput, {
-          cache,
-          logger,
-          fetchImpl: factoryOptions.fetchImpl
-        });
+        const deps = { cache, logger, fetchImpl: factoryOptions.fetchImpl };
+        await enrichConfig(config as EnrichConfigInput, deps);
+
+        // OpenCode re-runs `config` on certain config edits — stop the
+        // schedulers from any prior run before starting fresh ones so a
+        // rebuilt config never leaks a duplicate background timer per
+        // provider.
+        stopSchedulers();
+        schedulers = startCacheRefreshSchedulers(config as EnrichConfigInput, deps);
+      },
+      dispose: async () => {
+        stopSchedulers();
       }
     };
   };

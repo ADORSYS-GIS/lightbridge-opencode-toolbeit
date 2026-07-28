@@ -66,6 +66,10 @@ function asPositiveInt(value: unknown, fallback: number): number {
   return fallback;
 }
 
+function asBoolean(value: unknown): boolean {
+  return value === true;
+}
+
 /**
  * Parse a provider's `options.meta` for opt-in model-info fields. Returns
  * `null` if the provider has not opted in (no `meta.modelsInfoUrl`).
@@ -115,6 +119,7 @@ export function parseMetaOptions(
     modelsInfoTimeoutMs: asPositiveInt(meta.modelsInfoTimeoutMs, DEFAULT_TIMEOUT_MS),
     modelsInfoHeaders: asStringMap(meta.modelsInfoHeaders),
     modelsInfoOverwrite: asOverwriteList(meta.modelsInfoOverwrite),
+    modelsInfoHideTextOnly: asBoolean(meta.modelsInfoHideTextOnly),
     modelsInfoFormat: "openrouter"
   };
 }

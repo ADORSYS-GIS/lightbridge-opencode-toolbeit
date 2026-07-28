@@ -1,8 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CacheStore } from "../src/cache.js";
 import type { Logger } from "../src/logging.js";
-import { enrichConfig, type EnrichConfigInput, type ProviderConfigLike } from "../src/plugin.js";
+import {
+  enrichConfig,
+  type EnrichConfigInput,
+  type ProviderConfigLike,
+  startCacheRefreshSchedulers
+} from "../src/plugin.js";
 import type { CachedModelsRecord, OpenRouterModel } from "../src/types.js";
 
 function silentLogger(): Logger {
@@ -179,6 +184,129 @@ describe("enrichConfig", () => {
     });
 
     expect(getModel(config, "custom", "model-a").name).toBe("Model A (normalized)");
+  });
+
+  it("hides a text-only model when modelsInfoHideTextOnly is set", async () => {
+    const textOnlyEntry: OpenRouterModel = {
+      id: "model-text",
+      architecture: { input_modalities: ["text"], output_modalities: ["text"] }
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: [openRouterEntry, textOnlyEntry] }), {
+        status: 200
+      })
+    );
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideTextOnly: true }
+      },
+      models: { "model-a": {}, "model-text": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    // Multimodal model stays and is enriched as usual.
+    expect(getModel(config, "custom", "model-a").limit).toEqual({ context: 128_000, output: 4096 });
+    // Text-only model is dropped from the provider's `models` map entirely.
+    expect(config.provider?.custom.models?.["model-text"]).toBeUndefined();
+  });
+
+  it("drops a model the catalog doesn't mention at all when modelsInfoHideTextOnly is set", async () => {
+    // modelsInfoHideTextOnly makes the catalog authoritative for membership,
+    // not just modality: a model discovery/config produced that the catalog
+    // never confirms should be dropped too, not merely left un-enriched.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [openRouterEntry] }), { status: 200 })
+      );
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideTextOnly: true }
+      },
+      models: { "model-a": {}, "not-in-catalog": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(getModel(config, "custom", "model-a").limit).toEqual({ context: 128_000, output: 4096 });
+    expect(config.provider?.custom.models?.["not-in-catalog"]).toBeUndefined();
+  });
+
+  it("keeps an unmatched model when modelsInfoHideTextOnly is not set", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [openRouterEntry] }), { status: 200 })
+      );
+    const config = withProvider("custom", {
+      options: { baseURL: "https://x.test/v1", meta: { modelsInfoUrl: "models/info" } },
+      models: { "not-in-catalog": { name: "Untouched" } }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(getModel(config, "custom", "not-in-catalog").name).toBe("Untouched");
+  });
+
+  it("keeps a text-only model when modelsInfoHideTextOnly is not set", async () => {
+    const textOnlyEntry: OpenRouterModel = {
+      id: "model-text",
+      architecture: { input_modalities: ["text"], output_modalities: ["text"] }
+    };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [textOnlyEntry] }), { status: 200 }));
+    const config = withProvider("custom", {
+      options: { baseURL: "https://x.test/v1", meta: { modelsInfoUrl: "models/info" } },
+      models: { "model-text": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(config.provider?.custom.models?.["model-text"]).toBeDefined();
+  });
+
+  it("does not hide a model when hideTextOnly is set but modalities are unknown", async () => {
+    // No architecture on the source entry at all → we genuinely don't know
+    // the modalities, so hiding must not fire on a guess.
+    const noArchEntry: OpenRouterModel = { id: "model-unknown" };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [noArchEntry] }), { status: 200 }));
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideTextOnly: true }
+      },
+      models: { "model-unknown": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(config.provider?.custom.models?.["model-unknown"]).toBeDefined();
   });
 
   it("does not refetch when a non-expired cache entry exists", async () => {
@@ -448,5 +576,118 @@ describe("enrichConfig", () => {
     });
 
     expect(seed.get(key)?.ttlSeconds).toBe(7200);
+  });
+});
+
+describe("startCacheRefreshSchedulers", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns no handles when there are no providers at all", () => {
+    expect(
+      startCacheRefreshSchedulers({}, { cache: memoryCache(), logger: silentLogger() })
+    ).toEqual([]);
+  });
+
+  it("skips a provider that hasn't opted into meta.modelsInfoUrl", () => {
+    const config = withProvider("bare", {
+      options: { baseURL: "https://x.test" },
+      models: { "model-a": {} }
+    });
+    expect(
+      startCacheRefreshSchedulers(config, { cache: memoryCache(), logger: silentLogger() })
+    ).toEqual([]);
+  });
+
+  it("refreshes on the meta.modelsInfoTtlSeconds cadence, unconditionally — not gated by cache freshness", async () => {
+    // Seed a cache entry that is NOT expired (fetchedAt === "now"). loadRecord
+    // would skip the network call for a fresh entry like this; the scheduler
+    // must fetch anyway, since a background refresh's entire point is to
+    // notice upstream changes before the cache would naturally go stale.
+    const { cacheKey } = await import("../src/cache.js");
+    const fixedNow = 500;
+    const seed = new Map<string, CachedModelsRecord>();
+    seed.set(cacheKey("custom", "https://x.test/m"), {
+      fetchedAt: fixedNow,
+      ttlSeconds: 1,
+      etag: "v1",
+      models: [openRouterEntry]
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 304 }));
+    const config = withProvider("custom", {
+      options: { meta: { modelsInfoUrl: "https://x.test/m", modelsInfoTtlSeconds: 1 } },
+      models: {}
+    });
+
+    const handles = startCacheRefreshSchedulers(config, {
+      cache: memoryCache(seed),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => fixedNow
+    });
+    expect(handles).toHaveLength(1);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000); // modelsInfoTtlSeconds: 1 -> 1000ms interval
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts one independent scheduler per opted-in provider", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const config: EnrichConfigInput = {
+      provider: {
+        fast: {
+          options: { meta: { modelsInfoUrl: "https://x.test/fast", modelsInfoTtlSeconds: 1 } },
+          models: {}
+        },
+        slow: {
+          options: { meta: { modelsInfoUrl: "https://x.test/slow", modelsInfoTtlSeconds: 10 } },
+          models: {}
+        }
+      }
+    };
+
+    const handles = startCacheRefreshSchedulers(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+    expect(handles).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // only "fast" has ticked so far
+
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(fetchImpl).toHaveBeenCalledTimes(11); // "fast" ticked 9 more times, "slow" once
+  });
+
+  it("stop() halts further refreshes for that provider", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const config = withProvider("custom", {
+      options: { meta: { modelsInfoUrl: "https://x.test/m", modelsInfoTtlSeconds: 1 } },
+      models: {}
+    });
+
+    const [handle] = startCacheRefreshSchedulers(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    handle.stop();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
