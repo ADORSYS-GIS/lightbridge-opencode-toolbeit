@@ -27,3 +27,11 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - cronstrue@3.20.0
+
+# fast-uri (transitive via @modelcontextprotocol/sdk > ajv, pulled in by
+# opencode-browser-mcp / opencode-devtools-mcp) resolved to 3.1.2, which is
+# vulnerable to two high-severity host-confusion advisories
+# (GHSA-v2hh-gcrm-f6hx, GHSA-4c8g-83qw-93j6), tripping the release
+# workflow's `pnpm audit --audit-level=high` gate. Both are fixed in 3.1.4.
+overrides:
+  fast-uri: ^3.1.4
