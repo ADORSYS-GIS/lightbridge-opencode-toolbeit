@@ -1,6 +1,6 @@
 # Model metadata enrichment
 
-How `@vymalo/opencode-models-info` runs inside OpenCode: the single hook it registers, how it composes with any auth scheme, where it caches, and what happens when the metadata endpoint misbehaves.
+How `@vymalo/opencode-models-info` runs inside OpenCode: the hooks it registers, how it composes with any auth scheme, where it caches, how it stays fresh over a long-lived process, and what happens when the metadata endpoint misbehaves.
 
 For the copy-paste config reference (every option, the full OpenRouter→OpenCode field-mapping table), see the package README: [`packages/opencode-models-info/README.md`](../packages/opencode-models-info/README.md). This page is for the adopter who needs to reason about composition and failure modes. The original design rationale lives in [`plans/models-info-plan.md`](../plans/models-info-plan.md).
 
@@ -14,9 +14,9 @@ You point the plugin at that endpoint with `options.meta.modelsInfoUrl` — **th
 
 It is **auth-agnostic** and does **not** depend on `@vymalo/opencode-oauth2`. It only mutates the already-assembled OpenCode config, so it works with static API keys, oauth2, or no auth at all.
 
-## The one hook
+## The hooks
 
-The plugin registers a single OpenCode hook: `config` (plugin load). Source: [`packages/opencode-models-info/src/opencode.ts`](../packages/opencode-models-info/src/opencode.ts).
+The plugin registers two OpenCode hooks: `config` (plugin load) and `dispose` (plugin teardown, used only to stop the background refresh scheduler below). Source: [`packages/opencode-models-info/src/opencode.ts`](../packages/opencode-models-info/src/opencode.ts).
 
 Because the host runs every plugin's `config` hook in registration order, by the time this one fires, other plugins (oauth2, or your static config) have already populated `config.provider[*]` — including `options.headers`. The hook then, for every provider:
 
@@ -24,6 +24,7 @@ Because the host runs every plugin's `config` hook in registration order, by the
 2. **Resolves the URL** against `options.baseURL` (see [URL resolution](#url-resolution)).
 3. **Loads the catalog** — from the on-disk cache if fresh, otherwise fetches (see [Caching](#caching-and-failure-modes)).
 4. **Merges** derived metadata onto each model whose `id` (or declared `id`) matches an entry in the catalog. The merge is **upstream-wins**: any field already set on the model entry is never overwritten. Running the hook twice is a no-op. Fields listed in `meta.modelsInfoOverwrite` are exempt — see [Overriding upstream-wins](#overriding-upstream-wins).
+5. **(Re)starts the background refresh scheduler** for each opted-in provider — see [Periodic refresh](#periodic-refresh).
 
 Providers run in parallel (`Promise.allSettled`); one bad endpoint never blocks another's enrichment, and any unexpected throw is surfaced as a `models_info_enrichment_failed` log event rather than silently swallowed.
 
@@ -88,6 +89,14 @@ If the metadata endpoint needs a *different* credential than inference (e.g. a s
 
 Rule of thumb: **drop the leading `/`** to keep the metadata path under your API path; **keep the leading `/`** to escape to the host root.
 
+## Periodic refresh
+
+`config` is the hook that actually enriches models, and it runs once at plugin load — re-running only on certain config edits, never on a timer (see [The hooks](#the-hooks)). That's fine for a short CLI invocation, but a long-lived process (a desktop window, an embedded server) would otherwise be stuck with whatever the catalog looked like at boot for as long as it stays up.
+
+To close that gap, every opted-in provider also gets a background scheduler ([`src/scheduler.ts`](../packages/opencode-models-info/src/scheduler.ts)) that keeps re-checking `modelsInfoUrl` — unconditionally, though still cheap via a conditional `ETag` request — on the **same `meta.modelsInfoTtlSeconds` cadence that already governs cache freshness**. There's deliberately no second interval to configure: the TTL knob already means "how often should this go stale," and reusing it as the refresh cadence keeps the two in lockstep instead of risking a TTL and a refresh interval drifting apart. Default is once a day (`86400`).
+
+This is a **cache-warming** mechanism, not a live-update one: it refreshes the on-disk cache for the *next* `config` run, but it cannot push a change into an already-open session, because a `config` hook has no channel to hot-patch a running one — OpenCode's plugin API doesn't expose one. A failed check backs off (capped at the configured interval, mirroring `@vymalo/opencode-oauth2`'s own scheduler) rather than hammering a down endpoint, and resumes the normal cadence once a check succeeds. The scheduler is stopped and restarted whenever `config` reruns (so a rebuilt config never leaks a duplicate timer per provider) and stopped for good on `dispose`. Its own timer is `unref()`'d, so it never by itself keeps a short-lived CLI process alive.
+
 ## Caching and failure modes
 
 The catalog is cached on disk so repeated boots don't re-hit the network.
@@ -133,6 +142,9 @@ All structured, `snake_case`, emitted through both the JSON console and OpenCode
 | `models_info_fetch_failed_no_cache` | warn | Fetch failed and nothing cached; provider left un-enriched. |
 | `models_info_cache_write_failed` | warn | Disk write failed; enrichment proceeded from memory. |
 | `models_info_enrichment_failed` | error | Unexpected throw while enriching a provider. |
+| `models_info_refresh_scheduler_started` | trace | A background refresh scheduler was started for a provider (see [Periodic refresh](#periodic-refresh)). |
+| `models_info_scheduler_tick` | trace | A scheduled refresh fired. |
+| `models_info_scheduler_retry` | warn | A scheduled refresh failed; backing off before the next attempt. |
 
 ## Field mapping (summary)
 

@@ -53,10 +53,11 @@ An absolute URL is clearest. A relative path is also accepted — it resolves ag
 That's it. After OpenCode starts:
 
 1. The hook picks up every provider with a `meta.modelsInfoUrl`.
-2. It `GET`s that URL once, sending whatever `options.headers` the provider already has (so it composes with any auth plugin — see [Auth composition](#auth-composition)).
+2. It `GET`s that URL, sending whatever `options.headers` the provider already has (so it composes with any auth plugin — see [Auth composition](#auth-composition)).
 3. Each model entry whose `id` matches an entry in the response gets `limit`, `cost`, `modalities`, `tool_call`, `reasoning`, `attachment`, etc. filled in — **only where they were not already set** (upstream wins).
 4. The response is cached on disk for `modelsInfoTtlSeconds` (default 24h), keyed by `(providerId, url, modelsInfoHeaders)`. ETags are honored.
 5. On fetch error with a valid cache, the stale snapshot is served — the plugin never blocks OpenCode startup on a network failure.
+6. A background scheduler then keeps re-checking the endpoint on that same `modelsInfoTtlSeconds` cadence for as long as the process runs — see [Periodic refresh](#periodic-refresh).
 
 ### URL resolution
 
@@ -70,12 +71,20 @@ That's it. After OpenCode starts:
 
 Two practical rules: drop the leading `/` to keep the metadata path under your inference API path; keep the leading `/` to escape to a different path under the same host.
 
+### Periodic refresh
+
+`config` — the only hook this plugin uses — runs once when OpenCode boots the plugin, and only re-runs on certain config edits (not on a timer). For a short-lived CLI invocation that's the whole story; but for a long-lived process (a desktop app window, or an embedded server that stays up for days), that hook would otherwise only ever see the catalog as it looked at boot.
+
+To close that gap, every opted-in provider also gets a background scheduler that keeps re-fetching `modelsInfoUrl` — unconditionally (still cheap, via a conditional `ETag` request) — on the **same `meta.modelsInfoTtlSeconds` cadence that already governs cache freshness**. There's no separate interval to configure: set `modelsInfoTtlSeconds` once and it controls both "how stale can the cache be" and "how often do we go check." Default is once a day (`86400`).
+
+This warms the cache for the **next** `config` run (the next launch, the next window, or the next config-triggered rebuild) — it can't push an update into an already-open session, since a `config` hook has no way to hot-patch a running one; there's simply no live channel for that in OpenCode's plugin API today. A failed check backs off (capped at the configured interval) instead of hammering a down endpoint, and resumes the normal cadence once a check succeeds. The scheduler is stopped and restarted whenever `config` reruns (so a rebuilt config never leaks a duplicate timer), and stopped for good on `dispose`.
+
 ### Options
 
 | Option                          | Default            | Notes                                                                 |
 | ------------------------------- | ------------------ | --------------------------------------------------------------------- |
 | `meta.modelsInfoUrl`            | _(required)_       | Absolute URL or path resolved against `options.baseURL` (see above). |
-| `meta.modelsInfoTtlSeconds`     | `86400` (24h)      | Cache TTL.                                                            |
+| `meta.modelsInfoTtlSeconds`     | `86400` (24h)      | Cache TTL — also the background refresh interval, see [Periodic refresh](#periodic-refresh). |
 | `meta.modelsInfoTimeoutMs`      | `5000`             | Per-fetch HTTP timeout.                                               |
 | `meta.modelsInfoHeaders`        | _(none)_           | Extra request headers. Override `options.headers` on conflict. Included in the cache key, so a tenant switch busts the cache. |
 | `meta.modelsInfoOverwrite`      | _(none)_           | Array of field names (`name`, `attachment`, `reasoning`, `temperature`, `tool_call`, `cost`, `limit`, `modalities`) that the endpoint is allowed to overwrite even when already set. Opts those fields out of upstream-wins — see [Forcing endpoint values to win](#forcing-endpoint-values-to-win). Unknown names are ignored. |

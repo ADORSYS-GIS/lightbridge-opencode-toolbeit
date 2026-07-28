@@ -3,6 +3,7 @@ import { parseMetaOptions } from "./config.js";
 import { fetchOpenRouterModels } from "./fetcher.js";
 import type { Logger } from "./logging.js";
 import { isTextOnlyModality, mapOpenRouterEntry, mergeIntoModel } from "./mapping.js";
+import { type SchedulerHandle, startScheduler } from "./scheduler.js";
 import type { CachedModelsRecord, MetaProviderOptions, OpenRouterModel } from "./types.js";
 
 export type ProviderOptions = Record<string, unknown> | undefined;
@@ -45,6 +46,50 @@ export async function enrichConfig(input: EnrichConfigInput, deps: EnrichDeps): 
       enrichProvider(providerId, providerConfig, deps)
     )
   );
+}
+
+/**
+ * Start one background refresh scheduler per opted-in provider, keeping the
+ * on-disk cache warm at `meta.modelsInfoTtlSeconds` cadence (the same knob
+ * that already governs cache freshness — no separate interval to configure).
+ *
+ * `config` only runs at plugin load and on rare config-signature changes
+ * (see docs/models-info.md#periodic-refresh), so a long-lived OpenCode
+ * process would otherwise keep serving whatever the catalog looked like at
+ * boot until it happens to restart. This closes that gap for the *next*
+ * `config` run — it cannot push a live update into an already-open session,
+ * since a config hook has no way to hot-patch a running one. Callers own the
+ * returned handles' lifecycle: stop them when the config that produced them
+ * is superseded (a rebuilt `config` hook) or the plugin is disposed.
+ */
+export function startCacheRefreshSchedulers(
+  input: EnrichConfigInput,
+  deps: EnrichDeps
+): SchedulerHandle[] {
+  const providers = input.provider;
+  if (!providers) {
+    return [];
+  }
+
+  const handles: SchedulerHandle[] = [];
+  for (const [providerId, providerConfig] of Object.entries(providers)) {
+    const opts = parseMetaOptions(providerConfig?.options);
+    if (!opts) {
+      continue;
+    }
+    const providerHeaders = asHeaderMap(providerConfig?.options?.headers);
+    const intervalMs = opts.modelsInfoTtlSeconds * 1000;
+    deps.logger.trace("models_info_refresh_scheduler_started", { providerId, intervalMs });
+    handles.push(
+      startScheduler({
+        intervalMs,
+        logger: deps.logger,
+        taskName: `models-info-refresh:${providerId}`,
+        run: () => refreshProviderCache(providerId, opts, providerHeaders, deps)
+      })
+    );
+  }
+  return handles;
 }
 
 async function enrichProvider(
@@ -102,61 +147,15 @@ async function enrichProvider(
     });
 
     const totalModels = Object.keys(models).length;
-    let enrichedCount = 0;
-    let hiddenCount = 0;
+    const tally = { enriched: 0, hidden: 0 };
+    const reconcileCtx: ReconcileContext = { providerId, models, byId, opts, overwrite, deps };
     for (const [modelId, modelConfig] of Object.entries(models)) {
-      const declaredId = typeof modelConfig.id === "string" ? modelConfig.id : undefined;
-      const matchById = byId.has(modelId);
-      const match = byId.get(modelId) ?? (declaredId ? byId.get(declaredId) : undefined);
-      if (!match) {
-        // With modelsInfoHideTextOnly on, the catalog is authoritative for
-        // membership too: a model discovery/config produced that the catalog
-        // doesn't even mention is dropped, not just left un-enriched.
-        if (opts.modelsInfoHideTextOnly) {
-          delete models[modelId];
-          hiddenCount += 1;
-          deps.logger.debug("models_info_model_hidden_unmatched", {
-            providerId,
-            modelId,
-            declaredId
-          });
-        } else {
-          deps.logger.trace("models_info_model_unmatched", { providerId, modelId, declaredId });
-        }
-        continue;
+      const outcome = reconcileModel(modelId, modelConfig, reconcileCtx);
+      if (outcome !== "skipped") {
+        tally[outcome] += 1;
       }
-      deps.logger.trace("models_info_model_matched", {
-        providerId,
-        modelId,
-        matchedBy: matchById ? "id" : "declaredId"
-      });
-      const derived = mapOpenRouterEntry(match, overwrite);
-
-      // A matched-but-text-only model is dropped the same way — before the
-      // merge, since there's no point enriching an entry we're about to
-      // delete from the provider's `models` map.
-      if (opts.modelsInfoHideTextOnly && isTextOnlyModality(derived.modalities)) {
-        delete models[modelId];
-        hiddenCount += 1;
-        deps.logger.debug("models_info_model_hidden_text_only", { providerId, modelId });
-        continue;
-      }
-
-      const derivedFields = Object.keys(derived);
-      const appliedFields = derivedFields.filter(
-        (f) => modelConfig[f] === undefined || overwrite?.has(f)
-      );
-      const skippedFields = derivedFields.filter((f) => !appliedFields.includes(f));
-      deps.logger.trace("models_info_model_merge", {
-        providerId,
-        modelId,
-        derivedFields,
-        appliedFields,
-        skippedFields
-      });
-      mergeIntoModel(modelConfig, derived, overwrite);
-      enrichedCount += 1;
     }
+    const { enriched: enrichedCount, hidden: hiddenCount } = tally;
 
     deps.logger.trace("models_info_provider_done", {
       providerId,
@@ -179,6 +178,73 @@ async function enrichProvider(
       error: error instanceof Error ? error.message : String(error)
     });
   }
+}
+
+interface ReconcileContext {
+  providerId: string;
+  models: Record<string, Record<string, unknown>>;
+  byId: Map<string, OpenRouterModel>;
+  opts: MetaProviderOptions;
+  overwrite: ReadonlySet<string> | undefined;
+  deps: EnrichDeps;
+}
+
+type ReconcileOutcome = "enriched" | "hidden" | "skipped";
+
+/**
+ * Decide one model's fate against the catalog and apply it in place —
+ * merge, delete, or leave untouched — returning what happened for the
+ * caller's tally. `modelsInfoHideTextOnly` governs both deletion paths: a
+ * model absent from the catalog entirely, and a matched model the catalog
+ * reports as text-in/text-out only.
+ */
+function reconcileModel(
+  modelId: string,
+  modelConfig: Record<string, unknown>,
+  ctx: ReconcileContext
+): ReconcileOutcome {
+  const { providerId, models, byId, opts, overwrite, deps } = ctx;
+  const declaredId = typeof modelConfig.id === "string" ? modelConfig.id : undefined;
+  const matchById = byId.has(modelId);
+  const match = byId.get(modelId) ?? (declaredId ? byId.get(declaredId) : undefined);
+
+  if (!match) {
+    if (!opts.modelsInfoHideTextOnly) {
+      deps.logger.trace("models_info_model_unmatched", { providerId, modelId, declaredId });
+      return "skipped";
+    }
+    delete models[modelId];
+    deps.logger.debug("models_info_model_hidden_unmatched", { providerId, modelId, declaredId });
+    return "hidden";
+  }
+
+  deps.logger.trace("models_info_model_matched", {
+    providerId,
+    modelId,
+    matchedBy: matchById ? "id" : "declaredId"
+  });
+  const derived = mapOpenRouterEntry(match, overwrite);
+
+  if (opts.modelsInfoHideTextOnly && isTextOnlyModality(derived.modalities)) {
+    delete models[modelId];
+    deps.logger.debug("models_info_model_hidden_text_only", { providerId, modelId });
+    return "hidden";
+  }
+
+  const derivedFields = Object.keys(derived);
+  const appliedFields = derivedFields.filter(
+    (f) => modelConfig[f] === undefined || overwrite?.has(f)
+  );
+  const skippedFields = derivedFields.filter((f) => !appliedFields.includes(f));
+  deps.logger.trace("models_info_model_merge", {
+    providerId,
+    modelId,
+    derivedFields,
+    appliedFields,
+    skippedFields
+  });
+  mergeIntoModel(modelConfig, derived, overwrite);
+  return "enriched";
 }
 
 async function loadRecord(
@@ -209,6 +275,39 @@ async function loadRecord(
     return cached;
   }
 
+  return fetchAndCache(providerId, opts, providerHeaders, deps, key, cached, now);
+}
+
+/**
+ * Unconditionally revalidates a provider's catalog against the network
+ * (still honoring the `ETag`, so an unchanged catalog is a cheap `304`) and
+ * writes the result back to the cache — regardless of whether the current
+ * entry is still within its TTL. This is the periodic-refresh path (see
+ * {@link startCacheRefreshSchedulers}): `loadRecord`'s TTL fast-path exists
+ * to avoid a network call from the `config` hook on every launch, but a
+ * background scheduler's entire point is to go check anyway.
+ */
+async function refreshProviderCache(
+  providerId: string,
+  opts: MetaProviderOptions,
+  providerHeaders: Record<string, string> | undefined,
+  deps: EnrichDeps
+): Promise<void> {
+  const key = cacheKey(providerId, opts.modelsInfoUrl, opts.modelsInfoHeaders);
+  const now = deps.now ? deps.now() : Date.now();
+  const cached = await deps.cache.get(key);
+  await fetchAndCache(providerId, opts, providerHeaders, deps, key, cached, now);
+}
+
+async function fetchAndCache(
+  providerId: string,
+  opts: MetaProviderOptions,
+  providerHeaders: Record<string, string> | undefined,
+  deps: EnrichDeps,
+  key: string,
+  cached: CachedModelsRecord | undefined,
+  now: number
+): Promise<CachedModelsRecord | undefined> {
   const headers = buildFetchHeaders(opts, providerHeaders);
   deps.logger.trace("models_info_fetch_start", {
     providerId,
