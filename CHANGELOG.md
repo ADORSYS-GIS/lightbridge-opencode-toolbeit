@@ -6,12 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All eleven workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`). PR references link to the change.
 
-## [0.9.0] — 2026-07-28
+## [0.10.0] — 2026-07-28
 
 ### Added
 
 - **models-info:** A new opt-in `meta.modelsInfoHideTextOnly` provider option. When `true`, the `modelsInfoUrl` catalog becomes authoritative for which models exist, not just their metadata: a model is deleted from `provider.models` outright (instead of being enriched) if the catalog reports it as text-in/text-out only, **or** if the catalog has no entry for it at all — letting the richer metadata endpoint take total precedence over whatever populated `provider.models` first (hand-written config, or `@vymalo/opencode-oauth2`'s own `/v1/models` discovery). Off by default; the text-only check only fires when the catalog's `architecture.input_modalities` / `.output_modalities` are actually present, and the flag never adds models the catalog knows about but discovery/config never listed — it only prunes existing entries. See [`docs/models-info.md`](docs/models-info.md#hiding-text-only-models--catalog-authoritative-membership).
 - **models-info:** A background scheduler now keeps every opted-in provider's catalog warm on the same `meta.modelsInfoTtlSeconds` cadence that already governs cache freshness (default once a day, no separate interval to configure) — closing the gap where a long-lived OpenCode process (a desktop window, an embedded server) would otherwise only ever see the catalog as it looked at boot, since the `config` hook doesn't rerun on a timer. It's a cache-warming mechanism for the *next* `config` run, not a live update into an already-open session — no such channel exists in OpenCode's plugin API. Backs off on failure, is stopped/restarted whenever `config` reruns (no leaked duplicate timers), stopped on `dispose`, and its own timer is `unref()`'d so it never keeps a short-lived CLI invocation alive by itself. See [`docs/models-info.md`](docs/models-info.md#periodic-refresh).
+
+### Fixed
+
+- **all plugins:** Pinned the transitive dependency `fast-uri` (pulled in via `@modelcontextprotocol/sdk` → `ajv`, a dependency of `browser-mcp` / `devtools-mcp`) to `^3.1.4` via a `pnpm-workspace.yaml` override, clearing two high-severity host-confusion advisories ([GHSA-v2hh-gcrm-f6hx](https://github.com/advisories/GHSA-v2hh-gcrm-f6hx), [GHSA-4c8g-83qw-93j6](https://github.com/advisories/GHSA-4c8g-83qw-93j6)) that were failing `publish.yml`'s `pnpm audit --audit-level=high` gate.
+
+## [0.9.0] — 2026-06-29
+
+### Added
+
 - **devtools / devtools-mcp:** A new pair of packages — `@vymalo/opencode-devtools` (OpenCode plugin) and `@vymalo/opencode-devtools-mcp` (MCP stdio server) — giving the model a belt of everyday, deterministic, local developer utilities, gated into named **tool groups**. Five groups are on by default (`math`: arbitrary-precision eval, unit & base conversion, stats; `codec`: base64/hex/url, JWT decode, gzip; `crypto`: hash/hmac, uuid v4/v7, ulid, random bytes, keypairs; `datetime`: parse/format/diff, timezone conversion, cron explain + next-runs; `convert`: JSON/YAML/TOML/CSV interconversion + JSONPath), and an **opt-in** `http` group (request + GraphQL) guarded against SSRF (loopback/private/link-local hosts are blocked unless `http.allowPrivateNetwork` is set). No bridge, no auth — pure in-process compute over an injected clock / randomness / fetch. The tool surface is shared with the MCP server via `./lib`, mirroring the browser plugin. The build-vs-adopt rationale (why these gaps, why memory/mobile/db are *adopted* instead) is in [`plans/devtools.md`](plans/devtools.md) and [`docs/devtools.md`](docs/devtools.md).
 
 ### Documentation

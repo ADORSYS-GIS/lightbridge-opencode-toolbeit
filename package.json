@@ -1,6 +1,6 @@
 {
   "name": "opencode-oauth2-workspace",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "description": "OpenCode Toolbelt — the @vymalo plugin suite for OpenCode: OAuth2/OIDC auth, model-metadata enrichment, rate-limit awareness, and browser automation.",
   "packageManager": "pnpm@11.3.0",
