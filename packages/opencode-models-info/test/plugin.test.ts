@@ -309,6 +309,134 @@ describe("enrichConfig", () => {
     expect(config.provider?.custom.models?.["model-unknown"]).toBeDefined();
   });
 
+  it("hides a model the catalog flags internal when modelsInfoHideInternal is set", async () => {
+    const internalEntry: OpenRouterModel = {
+      id: "model-internal",
+      internal: true,
+      architecture: { input_modalities: ["text", "image"], output_modalities: ["text"] }
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: [openRouterEntry, internalEntry] }), {
+        status: 200
+      })
+    );
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideInternal: true }
+      },
+      models: { "model-a": {}, "model-internal": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(getModel(config, "custom", "model-a").limit).toEqual({ context: 128_000, output: 4096 });
+    expect(config.provider?.custom.models?.["model-internal"]).toBeUndefined();
+  });
+
+  it("does not hide an internal model when modelsInfoHideInternal is not set", async () => {
+    const internalEntry: OpenRouterModel = { id: "model-internal", internal: true };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [internalEntry] }), { status: 200 }));
+    const config = withProvider("custom", {
+      options: { baseURL: "https://x.test/v1", meta: { modelsInfoUrl: "models/info" } },
+      models: { "model-internal": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(config.provider?.custom.models?.["model-internal"]).toBeDefined();
+  });
+
+  it("does not hide a model when hideInternal is set but the catalog doesn't say internal", async () => {
+    // `internal` absent entirely → unknown, not "not internal" — must not
+    // hide on a guess, same rule as the text-only/capability flags.
+    const unknownEntry: OpenRouterModel = { id: "model-unknown-internal" };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [unknownEntry] }), { status: 200 }));
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideInternal: true }
+      },
+      models: { "model-unknown-internal": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(config.provider?.custom.models?.["model-unknown-internal"]).toBeDefined();
+  });
+
+  it("keeps a text-only external model when only modelsInfoHideInternal is set (the bug this option fixes)", async () => {
+    // This is the exact false-positive modelsInfoHideTextOnly caused: a
+    // legitimate, externally-usable text-only model must not be hidden just
+    // because it lacks vision input — hideInternal only reacts to `internal`.
+    const textOnlyExternal: OpenRouterModel = {
+      id: "glm-4.7-flash",
+      architecture: { input_modalities: ["text"], output_modalities: ["text"] }
+    };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [textOnlyExternal] }), { status: 200 })
+      );
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideInternal: true }
+      },
+      models: { "glm-4.7-flash": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(config.provider?.custom.models?.["glm-4.7-flash"]).toBeDefined();
+  });
+
+  it("does not hide an unmatched model when only modelsInfoHideInternal is set", async () => {
+    // The unmatched-model deletion path stays governed solely by
+    // modelsInfoHideTextOnly — an unknown model's status is unknown, not
+    // "internal", so modelsInfoHideInternal alone must not delete it.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [openRouterEntry] }), { status: 200 })
+      );
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideInternal: true }
+      },
+      models: { "not-in-catalog": { name: "Untouched" } }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(getModel(config, "custom", "not-in-catalog").name).toBe("Untouched");
+  });
+
   it("does not refetch when a non-expired cache entry exists", async () => {
     const seed = new Map<string, CachedModelsRecord>();
     const fetchImpl = vi.fn();

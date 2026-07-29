@@ -196,7 +196,14 @@ type ReconcileOutcome = "enriched" | "hidden" | "skipped";
  * merge, delete, or leave untouched — returning what happened for the
  * caller's tally. `modelsInfoHideTextOnly` governs both deletion paths: a
  * model absent from the catalog entirely, and a matched model the catalog
- * reports as text-in/text-out only.
+ * reports as text-in/text-out only. `modelsInfoHideInternal` is a separate,
+ * independent deletion path for a matched model the catalog flags
+ * `internal: true` — modality and internal/restricted status are unrelated
+ * signals, and conflating them (routing "hide internal" through
+ * `modelsInfoHideTextOnly`) hides legitimate text-only external models. It
+ * does NOT extend the unmatched-model path — an unmatched model's status is
+ * unknown, not "internal", so that stays governed solely by
+ * `modelsInfoHideTextOnly`.
  */
 function reconcileModel(
   modelId: string,
@@ -223,6 +230,13 @@ function reconcileModel(
     modelId,
     matchedBy: matchById ? "id" : "declaredId"
   });
+
+  if (opts.modelsInfoHideInternal && match.internal === true) {
+    delete models[modelId];
+    deps.logger.debug("models_info_model_hidden_internal", { providerId, modelId });
+    return "hidden";
+  }
+
   const derived = mapOpenRouterEntry(match, overwrite);
 
   if (opts.modelsInfoHideTextOnly && isTextOnlyModality(derived.modalities)) {
