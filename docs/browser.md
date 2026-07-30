@@ -501,7 +501,7 @@ it to test with `pnpm --filter @vymalo/opencode-browser-extension submit:chrome 
 | --- | --- | --- |
 | Chrome | `CHROME_EXTENSION_ID` | The item's ID from the dashboard. |
 | Chrome | `CHROME_PUBLISHER_ID` | In the dashboard URL after selecting the publisher: `chrome.google.com/webstore/devconsole/<publisher-id>`. |
-| Chrome | `CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL` / `CHROME_SERVICE_ACCOUNT_PRIVATE_KEY` | A Google Cloud service account granted access under that publisher in the Developer Dashboard, per [Google's service-account guide](https://developer.chrome.com/docs/webstore/service-accounts) — use the `client_email`/`private_key` fields from its JSON key. Keep the private key's `\n` as literal backslash-n characters, not real newlines. |
+| Chrome | `CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL` / `CHROME_SERVICE_ACCOUNT_PRIVATE_KEY` | A Google Cloud service account granted access under that publisher in the Developer Dashboard, per [Google's service-account guide](https://developer.chrome.com/docs/webstore/service-accounts) — use the `client_email`/`private_key` fields from its JSON key. See the ⚠️ note below on the private key's line breaks — the GitHub secret and the local `.env.submit` file need **different** forms. |
 | Firefox | `FIREFOX_EXTENSION_ID` | The add-on UUID / `gecko.id`. |
 | Firefox | `FIREFOX_JWT_ISSUER` / `FIREFOX_JWT_SECRET` | AMO API credentials from your [AMO API keys](https://addons.mozilla.org/developers/addon/api/key/). |
 
@@ -510,6 +510,26 @@ API v1.1 (client ID/secret/refresh-token OAuth) is deprecated and [shuts down 20
 direct JWT-bearer exchange (`publish-browser-extension`'s `ChromeWebStoreV2` mints its own JWT
 from the private key and trades it for an access token at `oauth2.googleapis.com/token`) — no
 interactive consent screen, no refresh token to expire or regenerate.
+
+> ⚠️ **`CHROME_SERVICE_ACCOUNT_PRIVATE_KEY` needs REAL newlines in the GitHub secret, not
+> escaped `\n`.** `publish-browser-extension` passes the value straight to Node's
+> `crypto.createSign().sign()` with zero transformation (`init-B7pE83dc.mjs`) — it never
+> un-escapes `\n`. The GitHub Actions `env:` mapping (`${{ secrets.CHROME_SERVICE_ACCOUNT_PRIVATE_KEY }}`)
+> passes the secret's stored bytes verbatim, so if the secret literally contains the two
+> characters `\` `n` instead of a line break, PEM parsing fails with
+> `error:1E08010C:DECODER routines::unsupported`. Set it with the key's real newlines intact:
+>
+> ```bash
+> python3 -c "import json; print(json.load(open('/path/to/sa-key.json'))['private_key'], end='')" \
+>   | gh secret set CHROME_SERVICE_ACCOUNT_PRIVATE_KEY --repo <org>/<repo>
+> ```
+>
+> (`json.load` already un-escapes `\n` into real newlines when parsing the JSON, so this pipes
+> the correctly-formatted multi-line PEM straight into the secret.) This is the **opposite** of
+> the local `.env.submit` file below, where the value goes through the `dotenv` package, which
+> *does* interpret `\n` inside a double-quoted value as a line break — so `.env.submit` wants
+> the literal `\n` form, and the GitHub secret wants real line breaks. Two different consumers,
+> two different rules for the same key material.
 
 ### Triggering & validating
 
