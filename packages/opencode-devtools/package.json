@@ -4,14 +4,14 @@
   "description": "OpenCode plugin of everyday developer utilities the model can call locally: math (precise arithmetic, unit & base conversion, stats), codec (base64/hex/url, JWT decode, gzip), crypto (hash/hmac, uuid/ulid, random, keypairs), datetime (parse/format/diff, timezones, cron explain), convert (JSON/YAML/TOML/CSV + JSONPath), and an opt-in http client. Deterministic, zero-auth, no server — tools gated into named groups.",
   "license": "MIT",
   "author": "vymalo contributors",
-  "homepage": "https://github.com/vymalo/opencode-oauth2#readme",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vymalo/opencode-oauth2.git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
     "directory": "packages/opencode-devtools"
   },
   "bugs": {
-    "url": "https://github.com/vymalo/opencode-oauth2/issues"
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
   },
   "keywords": [
     "opencode",

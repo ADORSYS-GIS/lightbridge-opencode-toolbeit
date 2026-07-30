@@ -4,14 +4,14 @@
   "description": "OpenCode plugin that makes OpenAI-compatible providers rate-limit aware: it reads Envoy Gateway / IETF draft-03 rate-limit response headers (x-ratelimit-limit/remaining/reset), proactively throttles requests when the quota is exhausted, and backs off and retries on HTTP 429.",
   "license": "MIT",
   "author": "vymalo contributors",
-  "homepage": "https://github.com/vymalo/opencode-oauth2#readme",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vymalo/opencode-oauth2.git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
     "directory": "packages/opencode-ratelimit"
   },
   "bugs": {
-    "url": "https://github.com/vymalo/opencode-oauth2/issues"
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
   },
   "keywords": [
     "opencode",
