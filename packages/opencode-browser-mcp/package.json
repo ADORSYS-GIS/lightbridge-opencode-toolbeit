@@ -4,14 +4,14 @@
   "description": "MCP server for @vymalo/opencode-browser — exposes the browser_* tools (open, click, type, scroll, screenshot, snapshot, …) over the Model Context Protocol so any MCP client (Claude Code, Cursor, Cline, …) can drive the companion browser extension. Hosts the same localhost bridge; screenshots are returned inline as image content.",
   "license": "MIT",
   "author": "vymalo contributors",
-  "homepage": "https://github.com/vymalo/opencode-oauth2#readme",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vymalo/opencode-oauth2.git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
     "directory": "packages/opencode-browser-mcp"
   },
   "bugs": {
-    "url": "https://github.com/vymalo/opencode-oauth2/issues"
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
   },
   "keywords": [
     "mcp",

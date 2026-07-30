@@ -5,14 +5,14 @@
   "description": "Personal OpenCode plugin that indexes a repository into an embedded DuckDB store and exposes code_* tools (symbol, callers, callees, references, blast_radius) backed by a tree-sitter symbol graph. Content-addressed by git blob and scoped per branch, so branch/worktree switches re-index only the delta.",
   "license": "MIT",
   "author": "vymalo contributors",
-  "homepage": "https://github.com/vymalo/opencode-oauth2#readme",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vymalo/opencode-oauth2.git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
     "directory": "packages/opencode-code-index"
   },
   "bugs": {
-    "url": "https://github.com/vymalo/opencode-oauth2/issues"
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
   },
   "keywords": [
     "opencode",

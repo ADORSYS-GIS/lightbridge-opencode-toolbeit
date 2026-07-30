@@ -4,14 +4,14 @@
   "description": "OpenCode plugin for OAuth2/OIDC-secured, OpenAI-compatible model providers with periodic model sync.",
   "license": "MIT",
   "author": "vymalo contributors",
-  "homepage": "https://github.com/vymalo/opencode-oauth2#readme",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vymalo/opencode-oauth2.git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
     "directory": "packages/opencode-oauth2"
   },
   "bugs": {
-    "url": "https://github.com/vymalo/opencode-oauth2/issues"
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
   },
   "keywords": [
     "opencode",

@@ -4,14 +4,14 @@
   "description": "MCP server for @vymalo/opencode-devtools — exposes the same local developer utilities (math, codec, crypto, datetime, convert, http) over the Model Context Protocol so any MCP client (Claude Code, Cursor, Cline, …) can call them. No bridge, no auth — pure deterministic compute.",
   "license": "MIT",
   "author": "vymalo contributors",
-  "homepage": "https://github.com/vymalo/opencode-oauth2#readme",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vymalo/opencode-oauth2.git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
     "directory": "packages/opencode-devtools-mcp"
   },
   "bugs": {
-    "url": "https://github.com/vymalo/opencode-oauth2/issues"
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
   },
   "keywords": [
     "mcp",
