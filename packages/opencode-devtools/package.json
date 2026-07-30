@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-devtools",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "OpenCode plugin of everyday developer utilities the model can call locally: math (precise arithmetic, unit & base conversion, stats), codec (base64/hex/url, JWT decode, gzip), crypto (hash/hmac, uuid/ulid, random, keypairs), datetime (parse/format/diff, timezones, cron explain), convert (JSON/YAML/TOML/CSV + JSONPath), and an opt-in http client. Deterministic, zero-auth, no server — tools gated into named groups.",
   "license": "MIT",
   "author": "vymalo contributors",
