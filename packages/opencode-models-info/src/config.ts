@@ -120,6 +120,7 @@ export function parseMetaOptions(
     modelsInfoHeaders: asStringMap(meta.modelsInfoHeaders),
     modelsInfoOverwrite: asOverwriteList(meta.modelsInfoOverwrite),
     modelsInfoHideTextOnly: asBoolean(meta.modelsInfoHideTextOnly),
+    modelsInfoHideInternal: asBoolean(meta.modelsInfoHideInternal),
     modelsInfoFormat: "openrouter"
   };
 }

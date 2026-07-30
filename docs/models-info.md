@@ -63,6 +63,20 @@ With the flag on, a model's entry is **deleted** from `provider.models` (not jus
 
 Both are "known before we assert" — same rule as the capability flags in [Overriding upstream-wins](#overriding-upstream-wins): a matched model the catalog gives no modality data for is left alone rather than hidden on a guess, and the flag never *invents* a model the catalog knows about but discovery/config never listed — it only prunes what's already in `provider.models`. It's a hard delete: a hidden model becomes unselectable, same as if it were never in `models` to begin with. See the [package README](../packages/opencode-models-info/README.md#hiding-text-only-models) for the full example.
 
+## Hiding internal models
+
+`meta.modelsInfoHideInternal: true` deletes a matched model from `provider.models` when the catalog reports `internal: true` for it — a non-standard `OpenRouterModel` field this plugin reads but never derives or infers; the catalog has to say so explicitly.
+
+This is a **separate, independent** flag from `modelsInfoHideTextOnly`. They exist because modality (does a model accept images?) and access scope (is a model internal-only?) are unrelated signals, and an earlier adopter briefly used `modelsInfoHideTextOnly` as a stand-in for "hide internal models" because text-only happened to correlate with internal in their catalog at the time. That correlation broke as soon as a legitimate text-only *external* model was added — it got hidden for lacking vision input, nothing to do with being internal. `modelsInfoHideInternal` reacts only to the `internal` field, so:
+
+- A text-only external model (`internal` absent or `false`) is never hidden by this flag, regardless of modality.
+- A multimodal internal model (`internal: true`) is still hidden by this flag, regardless of modality.
+- The two flags compose freely — set either, both, or neither.
+
+**Does not extend the unmatched-model deletion path.** A model your discovery/config lists that the catalog has no entry for at all is still governed solely by `modelsInfoHideTextOnly` (see above) — an unmatched model's status is unknown, not "internal," so `modelsInfoHideInternal` alone leaves it in place. If you want catalog-authoritative membership (unmatched ⇒ hidden) *and* internal-only filtering, set both flags.
+
+Same "known before we assert" rule as everywhere else: a matched model the catalog gives no `internal` value for is left alone, never treated as `false`.
+
 ## Auth composition
 
 The fetch sends the union of the provider's `options.headers` and the meta-specific `meta.modelsInfoHeaders` (meta wins on conflict). That single rule covers the three common setups:
@@ -135,6 +149,7 @@ All structured, `snake_case`, emitted through both the JSON console and OpenCode
 | `models_info_enriched` | info | A provider's models were enriched (`enrichedCount` / `hiddenCount` / `totalModels` / `sourceModels`). |
 | `models_info_model_hidden_text_only` | debug | A model was deleted from `provider.models` because `meta.modelsInfoHideTextOnly` is set and the catalog reported it as text-only. |
 | `models_info_model_hidden_unmatched` | debug | A model was deleted from `provider.models` because `meta.modelsInfoHideTextOnly` is set and the catalog has no entry for it at all. |
+| `models_info_model_hidden_internal` | debug | A model was deleted from `provider.models` because `meta.modelsInfoHideInternal` is set and the catalog reported `internal: true` for it. |
 | `models_info_fetched` | info | A live fetch succeeded and the cache was written. |
 | `models_info_cache_hit` | debug | Served from a fresh cache entry; no network. |
 | `models_info_not_modified` | debug | `304` revalidation; cached models reused. |

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All eleven workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`). PR references link to the change.
 
+## [Unreleased]
+
+### Added
+
+- **models-info:** A new opt-in `meta.modelsInfoHideInternal` provider option, independent of `meta.modelsInfoHideTextOnly`. When `true`, deletes a matched model from `provider.models` if the catalog reports a non-standard `internal: true` field for it. `modelsInfoHideTextOnly` was being used by some adopters as a stand-in for "hide internal models," but it hides based on **modality**, not access scope — a legitimate text-only *external* model gets hidden right along with genuinely internal ones, and a multimodal internal model sails through unhidden. `modelsInfoHideInternal` reacts only to `internal`, composes freely with `modelsInfoHideTextOnly`, and does not extend the unmatched-model deletion path (still governed solely by `modelsInfoHideTextOnly`). Off by default; only fires when the catalog's `internal` field is actually present — a matched model the catalog gives no `internal` value for is left alone. See [`docs/models-info.md`](docs/models-info.md#hiding-internal-models).
+
 ## [0.10.0] — 2026-07-28
 
 ### Added
