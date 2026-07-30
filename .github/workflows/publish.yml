@@ -342,8 +342,10 @@ jobs:
   # later (or either alone) without the other failing the job.
   #
   # `wxt submit` wraps `publish-browser-extension`. Required repository secrets:
-  #   Chrome Web Store — CHROME_EXTENSION_ID, CHROME_CLIENT_ID,
-  #     CHROME_CLIENT_SECRET, CHROME_REFRESH_TOKEN
+  #   Chrome Web Store — CHROME_EXTENSION_ID, CHROME_PUBLISHER_ID,
+  #     CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL, CHROME_SERVICE_ACCOUNT_PRIVATE_KEY
+  #     (CWS API v2, service-account JWT auth — the v1.1 OAuth-client flow
+  #     shuts down 2026-10-15, see docs/browser.md)
   #   Firefox AMO      — FIREFOX_EXTENSION_ID, FIREFOX_JWT_ISSUER,
   #     FIREFOX_JWT_SECRET
   # See docs/browser.md → "Publishing the extension to the web stores".
@@ -357,10 +359,11 @@ jobs:
     env:
       # Mapped at job level so the per-store steps can branch on presence via
       # `if: env.* != ''` (secrets can't be referenced directly in `if:`).
+      CHROME_API_VERSION: v2
       CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
-      CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
-      CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
-      CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+      CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+      CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL: ${{ secrets.CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL }}
+      CHROME_SERVICE_ACCOUNT_PRIVATE_KEY: ${{ secrets.CHROME_SERVICE_ACCOUNT_PRIVATE_KEY }}
       FIREFOX_EXTENSION_ID: ${{ secrets.FIREFOX_EXTENSION_ID }}
       FIREFOX_JWT_ISSUER: ${{ secrets.FIREFOX_JWT_ISSUER }}
       FIREFOX_JWT_SECRET: ${{ secrets.FIREFOX_JWT_SECRET }}
@@ -394,7 +397,7 @@ jobs:
         # Gated on the FULL Chrome credential set, not just the id — a partial
         # set would otherwise reach `wxt submit` and hard-fail the upload
         # instead of being skipped.
-        if: ${{ env.CHROME_EXTENSION_ID != '' && env.CHROME_CLIENT_ID != '' && env.CHROME_CLIENT_SECRET != '' && env.CHROME_REFRESH_TOKEN != '' }}
+        if: ${{ env.CHROME_EXTENSION_ID != '' && env.CHROME_PUBLISHER_ID != '' && env.CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL != '' && env.CHROME_SERVICE_ACCOUNT_PRIVATE_KEY != '' }}
         run: pnpm --filter @vymalo/opencode-browser-extension run submit:chrome ${{ env.SUBMIT_ARGS }}
 
       - name: Submit to Firefox Add-ons (AMO)
@@ -404,9 +407,9 @@ jobs:
 
       - name: Warn on partial Chrome credentials
         # Surface the misconfiguration rather than silently skipping when an id
-        # is present but the OAuth client is incomplete.
-        if: ${{ env.CHROME_EXTENSION_ID != '' && !(env.CHROME_CLIENT_ID != '' && env.CHROME_CLIENT_SECRET != '' && env.CHROME_REFRESH_TOKEN != '') }}
-        run: echo "::warning::CHROME_EXTENSION_ID is set but CHROME_CLIENT_ID/SECRET/REFRESH_TOKEN are incomplete — Chrome submission skipped."
+        # is present but the service account is incomplete.
+        if: ${{ env.CHROME_EXTENSION_ID != '' && !(env.CHROME_PUBLISHER_ID != '' && env.CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL != '' && env.CHROME_SERVICE_ACCOUNT_PRIVATE_KEY != '') }}
+        run: echo "::warning::CHROME_EXTENSION_ID is set but CHROME_PUBLISHER_ID/SERVICE_ACCOUNT_CLIENT_EMAIL/SERVICE_ACCOUNT_PRIVATE_KEY are incomplete — Chrome submission skipped."
 
       - name: Warn on partial Firefox credentials
         if: ${{ env.FIREFOX_EXTENSION_ID != '' && !(env.FIREFOX_JWT_ISSUER != '' && env.FIREFOX_JWT_SECRET != '') }}
