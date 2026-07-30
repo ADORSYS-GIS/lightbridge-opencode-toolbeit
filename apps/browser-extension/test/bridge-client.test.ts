@@ -32,7 +32,9 @@ class FakeWS {
   }
   lastFrame(type: string) {
     for (let i = this.sent.length - 1; i >= 0; i--) {
-      const f = decodeFrame(this.sent[i]);
+      const raw = this.sent[i];
+      if (raw === undefined) continue;
+      const f = decodeFrame(raw);
       if (f?.type === type) {
         return f;
       }

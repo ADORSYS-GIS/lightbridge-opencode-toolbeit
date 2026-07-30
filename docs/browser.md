@@ -500,9 +500,16 @@ it to test with `pnpm --filter @vymalo/opencode-browser-extension submit:chrome 
 | Store | Secret | Where it comes from |
 | --- | --- | --- |
 | Chrome | `CHROME_EXTENSION_ID` | The item's ID from the dashboard. |
-| Chrome | `CHROME_CLIENT_ID` / `CHROME_CLIENT_SECRET` / `CHROME_REFRESH_TOKEN` | A Google Cloud OAuth client with the **Chrome Web Store API** enabled. See the [WXT submit guide](https://wxt.dev/guide/essentials/publishing.html#chrome-web-store). |
+| Chrome | `CHROME_PUBLISHER_ID` | In the dashboard URL after selecting the publisher: `chrome.google.com/webstore/devconsole/<publisher-id>`. |
+| Chrome | `CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL` / `CHROME_SERVICE_ACCOUNT_PRIVATE_KEY` | A Google Cloud service account granted access under that publisher in the Developer Dashboard, per [Google's service-account guide](https://developer.chrome.com/docs/webstore/service-accounts) — use the `client_email`/`private_key` fields from its JSON key. Keep the private key's `\n` as literal backslash-n characters, not real newlines. |
 | Firefox | `FIREFOX_EXTENSION_ID` | The add-on UUID / `gecko.id`. |
 | Firefox | `FIREFOX_JWT_ISSUER` / `FIREFOX_JWT_SECRET` | AMO API credentials from your [AMO API keys](https://addons.mozilla.org/developers/addon/api/key/). |
+
+`CHROME_API_VERSION` is hardcoded to `v2` in the workflow (`publish.yml`) — Chrome Web Store
+API v1.1 (client ID/secret/refresh-token OAuth) is deprecated and [shuts down 2026-10-15](https://developer.chrome.com/docs/webstore/using_webstore_api). v2's service-account auth is a
+direct JWT-bearer exchange (`publish-browser-extension`'s `ChromeWebStoreV2` mints its own JWT
+from the private key and trades it for an access token at `oauth2.googleapis.com/token`) — no
+interactive consent screen, no refresh token to expire or regenerate.
 
 ### Triggering & validating
 

@@ -59,7 +59,7 @@ describe("GroupRegistry lifecycle", () => {
     const { groups } = await registry.list();
     expect(groups).toHaveLength(1);
     expect(groups[0]).toMatchObject({ name: "g" });
-    expect(groups[0].tabs.length).toBe(1);
+    expect(groups[0]?.tabs.length).toBe(1);
   });
 
   it("closes the group's tabs and releases the executor", async () => {
