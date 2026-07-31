@@ -39,7 +39,7 @@ on:
         required: false
         type: string
         default: '22'
-      runs-on:
+      runs-on: ubuntu-latest
         description: 'Runner image. Defaults to ubuntu-latest.'
         required: false
         type: string
