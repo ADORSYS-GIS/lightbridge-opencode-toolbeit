@@ -367,8 +367,22 @@ jobs:
       FIREFOX_EXTENSION_ID: ${{ secrets.FIREFOX_EXTENSION_ID }}
       FIREFOX_JWT_ISSUER: ${{ secrets.FIREFOX_JWT_ISSUER }}
       FIREFOX_JWT_SECRET: ${{ secrets.FIREFOX_JWT_SECRET }}
-      # Empty on a real release; "-- --dry-run" on a dry-run dispatch.
-      SUBMIT_ARGS: ${{ inputs.dry_run == true && '-- --dry-run' || '' }}
+      # Empty on a real release; "--dry-run" on a dry-run dispatch. NO leading
+      # "--" here. `pnpm run <script> <flag>` already forwards an
+      # unrecognized flag straight through to the script with no separator
+      # needed (verified: `pnpm run x --dry-run` gives the script argv
+      # `['--dry-run']`). A leading "--" (the previous value here was
+      # "-- --dry-run") forwards a LITERAL "--" token all the way to
+      # `wxt submit`, which treats it as cac's end-of-flags marker -- so
+      # "--dry-run" after it is read as a raw positional argument, never
+      # parsed as the --dry-run flag, and the step proceeds to a REAL
+      # upload + REAL "submit for review". This bug was dormant since this
+      # workflow was first written: every dry-run attempt before 2026-07-31
+      # failed at Chrome credential validation first, so nothing ever
+      # reached the broken flag-parsing path -- the first time credentials
+      # actually validated, it silently did a real submission instead of a
+      # dry run.
+      SUBMIT_ARGS: ${{ inputs.dry_run == true && '--dry-run' || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
