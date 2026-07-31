@@ -24,7 +24,7 @@ jobs:
     # Runs on GitHub-hosted ubuntu-latest by default. To run on your own runners,
     # bump the pinned SHA to a release that supports the `runs-on` input and add:
     #   with:
-    #     runs-on: <your-self-hosted-runner-label>
+    runs-on: ubuntu-latest
     permissions:
       pull-requests: write
       contents: read
