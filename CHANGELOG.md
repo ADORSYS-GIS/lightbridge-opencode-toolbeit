@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All eleven workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`). PR references link to the change.
 
+## [Unreleased]
+
+### Added
+
+- **models-info:** A new opt-in `meta.modelsInfoHideUnmatched` provider option. When `true`, deletes a model from `provider.models` if the catalog has no entry matching its id at all — the membership half of `meta.modelsInfoHideTextOnly`'s behavior, without its modality filtering. A consumer that turned `modelsInfoHideTextOnly` off entirely (because it was hiding legitimate text-only external models) also silently lost catalog-authoritative membership pruning, since both deletion paths shared that one flag — clients started seeing stale/renamed/removed model ids that never got pruned. `modelsInfoHideUnmatched` reaches the same deletion path independently; `modelsInfoHideTextOnly`'s own unmatched-hiding is unchanged (documented since 0.10.0). Either flag alone is enough — setting both is redundant, not additive. See [`docs/models-info.md`](docs/models-info.md#requiring-a-catalog-entry-without-modality-filtering). (#79)
+
 ## [0.11.0] — 2026-07-30
 
 ### Added

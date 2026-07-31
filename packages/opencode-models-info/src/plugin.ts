@@ -194,16 +194,20 @@ type ReconcileOutcome = "enriched" | "hidden" | "skipped";
 /**
  * Decide one model's fate against the catalog and apply it in place —
  * merge, delete, or leave untouched — returning what happened for the
- * caller's tally. `modelsInfoHideTextOnly` governs both deletion paths: a
- * model absent from the catalog entirely, and a matched model the catalog
- * reports as text-in/text-out only. `modelsInfoHideInternal` is a separate,
- * independent deletion path for a matched model the catalog flags
- * `internal: true` — modality and internal/restricted status are unrelated
- * signals, and conflating them (routing "hide internal" through
- * `modelsInfoHideTextOnly`) hides legitimate text-only external models. It
- * does NOT extend the unmatched-model path — an unmatched model's status is
- * unknown, not "internal", so that stays governed solely by
- * `modelsInfoHideTextOnly`.
+ * caller's tally. Three independent gates:
+ *   - `modelsInfoHideTextOnly` OR `modelsInfoHideUnmatched` — a model absent
+ *     from the catalog entirely gets deleted. Either flag alone is enough;
+ *     `modelsInfoHideTextOnly` has triggered this since 0.10.0 (unchanged,
+ *     for backward compat with existing adopters) — `modelsInfoHideUnmatched`
+ *     exists for a consumer that wants catalog-authoritative *membership*
+ *     WITHOUT also pulling in modality-based hiding.
+ *   - `modelsInfoHideInternal` — a matched model the catalog flags
+ *     `internal: true` gets deleted. Independent of the above: modality and
+ *     internal/restricted status are unrelated signals, and conflating them
+ *     (routing "hide internal" through `modelsInfoHideTextOnly`) hides
+ *     legitimate text-only external models.
+ *   - `modelsInfoHideTextOnly` — a matched model the catalog reports as
+ *     text-in/text-out only gets deleted. Unchanged from 0.10.0.
  */
 function reconcileModel(
   modelId: string,
@@ -216,7 +220,7 @@ function reconcileModel(
   const match = byId.get(modelId) ?? (declaredId ? byId.get(declaredId) : undefined);
 
   if (!match) {
-    if (!opts.modelsInfoHideTextOnly) {
+    if (!opts.modelsInfoHideTextOnly && !opts.modelsInfoHideUnmatched) {
       deps.logger.trace("models_info_model_unmatched", { providerId, modelId, declaredId });
       return "skipped";
     }

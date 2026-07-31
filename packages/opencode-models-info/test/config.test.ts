@@ -29,6 +29,7 @@ describe("parseMetaOptions", () => {
       modelsInfoHeaders: undefined,
       modelsInfoHideTextOnly: false,
       modelsInfoHideInternal: false,
+      modelsInfoHideUnmatched: false,
       modelsInfoFormat: "openrouter"
     });
   });
@@ -68,6 +69,27 @@ describe("parseMetaOptions", () => {
       meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideInternal: true }
     });
     expect(both?.modelsInfoHideTextOnly).toBe(false);
+  });
+
+  it("parses modelsInfoHideUnmatched, defaulting to false for anything but a literal true, independent of the other two flags", () => {
+    expect(
+      parseMetaOptions({
+        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideUnmatched: true }
+      })?.modelsInfoHideUnmatched
+    ).toBe(true);
+    expect(
+      parseMetaOptions({
+        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideUnmatched: "true" }
+      })?.modelsInfoHideUnmatched
+    ).toBe(false);
+    expect(
+      parseMetaOptions({ meta: { modelsInfoUrl: "https://x.test/m" } })?.modelsInfoHideUnmatched
+    ).toBe(false);
+    const onlyUnmatched = parseMetaOptions({
+      meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideUnmatched: true }
+    });
+    expect(onlyUnmatched?.modelsInfoHideTextOnly).toBe(false);
+    expect(onlyUnmatched?.modelsInfoHideInternal).toBe(false);
   });
 
   it("coerces positive integers and ignores invalid numeric inputs", () => {

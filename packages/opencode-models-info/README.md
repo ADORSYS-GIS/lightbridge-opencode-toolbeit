@@ -90,6 +90,7 @@ This warms the cache for the **next** `config` run (the next launch, the next wi
 | `meta.modelsInfoOverwrite`      | _(none)_           | Array of field names (`name`, `attachment`, `reasoning`, `temperature`, `tool_call`, `cost`, `limit`, `modalities`) that the endpoint is allowed to overwrite even when already set. Opts those fields out of upstream-wins — see [Forcing endpoint values to win](#forcing-endpoint-values-to-win). Unknown names are ignored. |
 | `meta.modelsInfoHideTextOnly`   | `false`             | When `true`, makes the `modelsInfoUrl` catalog authoritative for which models are shown: drops a model from `provider.models` entirely if the catalog reports it as text-in/text-out only, **or** if the catalog doesn't mention it at all — see [Hiding text-only models](#hiding-text-only-models). |
 | `meta.modelsInfoHideInternal`   | `false`             | When `true`, drops a model from `provider.models` if the catalog reports a non-standard `internal: true` field for it. Independent of `modelsInfoHideTextOnly` — modality and internal/restricted status are unrelated signals — see [Hiding internal models](#hiding-internal-models). |
+| `meta.modelsInfoHideUnmatched`  | `false`             | When `true`, drops a model from `provider.models` if the catalog has no entry for it at all — the membership half of `modelsInfoHideTextOnly`, without its modality filtering. Either flag alone triggers the same deletion — see [Requiring a catalog entry](#requiring-a-catalog-entry). |
 
 ### Auth composition
 
@@ -174,6 +175,29 @@ This is a hard delete, not a flag — a hidden model can't be selected at all, t
 
 > **Composes with `modelsInfoOverwrite`.** Turning on `modelsInfoHideTextOnly` doesn't change how surviving models are merged — upstream-wins (or your `modelsInfoOverwrite` list) still governs individual fields. It only changes which model entries survive to be merged at all.
 
+### Requiring a catalog entry
+
+Case 2 above — dropping a model the catalog doesn't mention at all — is useful on its own, without the modality filtering that comes bundled into `modelsInfoHideTextOnly`. Set `meta.modelsInfoHideUnmatched: true` to get just that:
+
+```jsonc
+{
+  "options": {
+    "meta": {
+      "modelsInfoUrl": "models/info",
+      "modelsInfoHideUnmatched": true
+    }
+  }
+}
+```
+
+This exists because a real adopter needed catalog-authoritative *membership* — a client's `provider.models` can carry ids the catalog has since dropped (renamed, removed, access-scoped, or just stale local state a client picked up a while ago) — but `modelsInfoHideTextOnly`'s modality filtering was hiding legitimate text-only external models right along with the stale ones.
+
+- A model with no catalog entry is hidden, regardless of modality.
+- A matched text-only model is left alone by this flag on its own (it's still subject to `modelsInfoHideTextOnly`'s modality check if that flag is *also* set).
+- `modelsInfoHideTextOnly` and `modelsInfoHideUnmatched` reach the same deletion for an unmatched model — either alone is enough, setting both is redundant, not additive.
+
+Don't reach for `modelsInfoHideTextOnly` just to get this behavior if you don't also want modality filtering — that's exactly the trap `modelsInfoHideInternal` was built to avoid for the internal/access-scope axis (see below). Logs at debug (`models_info_model_hidden_unmatched`, shared with `modelsInfoHideTextOnly`'s own unmatched-hiding).
+
 ### Hiding internal models
 
 If your catalog serves both externally-usable and internal-only/restricted models — models that exist on the backend but shouldn't be selectable in OpenCode — flag them explicitly and set `meta.modelsInfoHideInternal: true`:
@@ -201,7 +225,7 @@ Your catalog entry adds a non-standard `internal: true` field:
 - `internal` absent or `false` → never hidden by this flag, regardless of modality.
 - Unknown (`internal` field absent from the catalog entry) is left alone, not treated as `false` — same "known before we assert" rule as everywhere else in this plugin.
 
-The two flags compose freely; set whichever your catalog's semantics call for, or both. Note that `modelsInfoHideInternal` does **not** extend case 2 above (dropping a model your catalog has no entry for at all) — that stays governed solely by `modelsInfoHideTextOnly`, since an unmatched model's status is unknown, not "internal." Logs at debug (`models_info_model_hidden_internal`).
+All three flags compose freely; set whichever your catalog's semantics call for. Note that `modelsInfoHideInternal` does **not** extend case 2 above (dropping a model your catalog has no entry for at all) — that's governed by `modelsInfoHideTextOnly` or `modelsInfoHideUnmatched` (see above), since an unmatched model's status is unknown, not "internal." Logs at debug (`models_info_model_hidden_internal`).
 
 ### Expected response shape (OpenRouter)
 
