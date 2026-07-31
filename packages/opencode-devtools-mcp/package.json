@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-devtools-mcp",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "MCP server for @vymalo/opencode-devtools — exposes the same local developer utilities (math, codec, crypto, datetime, convert, http) over the Model Context Protocol so any MCP client (Claude Code, Cursor, Cline, …) can call them. No bridge, no auth — pure deterministic compute.",
   "license": "MIT",
   "author": "vymalo contributors",
