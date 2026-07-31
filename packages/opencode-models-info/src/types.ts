@@ -63,6 +63,19 @@ export interface MetaProviderOptions {
    * solely by `modelsInfoHideTextOnly`.
    */
   modelsInfoHideInternal: boolean;
+  /**
+   * Deletes a model from `provider.models` when it has NO matching catalog
+   * entry at all — makes the catalog authoritative for *membership*
+   * (`provider.models` becomes the intersection of upstream discovery and
+   * the catalog), independent of modality or `internal`. `modelsInfoHideTextOnly`
+   * already triggers this same deletion (its documented behavior since
+   * 0.10.0, unchanged for backward compat) — this flag exists so a consumer
+   * can get catalog-authoritative membership WITHOUT also pulling in
+   * modality-based hiding, which has a real false-positive: a legitimate
+   * text-only external model gets hidden right along with genuinely stale
+   * ones. Either flag being true triggers the unmatched-deletion path.
+   */
+  modelsInfoHideUnmatched: boolean;
   modelsInfoFormat: "openrouter";
 }
 

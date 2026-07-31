@@ -121,6 +121,7 @@ export function parseMetaOptions(
     modelsInfoOverwrite: asOverwriteList(meta.modelsInfoOverwrite),
     modelsInfoHideTextOnly: asBoolean(meta.modelsInfoHideTextOnly),
     modelsInfoHideInternal: asBoolean(meta.modelsInfoHideInternal),
+    modelsInfoHideUnmatched: asBoolean(meta.modelsInfoHideUnmatched),
     modelsInfoFormat: "openrouter"
   };
 }

@@ -263,6 +263,57 @@ describe("enrichConfig", () => {
     expect(getModel(config, "custom", "not-in-catalog").name).toBe("Untouched");
   });
 
+  it("drops a model the catalog doesn't mention at all when modelsInfoHideUnmatched is set", async () => {
+    // Same deletion path as modelsInfoHideTextOnly's unmatched-hiding, but
+    // reachable WITHOUT also opting into modality-based hiding.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: [openRouterEntry] }), { status: 200 })
+      );
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideUnmatched: true }
+      },
+      models: { "model-a": {}, "not-in-catalog": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(getModel(config, "custom", "model-a").limit).toEqual({ context: 128_000, output: 4096 });
+    expect(config.provider?.custom.models?.["not-in-catalog"]).toBeUndefined();
+  });
+
+  it("keeps a text-only external model when only modelsInfoHideUnmatched is set (does not pull in modality hiding)", async () => {
+    const textOnlyEntry: OpenRouterModel = {
+      id: "model-text",
+      architecture: { input_modalities: ["text"], output_modalities: ["text"] }
+    };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [textOnlyEntry] }), { status: 200 }));
+    const config = withProvider("custom", {
+      options: {
+        baseURL: "https://x.test/v1",
+        meta: { modelsInfoUrl: "models/info", modelsInfoHideUnmatched: true }
+      },
+      models: { "model-text": {} }
+    });
+
+    await enrichConfig(config, {
+      cache: memoryCache(),
+      logger: silentLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    expect(config.provider?.custom.models?.["model-text"]).toBeDefined();
+  });
+
   it("keeps a text-only model when modelsInfoHideTextOnly is not set", async () => {
     const textOnlyEntry: OpenRouterModel = {
       id: "model-text",
@@ -412,9 +463,10 @@ describe("enrichConfig", () => {
   });
 
   it("does not hide an unmatched model when only modelsInfoHideInternal is set", async () => {
-    // The unmatched-model deletion path stays governed solely by
-    // modelsInfoHideTextOnly — an unknown model's status is unknown, not
-    // "internal", so modelsInfoHideInternal alone must not delete it.
+    // The unmatched-model deletion path is governed by modelsInfoHideTextOnly
+    // and modelsInfoHideUnmatched, NOT modelsInfoHideInternal — an unknown
+    // model's status is unknown, not "internal", so modelsInfoHideInternal
+    // alone must not delete it.
     const fetchImpl = vi
       .fn()
       .mockResolvedValue(
