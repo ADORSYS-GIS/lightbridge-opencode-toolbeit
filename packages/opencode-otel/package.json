@@ -1,0 +1,81 @@
+{
+  "name": "@vymalo/opencode-otel",
+  "version": "0.12.0",
+  "description": "OpenTelemetry plugin for OpenCode: exports developer interactions as OTLP traces, metrics and logs — real USD cost, all five token types (including cache read/write and reasoning), tool results, permission decisions, API errors and lines of code. Configurable from opencode.json or standard OTEL_* environment variables.",
+  "license": "MIT",
+  "author": "vymalo contributors",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
+    "directory": "packages/opencode-otel"
+  },
+  "bugs": {
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opentelemetry",
+    "otel",
+    "otlp",
+    "observability",
+    "telemetry",
+    "tracing",
+    "metrics",
+    "cost-tracking",
+    "gen-ai",
+    "llm"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./lib": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "biome lint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.15.10",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.221.0",
+    "@opentelemetry/core": "^2.10.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-proto": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-trace": "^2.10.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0"
+  },
+  "devDependencies": {
+    "vite": "^8.0.14",
+    "vitest": "^4.1.7"
+  }
+}

@@ -33,3 +33,4 @@ Each record is `NNNN-kebab-title.md`, numbered in order, and follows a light
 | [0006](0006-bridge-token-source-of-truth.md) | Bridge token: `bridge.json` as single source of truth (host-only write, reload-on-mismatch) | Accepted |
 | [0007](0007-bridge-handshake-rejection.md) | Bridge handshake rejection: explicit reject frame, slow-retry, fingerprint logging | Accepted |
 | [0008](0008-trace-log-tier.md) | A `trace` log tier, unlocked by OpenCode's `DEBUG` | Accepted |
+| [0009](0009-otel-otlp-http-not-grpc.md) | OTLP over HTTP/protobuf, not gRPC | Accepted |

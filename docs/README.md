@@ -30,6 +30,12 @@ install; come here when you need depth on a specific topic.
 | [browser.md](browser.md) | Topology, wire protocol, the 33-tool reference, executors, named groups, multi-client routing, store publishing |
 | [`../plans/multi-client-routing.md`](../plans/multi-client-routing.md) | The auto-elect broker design (multiple browsers + agents) |
 
+### `@vymalo/opencode-otel` — OpenTelemetry export
+| Page | When you need it |
+| --- | --- |
+| [otel.md](otel.md) | Config (opencode.json + `OTEL_*`) and precedence, every metric/log/span and its attributes, trace-context propagation, privacy & cardinality, backend recipes |
+| [`../plans/otel.md`](../plans/otel.md) | Design rationale, the build-vs-adopt sweep, and the OpenCode-event → OTel-signal mapping |
+
 ## Cross-cutting
 
 | Page | What it covers |

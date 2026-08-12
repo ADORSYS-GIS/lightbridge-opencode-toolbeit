@@ -19,6 +19,7 @@
   <a href="https://www.npmjs.com/package/@vymalo/opencode-browser-mcp"><img alt="@vymalo/opencode-browser-mcp" src="https://img.shields.io/npm/v/@vymalo/opencode-browser-mcp?label=browser-mcp&color=CB3837&logo=npm"></a>
   <a href="https://www.npmjs.com/package/@vymalo/opencode-devtools"><img alt="@vymalo/opencode-devtools" src="https://img.shields.io/npm/v/@vymalo/opencode-devtools?label=devtools&color=CB3837&logo=npm"></a>
   <a href="https://www.npmjs.com/package/@vymalo/opencode-devtools-mcp"><img alt="@vymalo/opencode-devtools-mcp" src="https://img.shields.io/npm/v/@vymalo/opencode-devtools-mcp?label=devtools-mcp&color=CB3837&logo=npm"></a>
+  <a href="https://www.npmjs.com/package/@vymalo/opencode-otel"><img alt="@vymalo/opencode-otel" src="https://img.shields.io/npm/v/@vymalo/opencode-otel?label=otel&color=CB3837&logo=npm"></a>
 </p>
 
 ---
@@ -38,6 +39,7 @@ The **OpenCode Toolbelt** is the set of `@vymalo/*` plugins that fill those gaps
 | **browser-mcp** | [`@vymalo/opencode-browser-mcp`](packages/opencode-browser-mcp) | The same browser tools, exposed as an **MCP stdio server** — so Claude Code, Cursor, Cline, and any other MCP client can drive the extension too. |
 | **devtools** | [`@vymalo/opencode-devtools`](packages/opencode-devtools) | A belt of everyday **local utilities** the model can call — `math` (precise eval, units, stats), `codec` (base64/hex/url, JWT decode, gzip), `crypto` (hash/hmac, uuid/ulid, keypairs), `datetime` (parse/format/diff, timezones, cron), `convert` (JSON/YAML/TOML/CSV + JSONPath), and an opt-in, SSRF-guarded `http` client. Deterministic, zero-auth, no server. |
 | **devtools-mcp** | [`@vymalo/opencode-devtools-mcp`](packages/opencode-devtools-mcp) | The same utilities, exposed as an **MCP stdio server** for any MCP client. |
+| **otel** | [`@vymalo/opencode-otel`](packages/opencode-otel) | See what your agent is actually doing and costing: **OTLP traces, metrics and logs** — real USD cost, all five token types (cache read/write included), tool results, permission decisions, API errors, lines of code. What [Claude Code](https://code.claude.com/docs/en/monitoring-usage) and [Codex](https://learn.chatgpt.com/docs/config-file/config-advanced) export, for OpenCode. |
 | 🧩 **extension** | [`apps/browser-extension`](apps/browser-extension) | The companion Chromium + Firefox extension that the browser plugin / MCP server talk to. Private — ships as a Release asset and on the Chrome Web Store / Firefox AMO. |
 
 ```mermaid
@@ -259,7 +261,7 @@ Full index: [`docs/README.md`](docs/README.md). The highlights:
 
 ## 🗂️ Workspace layout
 
-This is a [pnpm](https://pnpm.io) monorepo. Five packages publish to npm under `@vymalo`; three are private.
+This is a [pnpm](https://pnpm.io) monorepo. Eight packages publish to npm under `@vymalo`; four are private.
 
 | Package | Published as | |
 | --- | --- | --- |
@@ -268,7 +270,11 @@ This is a [pnpm](https://pnpm.io) monorepo. Five packages publish to npm under `
 | [`packages/opencode-ratelimit`](packages/opencode-ratelimit) | `@vymalo/opencode-ratelimit` | Auth-agnostic rate-limit awareness |
 | [`packages/opencode-browser`](packages/opencode-browser) | `@vymalo/opencode-browser` | Auth-agnostic browser automation + localhost bridge |
 | [`packages/opencode-browser-mcp`](packages/opencode-browser-mcp) | `@vymalo/opencode-browser-mcp` | MCP server exposing the browser tools to any MCP client |
+| [`packages/opencode-devtools`](packages/opencode-devtools) | `@vymalo/opencode-devtools` | Auth-agnostic local developer utilities |
+| [`packages/opencode-devtools-mcp`](packages/opencode-devtools-mcp) | `@vymalo/opencode-devtools-mcp` | MCP server exposing the devtools utilities |
+| [`packages/opencode-otel`](packages/opencode-otel) | `@vymalo/opencode-otel` | Auth-agnostic OpenTelemetry export (traces, metrics, logs) |
 | [`apps/browser-extension`](apps/browser-extension) | _private_ | Companion Chromium/Firefox extension |
+| [`packages/opencode-code-index`](packages/opencode-code-index) | _private_ | Experimental DuckDB + tree-sitter code index |
 | [`packages/plugin-bundle`](packages/plugin-bundle) | _private_ | Rolldown single-file distribution of oauth2 |
 
 ## 🛠️ Development

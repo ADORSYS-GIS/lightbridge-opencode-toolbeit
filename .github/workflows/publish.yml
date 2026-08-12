@@ -142,6 +142,13 @@ jobs:
             --pack-destination "$PWD/dist-tarball/devtools-mcp"
           ls -la dist-tarball/devtools-mcp/
 
+      - name: Pack otel tarball
+        run: |
+          mkdir -p dist-tarball/otel
+          pnpm --filter @vymalo/opencode-otel pack \
+            --pack-destination "$PWD/dist-tarball/otel"
+          ls -la dist-tarball/otel/
+
       - name: Verify tarball contents
         # Defense-in-depth: confirms each package is shipping its dist/, NOT
         # shipping source or tests, and that the package isn't accidentally
@@ -179,7 +186,7 @@ jobs:
             echo "OK: $tarball"
           }
 
-          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz; do
+          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz dist-tarball/otel/*.tgz; do
             verify_tarball "$tarball"
           done
 
@@ -308,6 +315,23 @@ jobs:
             exit 0
           fi
           pnpm --filter @vymalo/opencode-devtools-mcp publish \
+            --access public \
+            --no-git-checks \
+            --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Publish otel to npm (with provenance)
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          set -e
+          version=$(node -p "require('./packages/opencode-otel/package.json').version")
+          if npm view "@vymalo/opencode-otel@${version}" version >/dev/null 2>&1; then
+            echo "::notice::@vymalo/opencode-otel@${version} already on npm — skipping."
+            exit 0
+          fi
+          pnpm --filter @vymalo/opencode-otel publish \
             --access public \
             --no-git-checks \
             --provenance
