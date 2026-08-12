@@ -4,7 +4,20 @@ All notable changes to the **OpenCode Toolbelt** — the `@vymalo/*` plugin suit
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-All eleven workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`). PR references link to the change.
+All twelve workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`). PR references link to the change.
+
+## [Unreleased]
+
+### Added
+
+- **otel:** A new published plugin, `@vymalo/opencode-otel` — OpenTelemetry export of developer interactions as OTLP **traces, metrics and logs**, the OpenCode counterpart to [Claude Code's monitoring](https://code.claude.com/docs/en/monitoring-usage) and [Codex's `[otel]` block](https://learn.chatgpt.com/docs/config-file/config-advanced). Exports **real USD cost** straight from the host's `AssistantMessage.cost` (no price table to maintain), **all five token types** including `cache_read` / `cache_write` / `reasoning` (on a cached agentic session cache-read is routinely the majority of tokens, so an input+output-only dashboard measures a different quantity), tool results with durations and outcomes, permission decisions, API errors with status codes and retry attempts, lines of code by language, active time, and compactions. Configurable from **`opencode.json` or standard `OTEL_*` environment variables** — environment overrides options, so a `.well-known/opencode` document can ship an org-wide default that a developer can still redirect at a local collector. Completely inert until an endpoint or explicit exporter is configured. See [`docs/otel.md`](docs/otel.md) and [`plans/otel.md`](plans/otel.md).
+- **otel:** Session traces (`invoke_agent opencode` → `chat {model}` → `execute_tool {name}`) following the GenAI semantic conventions, with W3C `traceparent` injected into provider requests by wrapping `provider.options.fetch` — the same seam `@vymalo/opencode-ratelimit` uses, composed the same way. When two or more chats are in flight the plugin injects **nothing** rather than guessing a parent: a missing link is recoverable, a fabricated one silently corrupts the trace.
+- **otel:** No content is captured in this release — no prompts, responses, tool arguments or API bodies; log records carry shape only (lengths, counts, durations, sizes, outcomes, error classes). Resource attributes identify the machine and project, never the developer: unlike some implementations the git author email is not collected, and per-person attribution is an explicit `OTEL_RESOURCE_ATTRIBUTES` opt-in. Session id reaches metrics only behind `includeSessionId`, since it is unbounded cardinality.
+
+### Documentation
+
+- **otel:** [ADR-0009](docs/adr/0009-otel-otlp-http-not-grpc.md) records why OTLP ships over HTTP/protobuf only and gRPC is absent — OpenCode plugins run under Bun as well as Node, and `@grpc/grpc-js` is unreliable there. Same dual-runtime reasoning as [ADR-0001](docs/adr/0001-bridge-transport-ws-not-bun-serve-or-socketio.md). `OTEL_EXPORTER_OTLP_PROTOCOL` is deliberately unread rather than silently ignored.
+- **otel:** [`plans/otel.md`](plans/otel.md) records the build-vs-adopt sweep against the existing [`opencode-otel-plugin`](https://github.com/felixti/opencode-otel-plugin), which covers traces and metrics well and whose GenAI-semconv vocabulary this package deliberately reuses so both land on the same dashboards. Run one or the other, not both.
 
 ## [0.12.0] — 2026-07-31
 
