@@ -2,6 +2,7 @@ name: User Story
 description: A user need or a valuable capability, with testable acceptance criteria.
 title: "[Story]: "
 labels: ["user-story"]
+type: Story
 body:
   - type: markdown
     attributes:
