@@ -135,7 +135,7 @@ describe("createTokenSource", () => {
   });
 
   it("keeps serving a still-valid token when a later refresh fails", async () => {
-    let now = 0;
+    const now = 0;
     const { run } = runner([{ stdout: "good-token" }, { code: 1 }]);
     const source = createTokenSource({
       command: ["helper"],

@@ -20,6 +20,7 @@ All twelve workspace packages move on **one version line** and are released toge
 
 ### Documentation
 
+- **otel:** An integration test that drives a **real** `OTLPTraceExporter` against a local HTTP server, proving the async `headers` factory the credential helper depends on is actually awaited and its `Authorization` header reaches the wire — including that the factory is re-invoked per export rather than cached, which is what makes refresh work at all. The rest of the suite substitutes the exporter, so the SDK's own header consumption was previously unverified: the whole feature rode on a contract nothing exercised.
 - **otel:** A backend recipe for an OIDC-protected collector (the OpenTelemetry Collector's `oidc` extension), covering the static-header and credential-helper cases and how to verify auth with `curl` before wiring the plugin in. Notes that such collectors commonly expose HTTP only, which matches this plugin's transport — worth checking before assuming a gRPC endpoint exists, particularly behind an ingress that would need explicit h2c configuration to carry gRPC.
 
 
