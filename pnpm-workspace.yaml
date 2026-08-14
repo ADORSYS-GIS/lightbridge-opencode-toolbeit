@@ -24,6 +24,10 @@ allowBuilds:
   # spawn-sync (a transitive WXT/web-ext dep) ships a native build step we do
   # not need — the prebuilt JS works fine. Deny it.
   spawn-sync: false
+  # @swc/core's postinstall selects the right prebuilt platform binary
+  # (@swc/core-<platform>-<arch>, all published by the same swc-project org)
+  # — no compilation happens on the consumer's machine.
+  '@swc/core': true
 
 minimumReleaseAgeExclude:
   - cronstrue@3.20.0

@@ -457,7 +457,7 @@ surfaces never drift.
 
 ```sh
 # Plugin
-pnpm --filter @vymalo/opencode-browser build      # tsc → dist/
+pnpm --filter @vymalo/opencode-browser build      # SWC → dist/*.js, tsc --emitDeclarationOnly → dist/*.d.ts
 pnpm --filter @vymalo/opencode-browser test       # vitest
 
 # Extension

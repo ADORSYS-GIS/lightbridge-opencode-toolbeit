@@ -26,7 +26,7 @@ The plugins are deliberately decoupled: `opencode-models-info`, `opencode-rateli
 
 ```sh
 pnpm install                 # bootstrap workspace
-pnpm -r build                # compile all packages (tsc → dist/)
+pnpm -r build                # compile all packages (SWC → dist/*.js, tsc --emitDeclarationOnly → dist/*.d.ts; see ADR-0010)
 pnpm -r typecheck            # tsc --noEmit across packages
 pnpm -r test                 # vitest run in each package that has tests (fast, no coverage)
 pnpm coverage                # vitest run --coverage per package; FAILS below per-package thresholds
