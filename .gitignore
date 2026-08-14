@@ -14,3 +14,6 @@ apps/*/.env.submit
 
 # Local dev-harness screenshot output
 scripts/harness-shots
+
+.idea
+.roo
