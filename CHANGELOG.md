@@ -8,9 +8,21 @@ All twelve workspace packages move on **one version line** and are released toge
 
 ## [Unreleased]
 
+### Added
+
+- **otel:** OTLP export failures now reach the host log stream as `otel_export_failed` — with the signal, the HTTP status where the backend supplies one, the error message and a `consecutiveFailures` count — and recovery is reported once as `otel_export_recovered`. Previously a rejected export (an expired credential, a wrong audience, an unreachable collector) was reported only through the OTel SDK's own `diag` channel, which nothing subscribed to: telemetry stopped silently while the session looked healthy. Implemented by decorating this plugin's own exporters rather than calling `diag.setLogger`, which is process-global and would hijack the channel for the host and every other plugin.
+- **otel:** A new `tokenCommand` option (env `OPENCODE_OTEL_TOKEN_COMMAND`) for collectors behind a short-lived credential — an executable that prints a fresh access token on stdout, re-run before the current one expires. Needed because a static `Authorization` header is read once at plugin load and never refreshed, so a five-minute OIDC token goes stale and every subsequent export fails. Expiry comes from the token's own `exp` claim where it is a JWT (base64-decoded, deliberately **not** signature-verified — the plugin is not authenticating anything, it only needs to know when to ask again), minus a 30-second margin; `tokenRefreshMs` applies otherwise. Concurrent exports share one helper invocation. The token is never logged, and a failure logs the *length* of the helper's stderr rather than its contents. See [`docs/otel.md`](docs/otel.md#short-lived-credentials).
+- **otel:** Failure handling for the credential helper is deliberately asymmetric: a helper that fails while the cached token is still valid changes nothing, since that token is current rather than stale, but one that fails with no valid token left produces **no auth header at all** — so the export fails closed at the collector instead of retrying forever with a dead credential. A rejected export also drops the cached token, so the next attempt re-runs the helper rather than replaying something already refused.
+
 ### Fixed
 
 - **all plugins:** Raised the `pnpm-workspace.yaml` audit overrides to clear four high-severity advisories that were failing `publish.yml`'s `pnpm audit --audit-level=high` gate and blocking the 0.13.0 release. `fast-uri` was already pinned to `^3.1.4` for two earlier host-confusion advisories, but a third ([GHSA-7p8r-x3mc-p8w7](https://github.com/advisories/GHSA-7p8r-x3mc-p8w7), backslash authority introducer) has a floor of 3.1.5 — the old pin satisfied the advisories it was written for and silently resolved below the new one. Also pinned `ip-address` ≥10.3.1 ([GHSA-mwp4-54f8-5fhr](https://github.com/advisories/GHSA-mwp4-54f8-5fhr), SSRF via leading-zero octets; transitive through `@modelcontextprotocol/sdk` → `express-rate-limit`), and `postcss` ≥8.5.18 / `nanoid` ≥3.3.18 from the vite + WXT toolchain — devDependencies only, but the gate does not distinguish. Each override now carries its advisory ids so a future reader can tell whether the entry is still earning its place. `vite` moved 8.0.14 → 8.2.1 within its existing `^8` range.
+
+### Documentation
+
+- **otel:** An integration test that drives a **real** `OTLPTraceExporter` against a local HTTP server, proving the async `headers` factory the credential helper depends on is actually awaited and its `Authorization` header reaches the wire — including that the factory is re-invoked per export rather than cached, which is what makes refresh work at all. The rest of the suite substitutes the exporter, so the SDK's own header consumption was previously unverified: the whole feature rode on a contract nothing exercised.
+- **otel:** A backend recipe for an OIDC-protected collector (the OpenTelemetry Collector's `oidc` extension), covering the static-header and credential-helper cases and how to verify auth with `curl` before wiring the plugin in. Notes that such collectors commonly expose HTTP only, which matches this plugin's transport — worth checking before assuming a gRPC endpoint exists, particularly behind an ingress that would need explicit h2c configuration to carry gRPC.
+
 
 ## [0.13.0] — 2026-08-14
 

@@ -65,6 +65,11 @@ require restating the rest.
 | `includeSessionId` | `OTEL_METRICS_INCLUDE_SESSION_ID` | `false` | Attach the session id to **metrics**. See [Cardinality](#cardinality). |
 | `filteredTools` | `OTEL_OPENCODE_FILTERED_TOOLS` | `[]` | Tool names to exclude from spans (still counted in metrics). |
 | `propagateTraceContext` | `OPENCODE_OTEL_PROPAGATE_TRACE_CONTEXT` | `true` when traces are on | Inject W3C `traceparent` into provider requests. |
+| `tokenCommand` | `OPENCODE_OTEL_TOKEN_COMMAND` | — | Credential helper printing a fresh token on stdout. See [Short-lived credentials](#short-lived-credentials). |
+| `tokenHeader` | `OPENCODE_OTEL_TOKEN_HEADER` | `Authorization` | Header the token goes in. |
+| `tokenPrefix` | `OPENCODE_OTEL_TOKEN_PREFIX` | `Bearer ` | Value prefix. Set to `""` for a raw API-key header. |
+| `tokenRefreshMs` | `OPENCODE_OTEL_TOKEN_REFRESH_MS` | `240000` | Fallback cadence when the token carries no readable `exp`. |
+| `tokenTimeoutMs` | `OPENCODE_OTEL_TOKEN_TIMEOUT_MS` | `10000` | How long the helper may run before being killed. |
 
 The Claude-Code-style aliases (`OTEL_LOGS_EXPORT_INTERVAL`, `OTEL_TRACES_EXPORT_INTERVAL`) are
 accepted alongside the OTel spec names so an existing env block moves across unchanged.
@@ -72,6 +77,50 @@ accepted alongside the OTel spec names so an existing env block moves across unc
 > **No `OTEL_EXPORTER_OTLP_PROTOCOL`.** The only wire transport is OTLP/HTTP with a protobuf
 > payload. gRPC is deliberately absent because OpenCode plugins run under Bun as well as Node — see
 > [ADR-0009](adr/0009-otel-otlp-http-not-grpc.md). Put a collector in front if your backend needs gRPC.
+
+### Short-lived credentials
+
+A static `Authorization` header is read once at plugin load and never refreshed. That is fine for a
+long-lived API key and wrong for anything with a short `exp` — the header goes stale and every
+export starts failing.
+
+`tokenCommand` is the answer: an executable that **prints a fresh access token on stdout and nothing
+else**. It is re-run automatically before the current token expires, and the exporters ask for
+headers immediately before each export, so the refresh happens underneath a long-running session.
+
+```jsonc
+{
+  "plugin": [
+    ["@vymalo/opencode-otel", {
+      "endpoint": "https://otel.example.com",
+      "tokenCommand": "governance-auth token"
+    }]
+  ]
+}
+```
+
+Expiry is taken from the token itself when it is a JWT — the `exp` claim, minus a 30-second safety
+margin. The payload is base64-decoded, **not** verified: the plugin is not authenticating anything,
+it only needs to know when to ask for a new token, and validating the signature is the collector's
+job. When `exp` is absent or unreadable, `tokenRefreshMs` (default 4 minutes) applies instead.
+
+**Contract for the helper:**
+
+- Print the token to **stdout**; send everything else to stderr.
+- Exit non-zero with empty stdout on failure. Never print a stale or placeholder token.
+- Be safe to invoke concurrently — though the plugin shares one in-flight invocation across
+  concurrent exports, so it will not spawn one process per signal.
+
+**Failure behaviour is deliberately asymmetric.** If the helper fails while the cached token is
+still valid, nothing changes — that token is current, not stale, and discarding it would lose data
+for no reason. If it fails with no valid token left, the plugin sends **no auth header at all**, so
+the export fails closed at the collector rather than retrying forever with a dead credential. A
+rejected export also drops the cached token, so the next attempt re-runs the helper instead of
+replaying something the collector already refused.
+
+The token is never logged. Failures log the command name, exit code, whether stdout was empty, and
+the *length* of stderr — never its contents, since a credential helper's stderr can echo the
+request.
 
 ### Backend examples
 
@@ -91,6 +140,58 @@ export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf '%s' '<instance-
 ```bash
 export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.honeycomb.io"
 export OTEL_EXPORTER_OTLP_HEADERS="x-honeycomb-team=<your-api-key>"
+```
+
+</details>
+
+<details>
+<summary><strong>An OIDC-protected collector (OpenTelemetry Collector <code>oidc</code> extension)</strong></summary>
+
+A collector whose OTLP receiver declares `auth: { authenticator: oidc }` validates a bearer JWT
+against its issuer's JWKS and checks the `aud` claim:
+
+```yaml
+extensions:
+  oidc:
+    issuer_url: https://auth.example.com
+    audience: my-api-audience
+receivers:
+  otlp:
+    protocols:
+      http:
+        auth:
+          authenticator: oidc
+        endpoint: 0.0.0.0:4318
+```
+
+If the token is long-lived, a static header is enough:
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://otel.example.com"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${MY_TOKEN}"
+```
+
+If it is short-lived — a Keycloak access token is commonly five minutes — use a helper instead, or
+telemetry will stop at the first expiry with no visible cause:
+
+```jsonc
+["@vymalo/opencode-otel", {
+  "endpoint": "https://otel.example.com",
+  "tokenCommand": "my-credential-helper token"
+}]
+```
+
+Note this collector configuration exposes **HTTP only**. That is the common shape, and it matches
+this plugin's transport ([ADR-0009](adr/0009-otel-otlp-http-not-grpc.md)) — worth checking before
+assuming a gRPC endpoint exists, especially behind an ingress controller that would need explicit
+h2c configuration to carry gRPC at all.
+
+Verify auth independently of the plugin before wiring it in — anything other than `401` means the
+credential was accepted:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://otel.example.com/v1/traces \
+  -H 'Content-Type: application/x-protobuf' -H "Authorization: Bearer ${MY_TOKEN}" --data-binary ''
 ```
 
 </details>
@@ -289,6 +390,12 @@ that the variable was set *before* OpenCode started: configuration is read once 
 
 **The plugin logs `otel_plugin_inactive`.** No endpoint and no explicit exporter were found. The
 `reason` field distinguishes `no_exporter_configured` from `disabled`.
+
+**Data stops arriving mid-session.** Look for `otel_export_failed` in the host log stream — it
+carries the `signal`, the HTTP `status` where the backend supplied one, the error message, and a
+`consecutiveFailures` count. A `401`/`403` means the credential is rejected; with a `tokenCommand`
+configured, check for `otel_token_command_failed` or `otel_token_expired` alongside it. Recovery is
+reported once, as `otel_export_recovered`.
 
 **One signal is missing.** Look for `otel_traces_init_failed` / `otel_metrics_init_failed` /
 `otel_logs_init_failed` in the host log stream. Each signal is built independently, so one failing

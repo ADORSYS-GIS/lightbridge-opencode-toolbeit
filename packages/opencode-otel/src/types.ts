@@ -25,6 +25,21 @@ export interface OtelPluginOptions {
   endpoints?: Partial<Record<SignalName, string>>;
   /** Headers sent with every OTLP request (auth tokens live here). */
   headers?: Record<string, string>;
+  /**
+   * A credential helper that prints a fresh access token on stdout, re-run
+   * before the cached one expires. Use instead of a static `Authorization`
+   * header when the collector is behind a short-lived OIDC token.
+   * String or argv array, e.g. `"governance-auth token"`.
+   */
+  tokenCommand?: string | string[];
+  /** Header the token goes in. Default `Authorization`. */
+  tokenHeader?: string;
+  /** Token value prefix. Default `Bearer `. */
+  tokenPrefix?: string;
+  /** Fallback refresh cadence when the token carries no readable `exp`, ms. */
+  tokenRefreshMs?: number;
+  /** How long the helper may run before being killed, ms. Default 10000. */
+  tokenTimeoutMs?: number;
   /** Which signals to export. Omitted signals default to `otlp` when an endpoint is set. */
   exporters?: Partial<Record<SignalName, ExporterKind>>;
   /** `service.name` resource attribute. Defaults to `opencode`. */
@@ -67,6 +82,12 @@ export interface ResolvedOtelConfig {
   endpoint?: string;
   endpoints: Partial<Record<SignalName, string>>;
   headers: Record<string, string>;
+  /** Argv of the credential helper; empty when none is configured. */
+  tokenCommand: string[];
+  tokenHeader: string;
+  tokenPrefix: string;
+  tokenRefreshMs: number;
+  tokenTimeoutMs: number;
   exporters: Record<SignalName, ExporterKind>;
   serviceName: string;
   environment?: string;

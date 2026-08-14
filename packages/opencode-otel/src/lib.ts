@@ -6,6 +6,7 @@ export {
 
 export {
   type EnvSource,
+  parseCommand,
   parseKeyValueList,
   resolveOtelConfig,
   signalUrl,
@@ -22,6 +23,18 @@ export {
 export { createInstruments, detectLanguage, type Instruments } from "./instruments.js";
 
 export { type RecorderDeps, TelemetryRecorder } from "./recorder.js";
+
+export {
+  createTokenSource,
+  DEFAULT_REFRESH_MS,
+  EXPIRY_SKEW_MS,
+  readJwtExpiry,
+  type CommandRunner,
+  type TokenSource,
+  type TokenSourceOptions
+} from "./token-source.js";
+
+export { type ExporterLike, withFailureLogging } from "./export-logging.js";
 
 export {
   DEFAULT_DEFERRED_TIMEOUT_MS,

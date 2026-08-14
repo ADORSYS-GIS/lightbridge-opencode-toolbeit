@@ -1,3 +1,4 @@
+import { DEFAULT_REFRESH_MS } from "./token-source.js";
 import type {
   ExporterKind,
   MetricTemporality,
@@ -149,6 +150,27 @@ function stringList(raw: unknown): string[] {
 }
 
 /**
+ * Normalise a command to argv. An array is taken verbatim — that is the form to
+ * use when a path contains spaces. A string is split on whitespace, with **no
+ * shell**: no quoting, no substitution, no injection surface.
+ *
+ * The split is decided by the type of the value actually supplied, not by the
+ * type of some other candidate. Keying it on the wrong source silently produced
+ * a single argv element like `"governance-auth token"` whenever an environment
+ * override sat on top of an array in config — which `execFile` then failed to
+ * spawn, so every export went out unauthenticated.
+ */
+export function parseCommand(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter((part): part is string => typeof part === "string" && part.trim() !== "");
+  }
+  if (typeof raw === "string") {
+    return raw.split(/\s+/).filter((part) => part !== "");
+  }
+  return [];
+}
+
+/**
  * Resolve plugin options against the environment.
  *
  * **Precedence: environment overrides plugin options.** Options are the base
@@ -209,6 +231,10 @@ export function resolveOtelConfig(raw: unknown, env: EnvSource = process.env): R
       : stringList(opts.filteredTools)
   );
 
+  // Resolve the source first, then normalise based on *its* own type — see
+  // `parseCommand` for why keying the split on anything else is a trap.
+  const tokenCommand = parseCommand(env.OPENCODE_OTEL_TOKEN_COMMAND ?? opts.tokenCommand);
+
   const enabledSignals = SIGNALS.filter((s) => exporters[s] !== "none");
 
   return {
@@ -217,6 +243,15 @@ export function resolveOtelConfig(raw: unknown, env: EnvSource = process.env): R
     endpoint,
     endpoints,
     headers,
+    tokenCommand,
+    tokenHeader: env.OPENCODE_OTEL_TOKEN_HEADER || opts.tokenHeader || "Authorization",
+    tokenPrefix: env.OPENCODE_OTEL_TOKEN_PREFIX ?? opts.tokenPrefix ?? "Bearer ",
+    tokenRefreshMs:
+      parsePositiveInt(env.OPENCODE_OTEL_TOKEN_REFRESH_MS) ??
+      (opts.tokenRefreshMs && opts.tokenRefreshMs > 0 ? opts.tokenRefreshMs : DEFAULT_REFRESH_MS),
+    tokenTimeoutMs:
+      parsePositiveInt(env.OPENCODE_OTEL_TOKEN_TIMEOUT_MS) ??
+      (opts.tokenTimeoutMs && opts.tokenTimeoutMs > 0 ? opts.tokenTimeoutMs : 10_000),
     exporters,
     serviceName: env.OTEL_SERVICE_NAME || opts.serviceName || DEFAULTS.serviceName,
     environment: env.OPENCODE_OTEL_ENVIRONMENT || opts.environment || undefined,
