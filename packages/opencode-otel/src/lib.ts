@@ -24,6 +24,12 @@ export { createInstruments, detectLanguage, type Instruments } from "./instrumen
 export { type RecorderDeps, TelemetryRecorder } from "./recorder.js";
 
 export {
+  DEFAULT_DEFERRED_TIMEOUT_MS,
+  deferredAttribute,
+  type DeferredAttribute
+} from "./deferred.js";
+
+export {
   installTracePropagation,
   type PropagationConfigInput,
   type ProviderConfigLike

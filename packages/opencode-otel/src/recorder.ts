@@ -20,6 +20,11 @@ type ChatMessageInput = Parameters<NonNullable<Hooks["chat.message"]>>[0];
 type ChatMessageOutput = Parameters<NonNullable<Hooks["chat.message"]>>[1];
 type ToolBeforeInput = Parameters<NonNullable<Hooks["tool.execute.before"]>>[0];
 type ToolAfterInput = Parameters<NonNullable<Hooks["tool.execute.after"]>>[0];
+type ChatParamsInput = Parameters<NonNullable<Hooks["chat.params"]>>[0];
+type ChatParamsOutput = Parameters<NonNullable<Hooks["chat.params"]>>[1];
+type TextCompleteInput = Parameters<NonNullable<Hooks["experimental.text.complete"]>>[0];
+type PermissionAskInput = Parameters<NonNullable<Hooks["permission.ask"]>>[0];
+type CompactionInput = Parameters<NonNullable<Hooks["experimental.compaction.autocontinue"]>>[0];
 
 export interface RecorderDeps {
   providers: TelemetryProviders;
@@ -27,6 +32,16 @@ export interface RecorderDeps {
   logger: Logger;
   /** Injectable clock; defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * Sinks for the two resource attributes OpenCode only reveals through
+   * events (`installation.updated`, `vcs.branch.updated`). Without these the
+   * recorder has nowhere to put them: a `Resource` is fixed at provider
+   * construction, which happens before any event arrives.
+   */
+  resourceSinks?: {
+    version?: (value: string) => void;
+    branch?: (value: string) => void;
+  };
 }
 
 interface SessionState {
@@ -43,6 +58,8 @@ interface SessionState {
 interface ChatState {
   span?: Span;
   sessionID: string;
+  /** Sampling parameters captured from `chat.params`, stamped when the span closes. */
+  params?: Attributes;
 }
 
 interface ToolSpanState {
@@ -50,6 +67,22 @@ interface ToolSpanState {
   tool: string;
   sessionID: string;
   startedAt: number;
+}
+
+/**
+ * `diffs` is keyed by session *and* file. The separator is a NUL because it
+ * cannot occur in either part — and it lives here, behind two functions,
+ * because an invisible character duplicated across a writer and a reader is
+ * exactly the kind of literal that silently stops matching.
+ */
+const DIFF_KEY_SEPARATOR = "\u0000";
+
+function diffKey(sessionID: string, file: string): string {
+  return `${sessionID}${DIFF_KEY_SEPARATOR}${file}`;
+}
+
+function diffKeyPrefix(sessionID: string): string {
+  return `${sessionID}${DIFF_KEY_SEPARATOR}`;
 }
 
 /** Terminal tool outcomes, as reported by `ToolPart.state.status`. */
@@ -67,11 +100,29 @@ export class TelemetryRecorder {
 
   private readonly sessions = new Map<string, SessionState>();
   private readonly chats = new Map<string, ChatState>();
+  /**
+   * Chats opened by `chat.params` but not yet matched to an assistant message.
+   * `chat.params` fires *before* the provider request goes out, so without this
+   * the very first request of a turn has no span to propagate trace context
+   * from. Keyed by session; adopted by the next assistant message.
+   */
+  private readonly pendingChats = new Map<string, ChatState>();
   private readonly tools = new Map<string, ToolSpanState>();
-  /** Terminal tool outcomes already recorded, so the hook and the part update cannot double-count. */
-  private readonly finishedTools = new Set<string>();
-  /** Assistant messages already finalized — `message.updated` fires repeatedly with cumulative totals. */
-  private readonly finalizedMessages = new Set<string>();
+  /** Completed assistant text length per message, from `experimental.text.complete`. */
+  private readonly responseLengths = new Map<string, number>();
+  /** Permissions already counted at `permission.ask` time, so a later reply cannot double-count. */
+  private readonly autoDecided = new Set<string>();
+  /**
+   * Terminal tool outcomes already recorded, so the hook and the part update
+   * cannot double-count. Keyed by call id, valued by session so the entry can
+   * be pruned when that session ends.
+   */
+  private readonly finishedTools = new Map<string, string>();
+  /**
+   * Assistant messages already finalized — `message.updated` fires repeatedly
+   * with cumulative totals. Valued by session, for pruning.
+   */
+  private readonly finalizedMessages = new Map<string, string>();
   /** Pending permission prompts, so `permission.replied` can name the tool it resolved. */
   private readonly permissions = new Map<string, { type: string; sessionID: string }>();
   /**
@@ -184,7 +235,33 @@ export class TelemetryRecorder {
         );
         return;
       case "command.executed":
-        this.onCommandExecuted(event.properties.sessionID, event.properties.name);
+        this.onCommandExecuted(
+          event.properties.sessionID,
+          event.properties.name,
+          event.properties.arguments
+        );
+        return;
+      case "installation.updated":
+        // The only channel the host version arrives on. See `deferred.ts`.
+        this.deps.resourceSinks?.version?.(event.properties.version);
+        return;
+      case "vcs.branch.updated":
+        if (event.properties.branch) {
+          this.deps.resourceSinks?.branch?.(event.properties.branch);
+        }
+        return;
+      case "todo.updated":
+        this.onTodoUpdated(event.properties.sessionID, event.properties.todos);
+        return;
+      case "session.deleted":
+        this.forgetSession(event.properties.info.id);
+        return;
+      case "server.instance.disposed":
+        // A real shutdown signal from the host — more reliable than waiting for
+        // a process signal that a supervised runtime may never deliver.
+        void this.shutdown().catch(() => {
+          /* best-effort */
+        });
         return;
       default:
         return;
@@ -299,6 +376,10 @@ export class TelemetryRecorder {
       state.span.end();
     }
     this.sessions.delete(sessionID);
+    // A turn ended: the dedupe bookkeeping for its finished messages and tools
+    // is dead weight from here on. `diffs` deliberately survives — the session
+    // may resume, and its diff totals are cumulative.
+    this.pruneCompleted(sessionID);
 
     // A short CLI invocation may exit right after idle, so drain now rather
     // than waiting for the batch interval.
@@ -347,7 +428,7 @@ export class TelemetryRecorder {
   ): void {
     const state = this.session(sessionID);
     for (const entry of diff) {
-      const key = `${sessionID} ${entry.file}`;
+      const key = diffKey(sessionID, entry.file);
       const previous = this.diffs.get(key) ?? { additions: 0, deletions: 0 };
       // Cumulative source → count only what is new since the last report.
       const added = Math.max(0, (entry.additions ?? 0) - previous.additions);
@@ -424,18 +505,29 @@ export class TelemetryRecorder {
 
     let chat = this.chats.get(message.id);
     if (!chat) {
-      chat = {
-        sessionID: message.sessionID,
-        span: this.deps.providers.tracer?.startSpan(
-          `chat ${message.modelID ?? "unknown"}`,
-          {
-            kind: SpanKind.CLIENT,
-            startTime: message.time?.created ?? this.now(),
-            attributes: baseAttributes
-          },
-          session.context
-        )
-      };
+      // Adopt the span `chat.params` opened for this session, if there is one —
+      // it started before the provider request went out, so it covers the whole
+      // round-trip rather than only the part after the response began arriving.
+      const pending = this.pendingChats.get(message.sessionID);
+      if (pending) {
+        this.pendingChats.delete(message.sessionID);
+        pending.span?.updateName(`chat ${message.modelID ?? "unknown"}`);
+        pending.span?.setAttributes(baseAttributes);
+        chat = pending;
+      } else {
+        chat = {
+          sessionID: message.sessionID,
+          span: this.deps.providers.tracer?.startSpan(
+            `chat ${message.modelID ?? "unknown"}`,
+            {
+              kind: SpanKind.CLIENT,
+              startTime: message.time?.created ?? this.now(),
+              attributes: baseAttributes
+            },
+            session.context
+          )
+        };
+      }
       this.chats.set(message.id, chat);
     }
 
@@ -467,8 +559,10 @@ export class TelemetryRecorder {
     session: SessionState,
     baseAttributes: Attributes
   ): void {
-    this.finalizedMessages.add(message.id);
+    this.finalizedMessages.set(message.id, message.sessionID);
     this.chats.delete(message.id);
+    const responseLength = this.responseLengths.get(message.id);
+    this.responseLengths.delete(message.id);
 
     const created = message.time?.created ?? this.now();
     const completed = message.time?.completed ?? this.now();
@@ -531,6 +625,9 @@ export class TelemetryRecorder {
       "gen_ai.usage.cache_write_tokens": tokens?.cache?.write ?? 0,
       "opencode.cost.usage": cost,
       "opencode.response.duration_ms": completed - created,
+      // Size of the assistant's text, never the text itself.
+      ...(responseLength !== undefined ? { "opencode.response.length": responseLength } : {}),
+      ...(chat.params ?? {}),
       ...(message.finish ? { "gen_ai.response.finish_reasons": [message.finish] } : {}),
       ...(errorType ? { "error.type": errorType } : {})
     };
@@ -584,13 +681,28 @@ export class TelemetryRecorder {
   }
 
   private onPermissionReplied(sessionID: string, permissionID: string, response: string): void {
+    // Already counted at `permission.ask` time as an auto-decision.
+    if (this.autoDecided.delete(permissionID)) {
+      return;
+    }
     const pending = this.permissions.get(permissionID);
     this.permissions.delete(permissionID);
+    this.recordDecision(sessionID, permissionID, response, "user", pending?.type);
+  }
+
+  private recordDecision(
+    sessionID: string,
+    permissionID: string,
+    decision: string,
+    source: "user" | "auto",
+    tool?: string
+  ): void {
     const state = this.session(sessionID);
-    const toolAttr = pending?.type ? { "gen_ai.tool.name": pending.type } : {};
+    const toolAttr = tool ? { "gen_ai.tool.name": tool } : {};
 
     this.instruments?.permissionDecisions.add(1, {
-      "opencode.permission.decision": response,
+      "opencode.permission.decision": decision,
+      "opencode.permission.source": source,
       ...toolAttr,
       ...this.metricSession(sessionID)
     });
@@ -598,7 +710,8 @@ export class TelemetryRecorder {
       "opencode.tool_decision",
       {
         "gen_ai.conversation.id": sessionID,
-        "opencode.permission.decision": response,
+        "opencode.permission.decision": decision,
+        "opencode.permission.source": source,
         "opencode.permission.id": permissionID,
         ...toolAttr
       },
@@ -607,7 +720,69 @@ export class TelemetryRecorder {
     );
   }
 
-  private onCommandExecuted(sessionID: string, name: string): void {
+  /**
+   * Drop every per-session entry. Without this the bookkeeping sets grow for
+   * the life of the process — fine for a CLI invocation, a slow leak in a
+   * long-running OpenCode server.
+   */
+  private forgetSession(sessionID: string): void {
+    const state = this.sessions.get(sessionID);
+    if (state) {
+      this.settleActiveTime(sessionID, state);
+      state.span?.end();
+      this.sessions.delete(sessionID);
+    }
+    this.pendingChats.get(sessionID)?.span?.end();
+    this.pendingChats.delete(sessionID);
+
+    for (const [id, chat] of this.chats) {
+      if (chat.sessionID === sessionID) {
+        chat.span?.end();
+        this.chats.delete(id);
+      }
+    }
+    for (const [callID, tool] of this.tools) {
+      if (tool.sessionID === sessionID) {
+        tool.span?.end();
+        this.tools.delete(callID);
+      }
+    }
+    for (const key of this.diffs.keys()) {
+      if (key.startsWith(diffKeyPrefix(sessionID))) {
+        this.diffs.delete(key);
+      }
+    }
+    for (const [id, permission] of this.permissions) {
+      if (permission.sessionID === sessionID) {
+        this.permissions.delete(id);
+        this.autoDecided.delete(id);
+      }
+    }
+    this.pruneCompleted(sessionID);
+  }
+
+  /**
+   * Drop the dedupe bookkeeping for a session's finished messages and tool
+   * calls. Safe to run at every idle — those ids are never reused, so nothing
+   * can be double-counted afterwards. Deliberately does **not** touch `diffs`:
+   * `session.diff` is cumulative, so forgetting the last-seen totals for a
+   * session that later resumes would re-count its whole diff.
+   */
+  private pruneCompleted(sessionID: string): void {
+    for (const [id, owner] of this.finalizedMessages) {
+      if (owner === sessionID) {
+        this.finalizedMessages.delete(id);
+        this.responseLengths.delete(id);
+      }
+    }
+    for (const [callID, owner] of this.finishedTools) {
+      if (owner === sessionID) {
+        this.finishedTools.delete(callID);
+      }
+    }
+  }
+
+  private onCommandExecuted(sessionID: string, name: string, args?: string): void {
     const state = this.session(sessionID);
     this.instruments?.commands.add(1, {
       "opencode.command.name": name,
@@ -615,7 +790,33 @@ export class TelemetryRecorder {
     });
     this.emit(
       "opencode.command_executed",
-      { "gen_ai.conversation.id": sessionID, "opencode.command.name": name },
+      {
+        "gen_ai.conversation.id": sessionID,
+        "opencode.command.name": name,
+        // Whether arguments were passed, never what they were.
+        "opencode.command.has_arguments": Boolean(args && args.trim() !== "")
+      },
+      SeverityNumber.INFO,
+      state.context
+    );
+  }
+
+  private onTodoUpdated(sessionID: string, todos: Array<{ status?: string }>): void {
+    const state = this.session(sessionID);
+    const byStatus: Record<string, number> = {};
+    for (const todo of todos ?? []) {
+      const status = todo?.status ?? "unknown";
+      byStatus[status] = (byStatus[status] ?? 0) + 1;
+    }
+    this.emit(
+      "opencode.todo_updated",
+      {
+        "gen_ai.conversation.id": sessionID,
+        "opencode.todo.total": todos?.length ?? 0,
+        ...Object.fromEntries(
+          Object.entries(byStatus).map(([status, count]) => [`opencode.todo.${status}`, count])
+        )
+      },
       SeverityNumber.INFO,
       state.context
     );
@@ -653,6 +854,96 @@ export class TelemetryRecorder {
       },
       SeverityNumber.INFO,
       session.context
+    );
+  }
+
+  /**
+   * `chat.params` runs immediately before the provider request. Opening the
+   * `chat` span here rather than at the first `message.updated` is what makes
+   * trace-context propagation work at all for the first request of a turn —
+   * otherwise the fetch happens while no chat span exists.
+   */
+  onChatParams(input: ChatParamsInput, output: ChatParamsOutput): void {
+    const session = this.session(input.sessionID);
+    const model = input.model as { id?: string; modelID?: string } | undefined;
+    const modelId = model?.id ?? model?.modelID;
+
+    const params: Attributes = {};
+    const numeric: Array<[string, unknown]> = [
+      ["gen_ai.request.temperature", output?.temperature],
+      ["gen_ai.request.top_p", output?.topP],
+      ["gen_ai.request.top_k", output?.topK],
+      ["gen_ai.request.max_tokens", output?.maxOutputTokens]
+    ];
+    for (const [key, value] of numeric) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        params[key] = value;
+      }
+    }
+
+    // A previous pending span for this session means the last request never
+    // produced an assistant message (aborted, or errored before streaming).
+    this.pendingChats.get(input.sessionID)?.span?.end();
+
+    this.pendingChats.set(input.sessionID, {
+      sessionID: input.sessionID,
+      params,
+      span: this.deps.providers.tracer?.startSpan(
+        `chat ${modelId ?? "unknown"}`,
+        {
+          kind: SpanKind.CLIENT,
+          startTime: this.now(),
+          attributes: {
+            "gen_ai.operation.name": "chat",
+            "gen_ai.conversation.id": input.sessionID,
+            ...(modelId ? { "gen_ai.request.model": modelId } : {}),
+            ...(input.agent ? { "gen_ai.agent.name": input.agent } : {}),
+            ...params
+          }
+        },
+        session.context
+      )
+    });
+  }
+
+  /** Assistant text finished streaming — record its size, never its content. */
+  onTextComplete(input: TextCompleteInput, output: { text?: string }): void {
+    if (typeof output?.text !== "string") {
+      return;
+    }
+    const previous = this.responseLengths.get(input.messageID) ?? 0;
+    this.responseLengths.set(input.messageID, previous + output.text.length);
+  }
+
+  /**
+   * Every permission evaluation passes through here, including the ones config
+   * auto-resolves. Only an already-decided prompt is counted now — an `ask`
+   * waits for `permission.replied`, so the two paths never double-count. Without
+   * this hook, auto-allowed permissions were invisible and the decision counter
+   * silently undercounted.
+   */
+  onPermissionAsk(input: PermissionAskInput, output: { status?: string }): void {
+    const decision = output?.status;
+    if (!decision || decision === "ask") {
+      return;
+    }
+    this.autoDecided.add(input.id);
+    this.recordDecision(input.sessionID, input.id, decision, "auto", input.type);
+  }
+
+  /** Compaction finished — `overflow` says whether the context forced it. */
+  onCompactionAutocontinue(input: CompactionInput, output: { enabled?: boolean }): void {
+    const state = this.session(input.sessionID);
+    this.emit(
+      "opencode.compaction_autocontinue",
+      {
+        "gen_ai.conversation.id": input.sessionID,
+        "opencode.compaction.overflow": Boolean(input.overflow),
+        "opencode.compaction.autocontinue_enabled": output?.enabled !== false,
+        ...(input.agent ? { "gen_ai.agent.name": input.agent } : {})
+      },
+      SeverityNumber.INFO,
+      state.context
     );
   }
 
@@ -712,12 +1003,12 @@ export class TelemetryRecorder {
     if (this.finishedTools.has(callID)) {
       return;
     }
-    this.finishedTools.add(callID);
 
     const started = this.tools.get(callID);
     this.tools.delete(callID);
     const tool = started?.tool ?? outcome.tool;
     const sessionID = started?.sessionID || outcome.sessionID;
+    this.finishedTools.set(callID, sessionID);
     const durationMs =
       outcome.durationMs ?? (started ? Math.max(0, this.now() - started.startedAt) : undefined);
 
@@ -762,11 +1053,33 @@ export class TelemetryRecorder {
    * parent — a missing link is recoverable, a fabricated one is not.
    */
   currentChatContext(): Context | undefined {
-    if (this.chats.size !== 1) {
+    // A pending chat (opened by `chat.params`) counts: that is precisely the
+    // window in which the provider request is actually made.
+    const live = [...this.pendingChats.values(), ...this.chats.values()];
+    if (live.length !== 1) {
       return undefined;
     }
-    const [chat] = this.chats.values();
+    const [chat] = live;
     return chat?.span ? trace.setSpan(ROOT_CONTEXT, chat.span) : undefined;
+  }
+
+  /**
+   * Sizes of the in-memory bookkeeping. Exposed because these maps are the only
+   * unbounded thing the plugin holds — a long-running OpenCode server that
+   * never emitted `session.deleted` is exactly where a leak would show up, and
+   * "how big is it" should be answerable without a heap dump.
+   */
+  pendingStateSize(): Record<string, number> {
+    return {
+      sessions: this.sessions.size,
+      chats: this.chats.size,
+      pendingChats: this.pendingChats.size,
+      tools: this.tools.size,
+      finalizedMessages: this.finalizedMessages.size,
+      finishedTools: this.finishedTools.size,
+      permissions: this.permissions.size,
+      diffs: this.diffs.size
+    };
   }
 
   async shutdown(): Promise<void> {
@@ -775,10 +1088,11 @@ export class TelemetryRecorder {
       state.span?.end();
     }
     this.sessions.clear();
-    for (const chat of this.chats.values()) {
+    for (const chat of [...this.chats.values(), ...this.pendingChats.values()]) {
       chat.span?.end();
     }
     this.chats.clear();
+    this.pendingChats.clear();
     for (const tool of this.tools.values()) {
       tool.span?.end();
     }

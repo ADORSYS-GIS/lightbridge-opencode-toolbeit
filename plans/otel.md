@@ -1,6 +1,6 @@
 # OpenTelemetry plugin (design)
 
-Status: **draft → implemented in 0.13.0.** New published package: `@vymalo/opencode-otel` (OpenCode
+Status: **implemented.** Initial surface shipped in 0.12.0; full hook/event coverage in 0.13.0. New published package: `@vymalo/opencode-otel` (OpenCode
 plugin). User-facing reference: [`docs/otel.md`](../docs/otel.md).
 
 Goal, in one line: **give OpenCode the telemetry surface Claude Code and Codex already ship** — so an
@@ -195,6 +195,36 @@ one connected trace, which is the thing neither Claude Code nor Codex gives you 
 
 Tool spans can be filtered by name (`filteredTools`) to keep high-volume `read`/`glob`/`grep` calls
 out of the trace while still counting them in metrics.
+
+## Coverage of the host surface
+
+The first cut wired 5 hooks and 11 event types, which left real gaps — including two resource
+attributes that were declared but could never be populated. Current state: **5 of 19 hooks** and
+**16 of 32 event types**, with the remainder excluded on stated grounds (see
+[`docs/otel.md`](../docs/otel.md#what-is-deliberately-not-collected)).
+
+Three of the additions were fixes rather than features:
+
+- **`service.version` and `vcs.repository.ref.name` were unreachable.** Both are documented resource
+  attributes, but OpenCode only reveals them through the `installation.updated` and
+  `vcs.branch.updated` *events* — which arrive after the OTel `Resource` is fixed at provider
+  construction. Solved with deferred (promise-valued) resource attributes, which exporters await;
+  the wait is bounded so a host that never emits them cannot block export forever. The exit handlers
+  abandon any still-pending attribute before shutdown, because their timers are `unref`'d and would
+  otherwise never fire on `beforeExit`, hanging the final drain.
+- **Auto-resolved permissions were invisible.** `permission.replied` only fires for prompts a human
+  answered, so a config that auto-allows tools reported *no* decisions. `permission.ask` sees every
+  evaluation; an already-decided prompt is counted there as `source: "auto"`, an `ask` waits for the
+  reply as `source: "user"`, and the two paths cannot double-count.
+- **Per-session state was never pruned.** `finalizedMessages`, `finishedTools` and `diffs` grew for
+  the life of the process — irrelevant for a CLI invocation, a slow leak in a long-running server.
+  Message and tool bookkeeping is dropped at `session.idle`; `diffs` survives until
+  `session.deleted`, because `session.diff` is cumulative and forgetting the last-seen totals for a
+  session that later resumes would re-count its whole diff.
+
+`chat.params` also moved the `chat` span's start earlier, to immediately before the provider request.
+That is what makes trace-context propagation work for the first request of a turn at all — the fetch
+previously happened while no chat span existed yet.
 
 ## Not in v1
 
