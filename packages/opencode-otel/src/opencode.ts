@@ -22,6 +22,7 @@ import {
   type TelemetryProviders
 } from "./providers.js";
 import { TelemetryRecorder } from "./recorder.js";
+import { readVcsInfo, type VcsInfo } from "./vcs.js";
 
 const PLUGIN_SERVICE_NAME = "opencode-otel-plugin";
 
@@ -144,13 +145,26 @@ export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}):
       version.settle(factoryOptions.hostInfo.version);
     }
 
+    // Read the checkout straight off disk. This is both richer and more
+    // reliable than waiting for `vcs.branch.updated`: it arrives before the
+    // first export instead of racing the deferral window, and it carries the
+    // remote and revision, which no event reports at all. The event stays as a
+    // fallback — `settle` keeps the first value, so whichever lands first wins.
+    const vcs: VcsInfo = config.collectVcs
+      ? await readVcsInfo(input.worktree ?? input.directory).catch(() => ({}))
+      : {};
+    if (vcs.ref) {
+      branch.settle(vcs.ref);
+    }
+
     const resource = buildResource(config, {
       version: version.value,
       hostname: factoryOptions.hostInfo?.hostname ?? safeHostname(),
       projectName: input.project?.id,
       directory: input.directory,
       worktree: input.worktree,
-      branch: branch.value
+      branch: branch.value,
+      vcs
     });
 
     const providers = createProviders(config, resource, logger, factoryOptions.exporters);

@@ -37,6 +37,16 @@ export {
 export { type ExporterLike, withFailureLogging } from "./export-logging.js";
 
 export {
+  describeRemote,
+  type FileReader,
+  parseRemoteFromConfig,
+  readVcsInfo,
+  resolveGitDirs,
+  sanitizeRemoteUrl,
+  type VcsInfo
+} from "./vcs.js";
+
+export {
   DEFAULT_DEFERRED_TIMEOUT_MS,
   deferredAttribute,
   type DeferredAttribute

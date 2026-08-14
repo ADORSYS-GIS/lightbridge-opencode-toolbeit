@@ -48,6 +48,12 @@ export interface OtelPluginOptions {
   environment?: string;
   /** Extra resource attributes merged onto the defaults. */
   resourceAttributes?: Record<string, string>;
+  /**
+   * Read repository metadata (remote URL, owner, branch, revision) off disk and
+   * attach it to the resource. On by default. Credentials in the remote URL are
+   * always stripped; set `false` to publish no repository identity at all.
+   */
+  collectVcs?: boolean;
   /** Metric export interval, ms. Default 60000. */
   metricExportIntervalMs?: number;
   /** Log record export interval, ms. Default 5000. */
@@ -92,6 +98,7 @@ export interface ResolvedOtelConfig {
   serviceName: string;
   environment?: string;
   resourceAttributes: Record<string, string>;
+  collectVcs: boolean;
   metricExportIntervalMs: number;
   logExportIntervalMs: number;
   traceExportIntervalMs: number;
