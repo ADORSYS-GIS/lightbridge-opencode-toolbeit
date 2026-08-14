@@ -90,6 +90,6 @@ export function createOpencodeRatelimitPlugin(
   };
 }
 
-export const OpencodeRatelimitPlugin = createOpencodeRatelimitPlugin();
+export const OpencodeRatelimitPlugin: Plugin = createOpencodeRatelimitPlugin();
 
 export default OpencodeRatelimitPlugin;

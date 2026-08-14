@@ -6,6 +6,10 @@
     "lib": ["ES2022", "DOM"],
     "types": ["node"],
     "strict": true,
+    // Every export must carry a type the compiler can read off a single
+    // file, so `scripts/build-package.mjs` can emit declarations without a
+    // type-checking pass. This is the gate that keeps that emit sound.
+    "isolatedDeclarations": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   }

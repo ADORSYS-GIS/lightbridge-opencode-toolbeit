@@ -729,6 +729,6 @@ export function createOpencodeOauth2Plugin(
   };
 }
 
-export const OpencodeOauth2Plugin = createOpencodeOauth2Plugin();
+export const OpencodeOauth2Plugin: Plugin = createOpencodeOauth2Plugin();
 
 export default OpencodeOauth2Plugin;

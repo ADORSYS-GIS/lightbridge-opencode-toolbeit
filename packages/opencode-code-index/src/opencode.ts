@@ -85,6 +85,6 @@ export function createCodeIndexPlugin(factoryOptions: CodeIndexFactoryOptions = 
   };
 }
 
-export const OpencodeCodeIndexPlugin = createCodeIndexPlugin();
+export const OpencodeCodeIndexPlugin: Plugin = createCodeIndexPlugin();
 
 export default OpencodeCodeIndexPlugin;

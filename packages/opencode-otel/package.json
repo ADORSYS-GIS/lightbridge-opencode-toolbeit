@@ -1,7 +1,7 @@
 {
   "name": "@vymalo/opencode-otel",
   "version": "0.13.0",
-  "description": "OpenTelemetry plugin for OpenCode: exports developer interactions as OTLP traces, metrics and logs — real USD cost, all five token types (including cache read/write and reasoning), tool results, permission decisions, API errors and lines of code. Configurable from opencode.json or standard OTEL_* environment variables.",
+  "description": "OpenTelemetry plugin for OpenCode: exports developer interactions as OTLP traces, metrics and logs \u2014 real USD cost, all five token types (including cache read/write and reasoning), tool results, permission decisions, API errors and lines of code. Configurable from opencode.json or standard OTEL_* environment variables.",
   "license": "MIT",
   "author": "vymalo contributors",
   "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
@@ -52,7 +52,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node ../../scripts/build-package.mjs",
     "lint": "biome lint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",

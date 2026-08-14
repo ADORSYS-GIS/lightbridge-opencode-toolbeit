@@ -107,6 +107,6 @@ export function createOpencodeModelsInfoPlugin(
   };
 }
 
-export const OpencodeModelsInfoPlugin = createOpencodeModelsInfoPlugin();
+export const OpencodeModelsInfoPlugin: Plugin = createOpencodeModelsInfoPlugin();
 
 export default OpencodeModelsInfoPlugin;

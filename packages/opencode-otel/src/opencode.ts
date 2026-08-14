@@ -238,6 +238,6 @@ function safeHostname(): string | undefined {
   }
 }
 
-export const OpencodeOtelPlugin = createOtelPlugin();
+export const OpencodeOtelPlugin: Plugin = createOtelPlugin();
 
 export default OpencodeOtelPlugin;

@@ -53,7 +53,7 @@ function hasValidTokenShape(token: unknown): boolean {
 export class FileCacheStore {
   constructor(
     private readonly baseDir: string,
-    private readonly logger?: Logger
+    private readonly logger?: Logger | undefined
   ) {}
 
   async ensureReady(): Promise<void> {
