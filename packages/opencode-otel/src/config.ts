@@ -150,6 +150,27 @@ function stringList(raw: unknown): string[] {
 }
 
 /**
+ * Normalise a command to argv. An array is taken verbatim — that is the form to
+ * use when a path contains spaces. A string is split on whitespace, with **no
+ * shell**: no quoting, no substitution, no injection surface.
+ *
+ * The split is decided by the type of the value actually supplied, not by the
+ * type of some other candidate. Keying it on the wrong source silently produced
+ * a single argv element like `"governance-auth token"` whenever an environment
+ * override sat on top of an array in config — which `execFile` then failed to
+ * spawn, so every export went out unauthenticated.
+ */
+export function parseCommand(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter((part): part is string => typeof part === "string" && part.trim() !== "");
+  }
+  if (typeof raw === "string") {
+    return raw.split(/\s+/).filter((part) => part !== "");
+  }
+  return [];
+}
+
+/**
  * Resolve plugin options against the environment.
  *
  * **Precedence: environment overrides plugin options.** Options are the base
@@ -210,13 +231,9 @@ export function resolveOtelConfig(raw: unknown, env: EnvSource = process.env): R
       : stringList(opts.filteredTools)
   );
 
-  // Accept either a shell-ish string or an explicit argv array. The string form
-  // is split on whitespace only — no shell is involved, so quoting and
-  // substitution are deliberately not supported. Use the array form for a path
-  // with spaces.
-  const tokenCommand = stringList(env.OPENCODE_OTEL_TOKEN_COMMAND ?? (opts.tokenCommand as unknown))
-    .flatMap((part) => (Array.isArray(opts.tokenCommand) ? [part] : part.split(/\s+/)))
-    .filter((part) => part !== "");
+  // Resolve the source first, then normalise based on *its* own type — see
+  // `parseCommand` for why keying the split on anything else is a trap.
+  const tokenCommand = parseCommand(env.OPENCODE_OTEL_TOKEN_COMMAND ?? opts.tokenCommand);
 
   const enabledSignals = SIGNALS.filter((s) => exporters[s] !== "none");
 

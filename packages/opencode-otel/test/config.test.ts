@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseKeyValueList, resolveOtelConfig, signalUrl } from "../src/config.js";
+import { parseCommand, parseKeyValueList, resolveOtelConfig, signalUrl } from "../src/config.js";
 
 describe("resolveOtelConfig", () => {
   it("is completely inert when nothing is configured", () => {
@@ -186,6 +186,26 @@ describe("credential helper", () => {
     ).toEqual(["from-env", "token"]);
   });
 
+  it("splits an environment override even when config supplied the array form", () => {
+    // The documented `.well-known` shape: an org ships argv, a machine overrides
+    // with the string form. Deciding the split from the config value rather than
+    // the value actually used produced one argv element with a space inside the
+    // executable name — `execFile` then failed to spawn and every export went
+    // out with no Authorization header.
+    expect(
+      resolveOtelConfig(
+        { tokenCommand: ["governance-auth", "token"] },
+        { OPENCODE_OTEL_TOKEN_COMMAND: "governance-auth token" }
+      ).tokenCommand
+    ).toEqual(["governance-auth", "token"]);
+  });
+
+  it("keeps the config array intact when no environment override is present", () => {
+    expect(
+      resolveOtelConfig({ tokenCommand: ["/opt/my tools/helper", "token"] }, {}).tokenCommand
+    ).toEqual(["/opt/my tools/helper", "token"]);
+  });
+
   it("defaults the header, prefix and refresh cadence", () => {
     const config = resolveOtelConfig({ tokenCommand: "helper" }, {});
     expect(config.tokenHeader).toBe("Authorization");
@@ -207,5 +227,35 @@ describe("credential helper", () => {
     expect(resolveOtelConfig({}, { OPENCODE_OTEL_TOKEN_REFRESH_MS: "60000" }).tokenRefreshMs).toBe(
       60_000
     );
+  });
+});
+
+describe("parseCommand", () => {
+  it("splits a string on any run of whitespace", () => {
+    expect(parseCommand("governance-auth   token")).toEqual(["governance-auth", "token"]);
+    expect(parseCommand("  helper\ttoken  ")).toEqual(["helper", "token"]);
+  });
+
+  it("takes an array verbatim, so a path may contain spaces", () => {
+    expect(parseCommand(["/opt/my tools/helper", "token"])).toEqual([
+      "/opt/my tools/helper",
+      "token"
+    ]);
+  });
+
+  it("drops non-string and blank array entries", () => {
+    expect(parseCommand(["helper", "", 42, null, "  ", "token"])).toEqual(["helper", "token"]);
+  });
+
+  it("returns nothing for anything else", () => {
+    expect(parseCommand(undefined)).toEqual([]);
+    expect(parseCommand("")).toEqual([]);
+    expect(parseCommand("   ")).toEqual([]);
+    expect(parseCommand(42)).toEqual([]);
+    expect(parseCommand({ command: "helper" })).toEqual([]);
+  });
+
+  it("does not treat a comma as a separator — a command is not a list", () => {
+    expect(parseCommand("helper,token")).toEqual(["helper,token"]);
   });
 });

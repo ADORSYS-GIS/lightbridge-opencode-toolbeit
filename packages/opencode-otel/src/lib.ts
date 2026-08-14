@@ -6,6 +6,7 @@ export {
 
 export {
   type EnvSource,
+  parseCommand,
   parseKeyValueList,
   resolveOtelConfig,
   signalUrl,
