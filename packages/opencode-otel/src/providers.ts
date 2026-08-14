@@ -2,7 +2,12 @@ import type { Logger as OtelLogger } from "@opentelemetry/api-logs";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-proto";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
-import { type Resource, resourceFromAttributes } from "@opentelemetry/resources";
+import {
+  type DetectedResourceAttributes,
+  type MaybePromise,
+  type Resource,
+  resourceFromAttributes
+} from "@opentelemetry/resources";
 import {
   BatchLogRecordProcessor,
   ConsoleLogRecordExporter,
@@ -104,15 +109,22 @@ const defaultFactories: Required<ExporterFactories> = {
 export function buildResource(
   config: ResolvedOtelConfig,
   context: {
-    version?: string;
+    /**
+     * May be a promise: OpenCode reports the host version as an
+     * `installation.updated` *event*, after the resource is already built. The
+     * OTel resource API awaits promise-valued attributes before the first
+     * export — see `deferred.ts` for why the deferral is always bounded.
+     */
+    version?: MaybePromise<string | undefined>;
     hostname?: string;
     projectName?: string;
     directory?: string;
     worktree?: string;
-    branch?: string;
+    /** May be a promise, for the same reason as `version` (`vcs.branch.updated`). */
+    branch?: MaybePromise<string | undefined>;
   }
 ): Resource {
-  const attributes: Record<string, string> = {
+  const attributes: DetectedResourceAttributes = {
     "service.name": config.serviceName,
     "telemetry.sdk.language": "nodejs"
   };

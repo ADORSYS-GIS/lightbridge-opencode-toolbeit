@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import type { Hooks, Plugin, PluginInput, PluginOptions } from "@opencode-ai/plugin";
 
 import { type EnvSource, resolveOtelConfig } from "./config.js";
+import { type DeferredAttribute, deferredAttribute } from "./deferred.js";
 import {
   createJsonConsoleLogger,
   DEFAULT_LOG_LEVEL,
@@ -38,6 +39,8 @@ export interface OtelPluginFactoryOptions {
   registerProcessHandlers?: boolean;
   /** Override the resolved host metadata (hostname, version) for tests. */
   hostInfo?: { hostname?: string; version?: string };
+  /** How long a deferred resource attribute waits for its event. */
+  deferredTimeoutMs?: number;
 }
 
 /**
@@ -83,13 +86,23 @@ function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => 
  * so without this a short CLI invocation loses everything still in a batch
  * processor. Handlers are registered once and never keep the loop alive.
  */
-function registerExitHandlers(providers: TelemetryProviders, logger: Logger): void {
+function registerExitHandlers(
+  providers: TelemetryProviders,
+  logger: Logger,
+  deferred: DeferredAttribute[]
+): void {
   let done = false;
   const drain = () => {
     if (done) {
       return;
     }
     done = true;
+    // Settle any still-pending resource attribute first. Exporters await those
+    // promises, and their timers are `unref`'d — so on `beforeExit` the timer
+    // may never fire and the shutdown would hang, losing everything buffered.
+    for (const attribute of deferred) {
+      attribute.abandon();
+    }
     void providers.shutdown().catch((error) => {
       logger.warn("otel_shutdown_failed", { error: describeError(error) });
     });
@@ -121,12 +134,23 @@ export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}):
       };
     }
 
+    // `service.version` and the git branch only ever reach a plugin as events
+    // (`installation.updated` / `vcs.branch.updated`), which arrive after the
+    // resource is built. Deferred attributes bridge that, with a bounded wait
+    // so a host that never emits them cannot stall the first export.
+    const version = deferredAttribute(factoryOptions.deferredTimeoutMs);
+    const branch = deferredAttribute(factoryOptions.deferredTimeoutMs);
+    if (factoryOptions.hostInfo?.version) {
+      version.settle(factoryOptions.hostInfo.version);
+    }
+
     const resource = buildResource(config, {
-      version: factoryOptions.hostInfo?.version,
+      version: version.value,
       hostname: factoryOptions.hostInfo?.hostname ?? safeHostname(),
       projectName: input.project?.id,
       directory: input.directory,
-      worktree: input.worktree
+      worktree: input.worktree,
+      branch: branch.value
     });
 
     const providers = createProviders(config, resource, logger, factoryOptions.exporters);
@@ -134,11 +158,15 @@ export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}):
       providers,
       config,
       logger,
-      now: factoryOptions.now
+      now: factoryOptions.now,
+      resourceSinks: {
+        version: (value) => version.settle(value),
+        branch: (value) => branch.settle(value)
+      }
     });
 
     if (factoryOptions.registerProcessHandlers !== false) {
-      registerExitHandlers(providers, logger);
+      registerExitHandlers(providers, logger, [version, branch]);
     }
 
     logger.info("otel_plugin_enabled", {
@@ -171,6 +199,18 @@ export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}):
       },
       "tool.execute.after": async (toolInput, toolOutput) => {
         recorder.onToolAfter(toolInput, toolOutput);
+      },
+      "chat.params": async (paramsInput, paramsOutput) => {
+        recorder.onChatParams(paramsInput, paramsOutput);
+      },
+      "permission.ask": async (permissionInput, permissionOutput) => {
+        recorder.onPermissionAsk(permissionInput, permissionOutput);
+      },
+      "experimental.text.complete": async (textInput, textOutput) => {
+        recorder.onTextComplete(textInput, textOutput);
+      },
+      "experimental.compaction.autocontinue": async (compactionInput, compactionOutput) => {
+        recorder.onCompactionAutocontinue(compactionInput, compactionOutput);
       }
     };
   };

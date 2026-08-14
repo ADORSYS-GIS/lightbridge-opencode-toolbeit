@@ -127,6 +127,10 @@ already this plugin's default.
 | `opencode.permission.decision.count` | counter | `{decision}` | `gen_ai.tool.name`, `opencode.permission.decision` |
 | `opencode.command.executed.count` | counter | `{command}` | `opencode.command.name` |
 
+`opencode.permission.decision.count` also carries `opencode.permission.source` — `user` for a prompt
+someone answered, `auto` for one your config resolved without asking. Both are counted; a build that
+auto-allows everything still reports its decisions.
+
 **Cost is a real number, not an estimate.** OpenCode's host computes `AssistantMessage.cost` in USD
 and this plugin exports it directly — there is no price table to maintain and nothing to drift out
 of date when a provider changes rates.
@@ -146,13 +150,15 @@ Each record carries an `event.name` attribute and the session id as `gen_ai.conv
 | `opencode.session_start` | `opencode.session.kind`, `opencode.session.parent_id`, `opencode.directory` |
 | `opencode.session_idle` | `opencode.session.duration_ms`, `opencode.session.request_count`, `opencode.cost.usage`, token totals |
 | `opencode.user_prompt` | `opencode.prompt.length`, `opencode.prompt.part_count`, `opencode.prompt.parts.*`, agent, model |
-| `opencode.assistant_response` | all five `gen_ai.usage.*` counts, `opencode.cost.usage`, `opencode.response.duration_ms`, `gen_ai.response.finish_reasons` |
+| `opencode.assistant_response` | all five `gen_ai.usage.*` counts, `opencode.cost.usage`, `opencode.response.duration_ms`, `opencode.response.length`, `gen_ai.response.finish_reasons`, `gen_ai.request.*` sampling parameters |
 | `opencode.tool_result` | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `opencode.tool.status`, `opencode.tool.duration_ms`, `opencode.tool.output.size` |
-| `opencode.tool_decision` | `opencode.permission.decision`, `opencode.permission.id`, `gen_ai.tool.name` |
+| `opencode.tool_decision` | `opencode.permission.decision`, `opencode.permission.source`, `opencode.permission.id`, `gen_ai.tool.name` |
 | `opencode.api_error` | `error.type`, `http.response.status_code`, `opencode.error.retryable`, `opencode.retry.attempt` |
 | `opencode.file_edited` | `code.language`, `opencode.file.additions`, `opencode.file.deletions` |
 | `opencode.compaction` | — |
-| `opencode.command_executed` | `opencode.command.name` |
+| `opencode.compaction_autocontinue` | `opencode.compaction.overflow`, `opencode.compaction.autocontinue_enabled`, `gen_ai.agent.name` |
+| `opencode.command_executed` | `opencode.command.name`, `opencode.command.has_arguments` |
+| `opencode.todo_updated` | `opencode.todo.total`, `opencode.todo.{status}` counts |
 
 ### Traces
 
@@ -163,8 +169,11 @@ invoke_agent opencode          ← root, one per session (session.created → se
 └── session_compaction         ← instant span
 ```
 
-A `chat` span covers one **assistant message**, which may internally span several provider
-round-trips; `opencode.session.request.count` counts the same unit, so the two always agree.
+A `chat` span opens at the `chat.params` hook — immediately before the provider request — and closes
+when the assistant message completes, so it covers the whole round-trip rather than only the part
+after the response starts arriving. It represents one **assistant message**, which may internally
+span several provider round-trips; `opencode.session.request.count` counts the same unit, so the two
+always agree.
 
 Set `filteredTools` to keep high-volume `read`/`glob`/`grep` calls out of the trace without losing
 their counts:
@@ -197,11 +206,18 @@ no `OTEL_LOG_USER_PROMPTS` equivalent because there is nothing to gate.
 | Attribute | Source |
 | --- | --- |
 | `service.name` | `serviceName`, default `opencode` |
-| `service.version` | host version, when known |
+| `service.version` | the `installation.updated` event |
 | `deployment.environment.name` | `environment` |
 | `host.name` | `os.hostname()` |
 | `opencode.project.name` | OpenCode project id |
 | `opencode.directory`, `opencode.worktree` | plugin input |
+| `vcs.repository.ref.name` | the `vcs.branch.updated` event |
+
+`service.version` and `vcs.repository.ref.name` are the two attributes OpenCode only reveals as
+*events*, which arrive after the OTel resource is already fixed. They are declared as deferred
+(promise-valued) resource attributes, which exporters await before the first export. The wait is
+bounded — **2 seconds by default** — so a host that never emits them delays the first export briefly
+and then omits the attribute, rather than blocking export forever.
 
 Unlike some implementations, the git author email is **not** collected. If you want per-developer
 attribution, opt in explicitly — which also keeps the choice visible in config rather than implicit
@@ -217,6 +233,26 @@ export OTEL_RESOURCE_ATTRIBUTES="enduser.id=dev@example.com,team.id=platform"
 `includeSessionId` is on**. Session id is unbounded cardinality and metric backends bill per series,
 so the default keeps it off. Turn it on when you need per-session metric drill-down and your backend
 can afford it.
+
+## What is deliberately not collected
+
+The plugin observes 5 of the 19 plugin hooks and 16 of the 32 SDK event types. The rest are left
+alone on purpose, and it is worth knowing which, so an absence is never mistaken for a bug.
+
+| Source | Why not |
+| --- | --- |
+| `chat.headers`, `shell.env` | Carry credentials and environment. Reading them to emit shape would mean handling secrets for no telemetry gain. |
+| `experimental.chat.messages.transform`, `experimental.chat.system.transform` | Content — the conversation and the system prompt. |
+| `tool.definition` | Tool descriptions, static and identical every run. |
+| `lsp.client.diagnostics` | The payload is `{serverID, path}` only — **no severity and no counts**. Emitting it would produce one high-volume event per diagnostics publish with nothing to aggregate. Worth revisiting if the event ever carries counts. |
+| `command.execute.before` | Redundant: `command.executed` already carries the name and arguments. |
+| `tui.*` (3 events), `pty.*` (4 events) | Terminal-UI and pseudo-terminal churn, unrelated to agent behaviour. |
+| `lsp.updated`, `server.connected`, `installation.update.available`, `session.updated` | Lifecycle noise with no measurable dimension. |
+| `file.edited` | Carries no `sessionID`, so it cannot be attributed. Line counts come from `session.diff` instead. |
+| `message.removed`, `message.part.removed` | Deletions of already-reported records; re-reporting them would double-count. |
+
+`auth` / `provider` / `tool` are registration hooks, not observation points — this plugin registers
+nothing.
 
 ## Flushing
 

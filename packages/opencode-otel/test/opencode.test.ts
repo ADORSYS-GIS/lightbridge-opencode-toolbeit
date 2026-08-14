@@ -23,7 +23,9 @@ async function load(options: Record<string, unknown>, env: Record<string, string
     logger,
     env,
     registerProcessHandlers: false,
-    hostInfo: { hostname: "test-host", version: "0.12.0" },
+    hostInfo: { hostname: "test-host", version: "0.13.0" },
+    // Keep the resource's deferred attributes from holding up the first export.
+    deferredTimeoutMs: 5,
     exporters: { trace: () => spans, log: () => logs, metric: () => undefined }
   })(pluginInput(), options);
   return { hooks, logger, spans, logs };
@@ -79,6 +81,9 @@ describe("createOtelPlugin", () => {
       event: { type: "session.idle", properties: { sessionID: "ses_1" } }
     } as never);
 
+    // `session.idle` fires a flush, but the exporter must first await the
+    // resource's deferred attributes, so the export lands a tick later.
+    await vi.waitFor(() => expect(spans.getFinishedSpans().length).toBeGreaterThan(0));
     const names = spans.getFinishedSpans().map((span) => span.name);
     expect(names).toContain("execute_tool edit");
     expect(names).toContain("chat kimi-k2.6");
@@ -230,5 +235,83 @@ describe("exit handling", () => {
     }
     // The `once` handler removed itself, so a second beforeExit is a no-op.
     expect(process.listenerCount("beforeExit")).toBe(before);
+  });
+});
+
+describe("the full hook surface", () => {
+  it("registers and drives every observing hook", async () => {
+    const { hooks, logs } = await load({ endpoint: "http://localhost:4318" });
+
+    expect(hooks["chat.params"]).toBeDefined();
+    expect(hooks["permission.ask"]).toBeDefined();
+    expect(hooks["experimental.text.complete"]).toBeDefined();
+    expect(hooks["experimental.compaction.autocontinue"]).toBeDefined();
+
+    await hooks.event?.({
+      event: { type: "session.created", properties: { info: { id: "ses_1" } } }
+    } as never);
+    await hooks["chat.params"]?.(
+      { sessionID: "ses_1", agent: "build", model: { id: "kimi-k2.6" } } as never,
+      { temperature: 0.3 } as never
+    );
+    await hooks["experimental.text.complete"]?.(
+      { sessionID: "ses_1", messageID: "msg_1", partID: "p1" } as never,
+      { text: "abcd" } as never
+    );
+    await hooks["permission.ask"]?.(
+      { id: "perm_1", sessionID: "ses_1", type: "edit" } as never,
+      { status: "allow" } as never
+    );
+    await hooks["experimental.compaction.autocontinue"]?.(
+      { sessionID: "ses_1", overflow: true } as never,
+      { enabled: true } as never
+    );
+    await hooks.event?.({
+      event: { type: "installation.updated", properties: { version: "1.15.10" } }
+    } as never);
+    await hooks.event?.({
+      event: { type: "vcs.branch.updated", properties: { branch: "main" } }
+    } as never);
+    await hooks.event?.({
+      event: { type: "message.updated", properties: { info: assistantMessage() } }
+    } as never);
+    await hooks.event?.({
+      event: { type: "session.idle", properties: { sessionID: "ses_1" } }
+    } as never);
+
+    await vi.waitFor(() => expect(logs.getFinishedLogRecords().length).toBeGreaterThan(0));
+    const names = logs.getFinishedLogRecords().map((r) => r.attributes["event.name"]);
+    expect(names).toContain("opencode.tool_decision");
+    expect(names).toContain("opencode.compaction_autocontinue");
+    expect(names).toContain("opencode.assistant_response");
+
+    const response = logs
+      .getFinishedLogRecords()
+      .find((r) => r.attributes["event.name"] === "opencode.assistant_response");
+    expect(response?.attributes["opencode.response.length"]).toBe(4);
+    expect(response?.attributes["gen_ai.request.temperature"]).toBe(0.3);
+  });
+
+  it("stamps the host version and branch onto the resource once their events arrive", async () => {
+    const { hooks, logs } = await load({ endpoint: "http://localhost:4318" });
+    await hooks.event?.({
+      event: { type: "installation.updated", properties: { version: "1.15.10" } }
+    } as never);
+    await hooks.event?.({
+      event: { type: "vcs.branch.updated", properties: { branch: "release/x" } }
+    } as never);
+    await hooks.event?.({
+      event: { type: "session.created", properties: { info: { id: "ses_1" } } }
+    } as never);
+    await hooks.event?.({
+      event: { type: "session.idle", properties: { sessionID: "ses_1" } }
+    } as never);
+
+    await vi.waitFor(() => expect(logs.getFinishedLogRecords().length).toBeGreaterThan(0));
+    const resource = logs.getFinishedLogRecords()[0]?.resource;
+    await resource?.waitForAsyncAttributes?.();
+    // `hostInfo.version` settles first in this harness; the branch has no other source.
+    expect(resource?.attributes["vcs.repository.ref.name"]).toBe("release/x");
+    expect(resource?.attributes["service.version"]).toBe("0.13.0");
   });
 });

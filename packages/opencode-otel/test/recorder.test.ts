@@ -354,7 +354,14 @@ describe("permissions and commands", () => {
     });
 
     expect(points(metricNamed(await env.metrics(), "opencode.permission.decision.count"))).toEqual([
-      [1, { "opencode.permission.decision": "allow", "gen_ai.tool.name": "edit" }]
+      [
+        1,
+        {
+          "opencode.permission.decision": "allow",
+          "opencode.permission.source": "user",
+          "gen_ai.tool.name": "edit"
+        }
+      ]
     ]);
     expect(
       logsNamed(await env.logs(), "opencode.tool_decision")[0]?.attributes["opencode.permission.id"]
@@ -368,7 +375,7 @@ describe("permissions and commands", () => {
       properties: { sessionID: "ses_1", permissionID: "perm_x", response: "deny" }
     });
     expect(points(metricNamed(await env.metrics(), "opencode.permission.decision.count"))).toEqual([
-      [1, { "opencode.permission.decision": "deny" }]
+      [1, { "opencode.permission.decision": "deny", "opencode.permission.source": "user" }]
     ]);
   });
 
@@ -601,5 +608,331 @@ describe("trace context handoff", () => {
       }
     });
     expect(recorder.currentChatContext()).toBeUndefined();
+  });
+});
+
+describe("resource attributes that only arrive as events", () => {
+  it("hands the host version and branch to the resource sinks", () => {
+    const seen: Record<string, string> = {};
+    recorder = new TelemetryRecorder({
+      providers: env.providers,
+      config: env.config,
+      logger: env.logger,
+      now: () => clock,
+      resourceSinks: {
+        version: (value) => {
+          seen.version = value;
+        },
+        branch: (value) => {
+          seen.branch = value;
+        }
+      }
+    });
+
+    emit({ type: "installation.updated", properties: { version: "1.15.10" } });
+    emit({ type: "vcs.branch.updated", properties: { branch: "main" } });
+    expect(seen).toEqual({ version: "1.15.10", branch: "main" });
+  });
+
+  it("ignores a branch event with no branch", () => {
+    let called = false;
+    recorder = new TelemetryRecorder({
+      providers: env.providers,
+      config: env.config,
+      logger: env.logger,
+      now: () => clock,
+      resourceSinks: {
+        branch: () => {
+          called = true;
+        }
+      }
+    });
+    emit({ type: "vcs.branch.updated", properties: {} });
+    expect(called).toBe(false);
+  });
+});
+
+describe("chat.params", () => {
+  it("opens the chat span before the request, so propagation has a context", () => {
+    startSession();
+    expect(recorder.currentChatContext()).toBeUndefined();
+
+    recorder.onChatParams(
+      { sessionID: "ses_1", agent: "build", model: { id: "kimi-k2.6" } } as never,
+      { temperature: 0.2, topP: 0.9, topK: 40, maxOutputTokens: 8192 } as never
+    );
+    // This is the window in which the provider request actually goes out.
+    expect(recorder.currentChatContext()).toBeDefined();
+  });
+
+  it("stamps sampling parameters onto the finished chat span", async () => {
+    startSession();
+    recorder.onChatParams(
+      { sessionID: "ses_1", agent: "build", model: { id: "kimi-k2.6" } } as never,
+      { temperature: 0.2, topP: 0.9, topK: 40, maxOutputTokens: 8192 } as never
+    );
+    emit({ type: "message.updated", properties: { info: assistantMessage() } });
+
+    const chat = (await env.spans()).find((span) => span.name === "chat kimi-k2.6");
+    expect(chat?.attributes["gen_ai.request.temperature"]).toBe(0.2);
+    expect(chat?.attributes["gen_ai.request.top_p"]).toBe(0.9);
+    expect(chat?.attributes["gen_ai.request.top_k"]).toBe(40);
+    expect(chat?.attributes["gen_ai.request.max_tokens"]).toBe(8192);
+  });
+
+  it("produces one chat span, not two, when params precede the message", async () => {
+    startSession();
+    recorder.onChatParams(
+      { sessionID: "ses_1", agent: "build", model: { id: "kimi-k2.6" } } as never,
+      {} as never
+    );
+    emit({ type: "message.updated", properties: { info: assistantMessage() } });
+    expect((await env.spans()).filter((span) => span.name.startsWith("chat "))).toHaveLength(1);
+  });
+
+  it("drops non-numeric sampling values", async () => {
+    startSession();
+    recorder.onChatParams(
+      { sessionID: "ses_1", model: { id: "kimi-k2.6" } } as never,
+      { temperature: Number.NaN, maxOutputTokens: undefined } as never
+    );
+    emit({ type: "message.updated", properties: { info: assistantMessage() } });
+    const chat = (await env.spans()).find((span) => span.name === "chat kimi-k2.6");
+    expect(chat?.attributes["gen_ai.request.temperature"]).toBeUndefined();
+    expect(chat?.attributes["gen_ai.request.max_tokens"]).toBeUndefined();
+  });
+
+  it("closes an abandoned pending span when a new request starts", async () => {
+    startSession();
+    const params = { sessionID: "ses_1", model: { id: "kimi-k2.6" } } as never;
+    recorder.onChatParams(params, {} as never);
+    recorder.onChatParams(params, {} as never);
+    // The first request never produced an assistant message; its span is closed
+    // rather than leaked.
+    expect((await env.spans()).filter((span) => span.name.startsWith("chat "))).toHaveLength(1);
+  });
+});
+
+describe("response size", () => {
+  it("records assistant text length without the text", async () => {
+    startSession();
+    recorder.onTextComplete({ sessionID: "ses_1", messageID: "msg_1" } as never, {
+      text: "hello"
+    });
+    recorder.onTextComplete({ sessionID: "ses_1", messageID: "msg_1" } as never, {
+      text: " world"
+    });
+    emit({ type: "message.updated", properties: { info: assistantMessage() } });
+
+    const [record] = logsNamed(await env.logs(), "opencode.assistant_response");
+    expect(record?.attributes["opencode.response.length"]).toBe(11);
+    expect(JSON.stringify(record?.attributes)).not.toContain("hello");
+  });
+
+  it("ignores a non-string payload", async () => {
+    startSession();
+    recorder.onTextComplete({ sessionID: "ses_1", messageID: "msg_1" } as never, {});
+    emit({ type: "message.updated", properties: { info: assistantMessage() } });
+    const [record] = logsNamed(await env.logs(), "opencode.assistant_response");
+    expect(record?.attributes["opencode.response.length"]).toBeUndefined();
+  });
+});
+
+describe("auto-resolved permissions", () => {
+  it("counts a permission the config auto-allowed, which never gets a reply", async () => {
+    startSession();
+    recorder.onPermissionAsk({ id: "perm_a", sessionID: "ses_1", type: "edit" } as never, {
+      status: "allow"
+    });
+
+    expect(points(metricNamed(await env.metrics(), "opencode.permission.decision.count"))).toEqual([
+      [
+        1,
+        {
+          "opencode.permission.decision": "allow",
+          "opencode.permission.source": "auto",
+          "gen_ai.tool.name": "edit"
+        }
+      ]
+    ]);
+  });
+
+  it("stays silent for a prompt the user still has to answer", async () => {
+    startSession();
+    recorder.onPermissionAsk({ id: "perm_b", sessionID: "ses_1", type: "bash" } as never, {
+      status: "ask"
+    });
+    expect(metricNamed(await env.metrics(), "opencode.permission.decision.count")).toBeUndefined();
+  });
+
+  it("does not double-count when a reply follows an auto-decision", async () => {
+    startSession();
+    recorder.onPermissionAsk({ id: "perm_c", sessionID: "ses_1", type: "edit" } as never, {
+      status: "deny"
+    });
+    emit({
+      type: "permission.replied",
+      properties: { sessionID: "ses_1", permissionID: "perm_c", response: "deny" }
+    });
+    expect(
+      points(metricNamed(await env.metrics(), "opencode.permission.decision.count"))
+    ).toHaveLength(1);
+  });
+});
+
+describe("compaction trigger", () => {
+  it("reports whether the context forced the compaction", async () => {
+    startSession();
+    recorder.onCompactionAutocontinue(
+      { sessionID: "ses_1", agent: "build", overflow: true } as never,
+      { enabled: true }
+    );
+    const [record] = logsNamed(await env.logs(), "opencode.compaction_autocontinue");
+    expect(record?.attributes["opencode.compaction.overflow"]).toBe(true);
+    expect(record?.attributes["opencode.compaction.autocontinue_enabled"]).toBe(true);
+  });
+
+  it("reports a manual compaction and a disabled autocontinue", async () => {
+    startSession();
+    recorder.onCompactionAutocontinue({ sessionID: "ses_1", overflow: false } as never, {
+      enabled: false
+    });
+    const [record] = logsNamed(await env.logs(), "opencode.compaction_autocontinue");
+    expect(record?.attributes["opencode.compaction.overflow"]).toBe(false);
+    expect(record?.attributes["opencode.compaction.autocontinue_enabled"]).toBe(false);
+  });
+});
+
+describe("todos", () => {
+  it("records counts by status, never the todo text", async () => {
+    startSession();
+    emit({
+      type: "todo.updated",
+      properties: {
+        sessionID: "ses_1",
+        todos: [
+          { id: "1", content: "secret plan", status: "completed", priority: "high" },
+          { id: "2", content: "other", status: "pending", priority: "low" },
+          { id: "3", content: "third", status: "pending", priority: "low" }
+        ]
+      }
+    });
+    const [record] = logsNamed(await env.logs(), "opencode.todo_updated");
+    expect(record?.attributes["opencode.todo.total"]).toBe(3);
+    expect(record?.attributes["opencode.todo.pending"]).toBe(2);
+    expect(record?.attributes["opencode.todo.completed"]).toBe(1);
+    expect(JSON.stringify(record?.attributes)).not.toContain("secret plan");
+  });
+
+  it("handles a todo with no status", async () => {
+    startSession();
+    emit({ type: "todo.updated", properties: { sessionID: "ses_1", todos: [{ id: "1" }] } });
+    const [record] = logsNamed(await env.logs(), "opencode.todo_updated");
+    expect(record?.attributes["opencode.todo.unknown"]).toBe(1);
+  });
+});
+
+describe("commands", () => {
+  it("reports whether arguments were passed, not what they were", async () => {
+    startSession();
+    emit({
+      type: "command.executed",
+      properties: {
+        name: "review",
+        sessionID: "ses_1",
+        arguments: "--secret token",
+        messageID: "m"
+      }
+    });
+    const [record] = logsNamed(await env.logs(), "opencode.command_executed");
+    expect(record?.attributes["opencode.command.has_arguments"]).toBe(true);
+    expect(JSON.stringify(record?.attributes)).not.toContain("secret");
+
+    emit({
+      type: "command.executed",
+      properties: { name: "plain", sessionID: "ses_1", arguments: "  ", messageID: "m2" }
+    });
+    const blank = logsNamed(await env.logs(), "opencode.command_executed")[1];
+    expect(blank?.attributes["opencode.command.has_arguments"]).toBe(false);
+  });
+});
+
+describe("state pruning", () => {
+  it("drops finished-message and tool bookkeeping when a turn ends", async () => {
+    startSession();
+    emit({ type: "message.updated", properties: { info: assistantMessage() } });
+    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", callID: "c1" });
+    recorder.onToolAfter({ tool: "edit", sessionID: "ses_1", callID: "c1", args: {} }, {});
+    emit({ type: "session.idle", properties: { sessionID: "ses_1" } });
+
+    expect(recorder.pendingStateSize()).toEqual(
+      expect.objectContaining({ finalizedMessages: 0, finishedTools: 0, sessions: 0 })
+    );
+    // The cumulative-diff memory deliberately survives an idle.
+    emit({
+      type: "session.diff",
+      properties: { sessionID: "ses_1", diff: [{ file: "a.ts", additions: 5, deletions: 0 }] }
+    });
+    emit({ type: "session.idle", properties: { sessionID: "ses_1" } });
+    expect(recorder.pendingStateSize().diffs).toBe(1);
+  });
+
+  it("forgets a deleted session entirely, diffs included", () => {
+    startSession();
+    emit({
+      type: "session.diff",
+      properties: { sessionID: "ses_1", diff: [{ file: "a.ts", additions: 5, deletions: 0 }] }
+    });
+    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", callID: "c1" });
+    emit({
+      type: "permission.updated",
+      properties: { id: "p1", type: "edit", sessionID: "ses_1", messageID: "m", title: "t" }
+    });
+
+    emit({ type: "session.deleted", properties: { info: { id: "ses_1" } } });
+    expect(recorder.pendingStateSize()).toEqual({
+      sessions: 0,
+      chats: 0,
+      pendingChats: 0,
+      tools: 0,
+      finalizedMessages: 0,
+      finishedTools: 0,
+      permissions: 0,
+      diffs: 0
+    });
+  });
+
+  it("does not re-count a diff for a session that resumes after idle", async () => {
+    startSession();
+    const diff = [{ file: "a.ts", additions: 7, deletions: 0 }];
+    emit({ type: "session.diff", properties: { sessionID: "ses_1", diff } });
+    emit({ type: "session.idle", properties: { sessionID: "ses_1" } });
+    emit({ type: "session.diff", properties: { sessionID: "ses_1", diff } });
+
+    const [[value]] = points(metricNamed(await env.metrics(), "opencode.lines_of_code.count"));
+    expect(value).toBe(7);
+  });
+});
+
+describe("host-driven shutdown", () => {
+  it("drains on server.instance.disposed", async () => {
+    let shutdowns = 0;
+    recorder = new TelemetryRecorder({
+      providers: {
+        ...env.providers,
+        shutdown: async () => {
+          shutdowns += 1;
+          await env.providers.forceFlush();
+        }
+      },
+      config: env.config,
+      logger: env.logger,
+      now: () => clock
+    });
+    startSession();
+    emit({ type: "server.instance.disposed", properties: { directory: "/repo" } });
+    await Promise.resolve();
+    expect(shutdowns).toBe(1);
+    expect((await env.spans()).some((span) => span.name === "invoke_agent opencode")).toBe(true);
   });
 });
