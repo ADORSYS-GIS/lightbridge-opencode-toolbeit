@@ -1,3 +1,4 @@
+import { DEFAULT_REFRESH_MS } from "./token-source.js";
 import type {
   ExporterKind,
   MetricTemporality,
@@ -209,6 +210,14 @@ export function resolveOtelConfig(raw: unknown, env: EnvSource = process.env): R
       : stringList(opts.filteredTools)
   );
 
+  // Accept either a shell-ish string or an explicit argv array. The string form
+  // is split on whitespace only — no shell is involved, so quoting and
+  // substitution are deliberately not supported. Use the array form for a path
+  // with spaces.
+  const tokenCommand = stringList(env.OPENCODE_OTEL_TOKEN_COMMAND ?? (opts.tokenCommand as unknown))
+    .flatMap((part) => (Array.isArray(opts.tokenCommand) ? [part] : part.split(/\s+/)))
+    .filter((part) => part !== "");
+
   const enabledSignals = SIGNALS.filter((s) => exporters[s] !== "none");
 
   return {
@@ -217,6 +226,15 @@ export function resolveOtelConfig(raw: unknown, env: EnvSource = process.env): R
     endpoint,
     endpoints,
     headers,
+    tokenCommand,
+    tokenHeader: env.OPENCODE_OTEL_TOKEN_HEADER || opts.tokenHeader || "Authorization",
+    tokenPrefix: env.OPENCODE_OTEL_TOKEN_PREFIX ?? opts.tokenPrefix ?? "Bearer ",
+    tokenRefreshMs:
+      parsePositiveInt(env.OPENCODE_OTEL_TOKEN_REFRESH_MS) ??
+      (opts.tokenRefreshMs && opts.tokenRefreshMs > 0 ? opts.tokenRefreshMs : DEFAULT_REFRESH_MS),
+    tokenTimeoutMs:
+      parsePositiveInt(env.OPENCODE_OTEL_TOKEN_TIMEOUT_MS) ??
+      (opts.tokenTimeoutMs && opts.tokenTimeoutMs > 0 ? opts.tokenTimeoutMs : 10_000),
     exporters,
     serviceName: env.OTEL_SERVICE_NAME || opts.serviceName || DEFAULTS.serviceName,
     environment: env.OPENCODE_OTEL_ENVIRONMENT || opts.environment || undefined,

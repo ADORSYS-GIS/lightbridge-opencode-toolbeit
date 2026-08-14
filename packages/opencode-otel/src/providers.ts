@@ -31,8 +31,10 @@ import type { Tracer } from "@opentelemetry/api";
 import type { Meter } from "@opentelemetry/api";
 
 import { signalUrl } from "./config.js";
+import { type ExporterLike, withFailureLogging } from "./export-logging.js";
 import type { Logger } from "./logging.js";
-import type { ResolvedOtelConfig } from "./types.js";
+import { createTokenSource, type TokenSource } from "./token-source.js";
+import type { ResolvedOtelConfig, SignalName } from "./types.js";
 
 const INSTRUMENTATION_SCOPE = "@vymalo/opencode-otel";
 
@@ -56,29 +58,47 @@ export interface TelemetryProviders {
  * without reaching the network or constructing real OTLP clients.
  */
 export interface ExporterFactories {
-  trace?: (config: ResolvedOtelConfig) => SpanExporter | undefined;
-  metric?: (config: ResolvedOtelConfig) => PushMetricExporter | undefined;
-  log?: (config: ResolvedOtelConfig) => LogRecordExporter | undefined;
+  trace?: (config: ResolvedOtelConfig, tokenSource?: TokenSource) => SpanExporter | undefined;
+  metric?: (
+    config: ResolvedOtelConfig,
+    tokenSource?: TokenSource
+  ) => PushMetricExporter | undefined;
+  log?: (config: ResolvedOtelConfig, tokenSource?: TokenSource) => LogRecordExporter | undefined;
 }
 
-function otlpArgs(config: ResolvedOtelConfig, signal: "traces" | "metrics" | "logs") {
+/**
+ * Build the exporter's `url` + `headers`. With a credential helper configured,
+ * `headers` is an async factory the exporter calls before every export — which
+ * is what lets a five-minute OIDC token be refreshed underneath a long-running
+ * session instead of going stale at the first expiry.
+ */
+function otlpArgs(config: ResolvedOtelConfig, signal: SignalName, tokenSource?: TokenSource) {
   const url = signalUrl(config, signal);
-  return url ? { url, headers: config.headers } : undefined;
+  if (!url) {
+    return undefined;
+  }
+  if (!tokenSource) {
+    return { url, headers: config.headers };
+  }
+  return {
+    url,
+    headers: async () => ({ ...config.headers, ...(await tokenSource.headers()) })
+  };
 }
 
 const defaultFactories: Required<ExporterFactories> = {
-  trace: (config) => {
+  trace: (config, tokenSource) => {
     if (config.exporters.traces === "console") {
       return new ConsoleSpanExporter();
     }
-    const args = otlpArgs(config, "traces");
+    const args = otlpArgs(config, "traces", tokenSource);
     return args ? new OTLPTraceExporter(args) : undefined;
   },
-  metric: (config) => {
+  metric: (config, tokenSource) => {
     if (config.exporters.metrics === "console") {
       return new ConsoleMetricExporter();
     }
-    const args = otlpArgs(config, "metrics");
+    const args = otlpArgs(config, "metrics", tokenSource);
     return args
       ? new OTLPMetricExporter({
           ...args,
@@ -89,11 +109,11 @@ const defaultFactories: Required<ExporterFactories> = {
         })
       : undefined;
   },
-  log: (config) => {
+  log: (config, tokenSource) => {
     if (config.exporters.logs === "console") {
       return new ConsoleLogRecordExporter();
     }
-    const args = otlpArgs(config, "logs");
+    const args = otlpArgs(config, "logs", tokenSource);
     return args ? new OTLPLogExporter(args) : undefined;
   }
 };
@@ -169,14 +189,35 @@ export function createProviders(
   const flushers: Array<() => Promise<void>> = [];
   const shutdowns: Array<() => Promise<void>> = [];
 
+  const tokenSource =
+    config.tokenCommand.length > 0
+      ? createTokenSource({
+          command: config.tokenCommand,
+          header: config.tokenHeader,
+          prefix: config.tokenPrefix,
+          refreshMs: config.tokenRefreshMs,
+          timeoutMs: config.tokenTimeoutMs,
+          logger
+        })
+      : undefined;
+
+  // A rejected export is the symptom of a dead credential, so drop the cached
+  // token and let the next export re-run the helper rather than retrying with
+  // something the collector has already refused.
+  const onFailure = tokenSource ? () => tokenSource.invalidate() : undefined;
+
+  const observe = <T extends ExporterLike>(exporter: T, signal: SignalName): T =>
+    withFailureLogging(exporter, signal, logger, { onFailure });
+
   let tracer: Tracer | undefined;
   let meter: Meter | undefined;
   let otelLogger: OtelLogger | undefined;
 
   if (config.exporters.traces !== "none") {
     try {
-      const exporter = make.trace(config);
-      if (exporter) {
+      const built = make.trace(config, tokenSource);
+      if (built) {
+        const exporter = observe(built, "traces");
         const provider = new TracerProvider({
           resource,
           spanProcessors: [
@@ -197,8 +238,9 @@ export function createProviders(
 
   if (config.exporters.metrics !== "none") {
     try {
-      const exporter = make.metric(config);
-      if (exporter) {
+      const built = make.metric(config, tokenSource);
+      if (built) {
+        const exporter = observe(built, "metrics");
         const provider = new MeterProvider({
           resource,
           readers: [
@@ -219,8 +261,9 @@ export function createProviders(
 
   if (config.exporters.logs !== "none") {
     try {
-      const exporter = make.log(config);
-      if (exporter) {
+      const built = make.log(config, tokenSource);
+      if (built) {
+        const exporter = observe(built, "logs");
         const provider = new LoggerProvider({
           resource,
           processors: [

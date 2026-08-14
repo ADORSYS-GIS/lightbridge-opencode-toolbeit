@@ -157,3 +157,55 @@ describe("signalUrl", () => {
     expect(signalUrl(resolveOtelConfig({}, {}), "traces")).toBeUndefined();
   });
 });
+
+describe("credential helper", () => {
+  it("is absent unless configured", () => {
+    expect(resolveOtelConfig({}, {}).tokenCommand).toEqual([]);
+  });
+
+  it("splits a string command on whitespace", () => {
+    expect(resolveOtelConfig({ tokenCommand: "governance-auth token" }, {}).tokenCommand).toEqual([
+      "governance-auth",
+      "token"
+    ]);
+  });
+
+  it("keeps an argv array intact, so a path may contain spaces", () => {
+    expect(
+      resolveOtelConfig({ tokenCommand: ["/opt/my tools/governance-auth", "token"] }, {})
+        .tokenCommand
+    ).toEqual(["/opt/my tools/governance-auth", "token"]);
+  });
+
+  it("lets the environment override the command", () => {
+    expect(
+      resolveOtelConfig(
+        { tokenCommand: "from-config" },
+        { OPENCODE_OTEL_TOKEN_COMMAND: "from-env token" }
+      ).tokenCommand
+    ).toEqual(["from-env", "token"]);
+  });
+
+  it("defaults the header, prefix and refresh cadence", () => {
+    const config = resolveOtelConfig({ tokenCommand: "helper" }, {});
+    expect(config.tokenHeader).toBe("Authorization");
+    expect(config.tokenPrefix).toBe("Bearer ");
+    expect(config.tokenRefreshMs).toBe(240_000);
+    expect(config.tokenTimeoutMs).toBe(10_000);
+  });
+
+  it("accepts an empty prefix for a raw API-key header", () => {
+    const config = resolveOtelConfig(
+      { tokenCommand: "helper", tokenHeader: "x-api-key", tokenPrefix: "" },
+      {}
+    );
+    expect(config.tokenHeader).toBe("x-api-key");
+    expect(config.tokenPrefix).toBe("");
+  });
+
+  it("takes the refresh cadence from the environment", () => {
+    expect(resolveOtelConfig({}, { OPENCODE_OTEL_TOKEN_REFRESH_MS: "60000" }).tokenRefreshMs).toBe(
+      60_000
+    );
+  });
+});
