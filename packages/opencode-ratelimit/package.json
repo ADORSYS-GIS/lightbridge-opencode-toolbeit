@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-ratelimit",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "OpenCode plugin that makes OpenAI-compatible providers rate-limit aware: it reads Envoy Gateway / IETF draft-03 rate-limit response headers (x-ratelimit-limit/remaining/reset), proactively throttles requests when the quota is exhausted, and backs off and retries on HTTP 429.",
   "license": "MIT",
   "author": "vymalo contributors",
