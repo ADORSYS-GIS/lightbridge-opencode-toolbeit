@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-code-index",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "description": "Personal OpenCode plugin that indexes a repository into an embedded DuckDB store and exposes code_* tools (symbol, callers, callees, references, blast_radius) backed by a tree-sitter symbol graph. Content-addressed by git blob and scoped per branch, so branch/worktree switches re-index only the delta.",
   "license": "MIT",
