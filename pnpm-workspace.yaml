@@ -28,10 +28,35 @@ allowBuilds:
 minimumReleaseAgeExclude:
   - cronstrue@3.20.0
 
-# fast-uri (transitive via @modelcontextprotocol/sdk > ajv, pulled in by
-# opencode-browser-mcp / opencode-devtools-mcp) resolved to 3.1.2, which is
-# vulnerable to two high-severity host-confusion advisories
-# (GHSA-v2hh-gcrm-f6hx, GHSA-4c8g-83qw-93j6), tripping the release
-# workflow's `pnpm audit --audit-level=high` gate. Both are fixed in 3.1.4.
+# Transitive dependencies pulled in through @modelcontextprotocol/sdk (by
+# opencode-browser-mcp / opencode-devtools-mcp) that carry high-severity
+# advisories and so trip the release workflow's `pnpm audit --audit-level=high`
+# gate. Each entry pins to the first version that clears every advisory known
+# against it — raise the floor rather than widening the range, and leave the
+# advisory ids so the next person can tell whether an entry is still needed.
+#
+# fast-uri (via ajv, ajv-formats): host confusion via a userinfo `@`
+# (GHSA-v2hh-gcrm-f6hx, GHSA-4c8g-83qw-93j6, fixed in 3.1.4) and then via a
+# backslash authority introducer (GHSA-7p8r-x3mc-p8w7, fixed in 3.1.5). The
+# earlier `^3.1.4` pin satisfied the first two and still resolved below the
+# third's floor, so the gate failed again on the next release.
+#
+# ip-address (via express-rate-limit): Address4 decodes leading-zero octets as
+# decimal while resolvers read them as octal, allowing SSRF and a
+# trust-boundary bypass (GHSA-mwp4-54f8-5fhr, fixed in 10.3.1).
+# postcss / nanoid arrive through the vite + WXT toolchain (devDependencies
+# only — they are not in any published tarball, but `pnpm audit` does not
+# distinguish, and neither does the release gate). Both are pinned by range
+# selector so the override applies to the vulnerable line without forcing a
+# major on anything that legitimately wants a newer one.
+#
+# postcss: a `\r` in a source map URL escapes the comment context
+# (GHSA-r28c-9q8g-f849, fixed in 8.5.18).
+# nanoid: non-integer input silently produces predictable ids
+# (GHSA-28wg-ghj8-5hjv, fixed in 3.3.16) and a pool-reuse collision
+# (GHSA-2v37-7h3g-55p8, fixed in 3.3.18).
 overrides:
-  fast-uri: ^3.1.4
+  fast-uri: ^3.1.5
+  ip-address: ^10.3.1
+  postcss@<8.5.18: ^8.5.18
+  nanoid@<3.3.18: ^3.3.18

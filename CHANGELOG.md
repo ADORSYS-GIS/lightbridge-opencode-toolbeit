@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All twelve workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`). PR references link to the change.
 
+## [Unreleased]
+
+### Fixed
+
+- **all plugins:** Raised the `pnpm-workspace.yaml` audit overrides to clear four high-severity advisories that were failing `publish.yml`'s `pnpm audit --audit-level=high` gate and blocking the 0.13.0 release. `fast-uri` was already pinned to `^3.1.4` for two earlier host-confusion advisories, but a third ([GHSA-7p8r-x3mc-p8w7](https://github.com/advisories/GHSA-7p8r-x3mc-p8w7), backslash authority introducer) has a floor of 3.1.5 — the old pin satisfied the advisories it was written for and silently resolved below the new one. Also pinned `ip-address` ≥10.3.1 ([GHSA-mwp4-54f8-5fhr](https://github.com/advisories/GHSA-mwp4-54f8-5fhr), SSRF via leading-zero octets; transitive through `@modelcontextprotocol/sdk` → `express-rate-limit`), and `postcss` ≥8.5.18 / `nanoid` ≥3.3.18 from the vite + WXT toolchain — devDependencies only, but the gate does not distinguish. Each override now carries its advisory ids so a future reader can tell whether the entry is still earning its place. `vite` moved 8.0.14 → 8.2.1 within its existing `^8` range.
+
 ## [0.13.0] — 2026-08-14
 
 ### Added

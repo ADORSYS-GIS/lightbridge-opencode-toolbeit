@@ -75,7 +75,7 @@
   "devDependencies": {
     "@types/luxon": "^3.7.1",
     "@types/papaparse": "^5.5.2",
-    "vite": "^8.0.14",
+    "vite": "^8.2.1",
     "vitest": "^4.1.7"
   }
 }
