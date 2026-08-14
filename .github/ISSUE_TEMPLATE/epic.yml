@@ -2,6 +2,7 @@ name: Epic
 description: A large initiative spanning multiple stories with a meaningful business or technical objective.
 title: "[Epic]: "
 labels: ["epic"]
+type: Epic
 body:
   - type: markdown
     attributes:

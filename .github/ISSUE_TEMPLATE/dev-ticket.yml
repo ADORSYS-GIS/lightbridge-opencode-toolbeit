@@ -2,6 +2,7 @@ name: Development Ticket
 description: Implementation work, bugs, refactors, technical tasks, spikes, or operational work.
 title: "[Ticket]: "
 labels: ["ticket"]
+type: Task
 body:
   - type: markdown
     attributes:
