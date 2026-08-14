@@ -75,7 +75,7 @@
     "@opentelemetry/semantic-conventions": "^1.43.0"
   },
   "devDependencies": {
-    "vite": "^8.0.14",
+    "vite": "^8.2.1",
     "vitest": "^4.1.7"
   }
 }

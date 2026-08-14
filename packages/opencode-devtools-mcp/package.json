@@ -59,7 +59,7 @@
     "@vymalo/opencode-devtools": "workspace:*"
   },
   "devDependencies": {
-    "vite": "^8.0.14",
+    "vite": "^8.2.1",
     "vitest": "^4.1.7"
   }
 }
