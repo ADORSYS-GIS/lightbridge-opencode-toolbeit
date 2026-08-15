@@ -31,7 +31,7 @@ AI output is not truth — review AI-generated code as untrusted, and never subm
 
 ```sh
 pnpm install            # install the whole workspace
-pnpm -r build           # compile every package (tsc → dist/, wxt build for the extension)
+pnpm -r build           # oxc emits dist/ for library packages (no type check); wxt build for the extension
 pnpm -r test            # vitest in each package that has tests
 ```
 
@@ -45,6 +45,12 @@ pnpm -r build && pnpm -r typecheck && pnpm -r test && pnpm lint && pnpm format:c
 
 > **Order matters.** `@vymalo/opencode-browser-mcp` typechecks against
 > `@vymalo/opencode-browser`'s built `./lib` export, so **build before typecheck/test** (CI does).
+
+> **`pnpm build` never type-checks.** Library packages build with
+> `node ../../scripts/build-package.mjs`, which uses [oxc](https://oxc.rs) to emit JS and `.d.ts`
+> in one process with zero type analysis. `pnpm typecheck` (`tsc --noEmit`) is the only
+> type-safety gate — a green build says nothing about types. See
+> [ADR-0010](docs/adr/0010-oxc-build-isolated-declarations.md).
 
 ## Per-package iteration (faster)
 
@@ -74,8 +80,16 @@ pnpm test:integration
 - **Biome, not ESLint/Prettier.** Config in [`biome.json`](biome.json): double quotes, 100-col,
   no trailing commas, semicolons always. Keep **0 lint warnings** — `noNonNullAssertion` is a
   warning the codebase stays clean of; don't introduce `!`.
-- **Strict TypeScript** (`tsconfig.base.json`: `ES2022` + `NodeNext` + `strict`). Use `node:`
-  prefixes for built-ins.
+- **Strict TypeScript** (`tsconfig.base.json`: `ES2022` + `NodeNext` + `strict` +
+  `isolatedDeclarations`). The last one is a real authoring rule, not just a compiler flag: every
+  exported symbol needs a type the compiler can read off its own file, because `build` derives
+  `.d.ts` files with oxc's `isolatedDeclaration`, which never consults the type checker. In
+  practice, add an explicit annotation on things like `export const FooPlugin: Plugin =
+  createFoo()` and an explicit return type on every exported function — inference that reaches
+  into another file is exactly what this rejects. A violation is caught by `pnpm typecheck`, with
+  a pointer to the offending export. See
+  [ADR-0010](docs/adr/0010-oxc-build-isolated-declarations.md). Use `node:` prefixes for
+  built-ins.
 - **kebab-case filenames** for `.ts/.tsx/.css/.md/.json/.sh`; `camelCase` vars/functions;
   `PascalCase` types/components; `SCREAMING_SNAKE_CASE` true constants.
 - **Tests** live in `test/`, not co-located. Vitest everywhere.
@@ -111,17 +125,28 @@ Two entry points per published package: `"."` → `dist/index.js` (kept intentio
 
 ## Releasing (maintainers)
 
-Versions are bumped **manually** — no changesets. The five published packages
-(`opencode-oauth2`, `opencode-models-info`, `opencode-ratelimit`, `opencode-browser`,
-`opencode-browser-mcp`) plus the three private ones (workspace root, `plugin-bundle`,
-`browser-extension`) are all kept on **one version line** and bumped together in a single PR.
-After it merges, a maintainer publishes:
+Versions are bumped **manually** — no changesets. All twelve workspace packages sit on **one
+version line** and are bumped together in a single PR that also adds the `CHANGELOG.md` entry: the
+eight published ones (`opencode-oauth2`, `opencode-models-info`, `opencode-ratelimit`,
+`opencode-browser`, `opencode-browser-mcp`, `opencode-devtools`, `opencode-devtools-mcp`,
+`opencode-otel`) plus four private (workspace root, `plugin-bundle`, `browser-extension`,
+`opencode-code-index`).
 
-1. Tag the commit and publish a GitHub Release → `publish.yml` runs the gate, `npm publish`es the
-   five packages (with provenance), attaches the extension zips to the Release, and `wxt submit`s
-   to the Chrome Web Store + Firefox AMO (each gated on its store secrets).
-2. A `workflow_dispatch` with `dry_run: true` validates everything (incl. store creds via
-   `wxt submit --dry-run`) **without** publishing.
+After that PR merges, a maintainer publishes by dispatching the workflow:
+
+```sh
+gh workflow run publish.yml -f dry_run=false
+```
+
+It runs the gate, publishes the eight npm packages with provenance, attaches the extension zips,
+and `wxt submit`s to the Chrome Web Store + Firefox AMO (each gated on its own store secrets, so a
+store with no credentials is skipped rather than failing). `-f dry_run=true` validates everything,
+store credentials included, without publishing.
+
+> [!IMPORTANT]
+> **Do not tag the commit or cut a GitHub Release.** This repo deliberately has neither — a release
+> is the workflow run, not a tag. Changelog entries are anchored by `chore(release)` commit
+> boundaries instead.
 
 See the [Releasing section in CLAUDE.md](CLAUDE.md#releasing) for the full mechanics.
 

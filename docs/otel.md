@@ -365,7 +365,7 @@ can afford it.
 
 ## What is deliberately not collected
 
-The plugin observes 5 of the 19 plugin hooks and 16 of the 32 SDK event types. The rest are left
+The plugin observes 9 of the 19 plugin hooks and 16 of the 32 SDK event types. The rest are left
 alone on purpose, and it is worth knowing which, so an absence is never mistaken for a bug.
 
 | Source | Why not |

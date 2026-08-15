@@ -107,10 +107,11 @@ pnpm --filter @vymalo/opencode-oauth2 build
 
 ## Companion plugins
 
-This workspace ships two more **auth-agnostic** plugins you can stack on the same provider (they compose with oauth2, static API keys, or no auth):
+This workspace ships more **auth-agnostic** plugins you can stack on the same provider (they compose with oauth2, static API keys, or no auth):
 
 - [`@vymalo/opencode-models-info`](packages/opencode-models-info/README.md) — enrich models with context length, pricing, modalities, and capability flags from a metadata endpoint.
 - [`@vymalo/opencode-ratelimit`](packages/opencode-ratelimit/README.md) — read the gateway's `x-ratelimit-*` headers and proactively throttle / back off on 429 (with reset-magnitude `tiers` and per-model `scope`).
+- [`@vymalo/opencode-otel`](packages/opencode-otel/README.md) — export what the session is doing and costing as OTLP traces, metrics and logs (real USD cost, all five token types, tool results, errors). Inert until an endpoint is configured. See [`docs/otel.md`](docs/otel.md).
 
-Recommended `plugin` order: `@vymalo/opencode-oauth2` → `@vymalo/opencode-models-info` → `@vymalo/opencode-ratelimit`. See the [root README](README.md#all-three-together) for a combined config example.
+Recommended `plugin` order: `@vymalo/opencode-oauth2` → `@vymalo/opencode-models-info` → `@vymalo/opencode-ratelimit`. See the [root README](README.md#-stacking-the-belt) for a combined config example.
 

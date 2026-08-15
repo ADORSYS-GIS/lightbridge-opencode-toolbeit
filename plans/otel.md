@@ -1,7 +1,9 @@
 # OpenTelemetry plugin (design)
 
-Status: **implemented.** Initial surface shipped in 0.12.0; full hook/event coverage in 0.13.0. New published package: `@vymalo/opencode-otel` (OpenCode
-plugin). User-facing reference: [`docs/otel.md`](../docs/otel.md).
+Status: **implemented.** Initial surface shipped in 0.12.0; full hook/event coverage in 0.13.0;
+short-lived credential support (`tokenCommand`), export-failure log visibility, and repository (VCS)
+metadata shipped in 0.14.0. Published package: `@vymalo/opencode-otel`
+(OpenCode plugin). User-facing reference: [`docs/otel.md`](../docs/otel.md).
 
 Goal, in one line: **give OpenCode the telemetry surface Claude Code and Codex already ship** — so an
 organization can answer "what is this agent costing us, where does the time go, and what did it
@@ -199,7 +201,7 @@ out of the trace while still counting them in metrics.
 ## Coverage of the host surface
 
 The first cut wired 5 hooks and 11 event types, which left real gaps — including two resource
-attributes that were declared but could never be populated. Current state: **5 of 19 hooks** and
+attributes that were declared but could never be populated. Current state: **9 of 19 hooks** and
 **16 of 32 event types**, with the remainder excluded on stated grounds (see
 [`docs/otel.md`](../docs/otel.md#what-is-deliberately-not-collected)).
 

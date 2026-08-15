@@ -4,11 +4,15 @@ How `@vymalo/opencode-oauth2` actually runs inside OpenCode: what each hook does
 
 If you just want to copy YAML, jump to the [GitHub Actions](./github-actions.md) or [Kubernetes](./kubernetes.md) cookbooks. This page is for the adopter who needs to reason about failure modes.
 
-> The workspace also ships a second, independent plugin —
-> [`@vymalo/opencode-models-info`](./models-info.md) — that enriches model
-> metadata after auth is resolved. It is documented separately; this page
-> covers the oauth2 plugin only, plus the one place the two intersect (the
-> [config-time bearer propagation](#config--plugin-load) in step 6 below).
+> The workspace also ships several other independent plugins — most notably
+> [`@vymalo/opencode-models-info`](./models-info.md), which enriches model
+> metadata after auth is resolved, and [`@vymalo/opencode-otel`](./otel.md),
+> the suite's only *observer*. Each is documented separately; this page
+> covers the oauth2 plugin in depth, plus the one place oauth2 and
+> models-info intersect (the [config-time bearer propagation](#config--plugin-load)
+> in step 6 below). otel's hook usage gets its own canonical account in
+> [its section below](#vymaloopencode-otel--the-only-observer), since it is
+> the one plugin in the suite whose hook surface rivals oauth2's in breadth.
 
 ## The two hooks
 
@@ -294,3 +298,25 @@ If a flow that should have returned a refresh token didn't (`authorization_code`
 ## Provider ID resolution
 
 In `chat.headers`, the provider id is resolved as `input.model?.providerID ?? input.provider?.info?.id`. The fallback to `provider.info.id` matters when OpenCode flows hand the hook a `model` with an unset `providerID` — older OpenCode versions did this for certain config shapes. With both unset, the hook is a no-op and the request goes out without an `Authorization` header (which would 401 against an OAuth-protected gateway — useful signal in logs).
+
+## `@vymalo/opencode-otel` — the only observer
+
+Every other plugin in the suite either *registers* something (a provider, a tool, a `fetch` wrapper that changes behavior) or *reads and merges* config. `@vymalo/opencode-otel` does neither: it registers no tools, hosts no server, and mutates nothing in the resolved config except one `fetch` wrapper installed purely for observation. It exists to answer "what actually happened in this session," not to change what happens. Full source: [`packages/opencode-otel/src/opencode.ts`](../packages/opencode-otel/src/opencode.ts).
+
+### Hook surface
+
+`@opencode-ai/plugin`'s `Hooks` interface currently exposes **19** distinct hook keys (`event`, `config`, `tool`, `auth`, `provider`, `chat.message`, `chat.params`, `chat.headers`, `permission.ask`, `command.execute.before`, `tool.execute.before`, `shell.env`, `tool.execute.after`, `experimental.chat.messages.transform`, `experimental.chat.system.transform`, `experimental.session.compacting`, `experimental.compaction.autocontinue`, `experimental.text.complete`, `tool.definition`). otel registers **9** of them — `config`, `event`, `chat.message`, `chat.params`, `tool.execute.before`, `tool.execute.after`, `permission.ask`, `experimental.text.complete`, and `experimental.compaction.autocontinue` — which is the broadest hook surface of any plugin in the suite after oauth2's own two.
+
+It is also the **only plugin that subscribes to `Hooks.event`** — the raw SDK event stream oauth2, models-info, ratelimit and browser never touch. That single hook is what makes session lifecycle, token accounting, tool outcomes, permission decisions, diffs and compaction all observable from one place instead of being reconstructed from several narrower hooks; `TelemetryRecorder.dispatch` (in [`src/recorder.ts`](../packages/opencode-otel/src/recorder.ts)) is a `switch` over `event.type` covering 16 of the SDK's 32 event types, with everything else falling through to a no-op `default` case on stated grounds (documented in [otel.md → What is deliberately not collected](./otel.md#what-is-deliberately-not-collected)).
+
+Two hooks are conspicuously absent given how wide the rest of the surface is: `chat.headers` and `shell.env`. Both exist specifically to carry credentials and environment variables to the model provider — oauth2 owns `chat.headers` to stamp `Authorization`. otel never touches either, because reading them to emit shape (lengths, presence) would mean handling secret-bearing input for zero telemetry gain. This is the same "never touch what it doesn't need" posture as ratelimit never reading `Authorization` (see [security.md](./security.md)).
+
+### The one mutation: trace-context propagation, not authorization
+
+When `traces` are enabled, the `config` hook wraps every provider's `options.fetch` — but unlike oauth2's wrapper, which sets `Authorization`, otel's wrapper (`installTracePropagation` in [`src/propagation.ts`](../packages/opencode-otel/src/propagation.ts)) only ever injects a W3C `traceparent` header, and only when exactly one `chat` span is in flight (`TelemetryRecorder.currentChatContext()`). With zero or more than one in-flight chat, it injects nothing rather than guess a parent — a missing trace link is recoverable, a fabricated one silently corrupts the trace. It never overwrites a `traceparent` a caller already set.
+
+This is the same interception seam `@vymalo/opencode-ratelimit` uses (capture the existing `fetch` at install time, delegate to it, never replace it wholesale), so the two wrappers compose in either registration order — see the [composition example in otel.md](./otel.md#composing-with-other-plugins). A stacked oauth2 → otel → ratelimit `plugin` array therefore ends up with a single `options.fetch` doing three independent things in sequence: bearer injection, trace-context injection, and response-status observation.
+
+### Flushing without a dispose hook
+
+Because the plugin API has no shutdown/dispose hook, otel flushes buffered spans, metrics and logs on `session.idle` (the natural turn boundary) and again on `beforeExit` / `SIGINT` / `SIGTERM` for hard exits — the same defensive pattern the rest of this doc uses for cache writes, applied to network flushes instead of disk. See [otel.md → Flushing](./otel.md#flushing) for the detail on why metrics still wait for their own export interval even when traces and logs have already drained.

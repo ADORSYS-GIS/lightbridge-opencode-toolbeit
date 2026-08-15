@@ -47,7 +47,10 @@ same dashboards. What it adds:
 - **All five token types** — `input`, `output`, `reasoning`, `cache_read`, `cache_write`. On a
   cached agentic session cache-read is routinely the majority of tokens, so summing input+output
   alone measures a different quantity.
-- **Permission decisions**, mapped from OpenCode's `permission.*` events.
+- **Permission decisions**, including ones a config auto-resolved without asking (`permission.ask`
+  covers both; `opencode.permission.source` distinguishes `user` from `auto`).
+- **Repository identity** — `vcs.repository.url.full`, `vcs.repository.name`, `vcs.owner.name`,
+  `vcs.provider.name`, `vcs.ref.head.*` — read straight off disk, credentials stripped.
 - **`opencode.json` configuration**, not just environment variables — required for
   `.well-known/opencode` distribution.
 
@@ -78,6 +81,22 @@ OTLP over **HTTP with a protobuf payload**, only. gRPC is deliberately absent: O
 under Bun as well as Node, and `@grpc/grpc-js` is unreliable there. Put a collector in front if your
 backend needs gRPC. See
 [ADR-0009](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/adr/0009-otel-otlp-http-not-grpc.md).
+
+## Short-lived credentials
+
+A static `Authorization` header is read once at plugin load and never refreshed — fine for a
+long-lived API key, wrong for a collector behind a short OIDC token. Set `tokenCommand` to an
+executable that prints a fresh token on stdout; it is re-run before the token's `exp` claim (or
+`tokenRefreshMs`, when there is none) expires. See
+[docs/otel.md → Short-lived credentials](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/otel.md#short-lived-credentials).
+
+## When exports fail
+
+A rejected OTLP request — an expired credential, an unreachable collector — reaches the host log
+stream as `otel_export_failed` (signal, HTTP status where known, `consecutiveFailures`); recovery is
+reported once as `otel_export_recovered`. Previously this only went to the OTel SDK's own `diag`
+channel, which nothing subscribed to, so telemetry could stop silently. See
+[docs/otel.md → Troubleshooting](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/otel.md#troubleshooting).
 
 ## Full reference
 

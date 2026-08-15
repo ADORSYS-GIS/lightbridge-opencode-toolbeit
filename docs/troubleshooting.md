@@ -4,7 +4,11 @@ Symptom-keyed. Each entry covers what's happening internally, where to look in l
 
 The plugin emits structured JSON logs to stderr (and through `client.app.log()` when running under OpenCode). Anywhere this guide says "look for `<event>` in the logs", that's an event name in the `event` field of those entries — see [architecture.md → Logging](./architecture.md#logging) for the full table.
 
-> This page covers `@vymalo/opencode-oauth2`. For the companion plugins, see the failure-mode tables in [models-info.md](./models-info.md) (metadata enrichment) and [ratelimit.md](./ratelimit.md#failure-modes) (rate-limit throttling).
+> This page covers `@vymalo/opencode-oauth2`, plus a handful of `@vymalo/opencode-otel` symptoms
+> below that are cross-cutting enough to belong here. For the companion plugins, see the
+> failure-mode tables in [models-info.md](./models-info.md) (metadata enrichment),
+> [ratelimit.md](./ratelimit.md#failure-modes) (rate-limit throttling), and
+> [otel.md](./otel.md#troubleshooting) (the full otel failure-mode list).
 
 ## `/models` doesn't list my provider after install
 
@@ -364,6 +368,57 @@ allowBuilds:
 The shipped `pnpm-workspace.yaml` allows these two by default (they're dependencies of vitest/vite + msgpack speedups). If you add a new dep that triggers the same error, audit the package's postinstall script before adding it — `allowBuilds` is the supply-chain-security gate.
 
 **Why pnpm 11's behavior matters.** The legacy `onlyBuiltDependencies` array is silently ignored in `--frozen-lockfile` mode. A local `pnpm install` succeeds because pnpm interactively prompts; CI fails because there's no TTY. Always use `allowBuilds` (the explicit object shape) to keep dev and CI consistent.
+
+## Telemetry silently stops mid-session (`@vymalo/opencode-otel`)
+
+**What's happening.** The session looks entirely healthy but nothing new arrives at the collector. Every OTLP exporter is wrapped so a failed export reaches the host log stream (see `withFailureLogging` in [`src/export-logging.ts`](../packages/opencode-otel/src/export-logging.ts)) — without it, a rejected request would only surface through the OTel SDK's own internal `diag` channel, which nothing here subscribes to, and the failure would be invisible.
+
+**Look for.**
+
+- `otel_export_failed` — carries `signal` (`traces` | `metrics` | `logs`), `status` (the HTTP status the backend supplied, when there is one), `error` (the message, e.g. an OIDC gate's "authentication didn't succeed"), and `consecutiveFailures` (increments each failed export in a row, resets on the next success).
+- `otel_export_recovered` — logged once the next export after a run of failures succeeds, with `afterFailures` showing how many were lost.
+- A `status` of `401` or `403` means the collector rejected the credential — check the `Authorization` header value (static `headers`, or a `tokenCommand` helper) rather than the network path. Any other status (a `5xx`, a connection error with no status) points at the collector itself, not the plugin's credential.
+
+**Fix.** For a static header, confirm it hasn't rotated out from under a long-running process — otel reads `headers` once at plugin load and never refreshes it. For anything short-lived, switch to `tokenCommand` (see [otel.md → Short-lived credentials](./otel.md#short-lived-credentials)) so the token is refreshed automatically ahead of its own expiry instead of going stale mid-session.
+
+## Plugin appears to do nothing (`@vymalo/opencode-otel`)
+
+**What's happening.** No spans, metrics or logs ever show up, and there's no export failure either — because no export was ever attempted. The plugin treats "installed but unconfigured" as a deliberate no-op: with no endpoint and no explicit exporter it initializes no providers, opens no sockets, and registers no hooks beyond the bare `config` hook needed to keep reading the host's log level.
+
+**Look for.**
+
+- `otel_plugin_inactive` at startup, with a `reason` field that tells you which of the two causes applies: `no_exporter_configured` (no `endpoint`/`OTEL_EXPORTER_OTLP_ENDPOINT` and no explicit `exporters`/`OTEL_*_EXPORTER` was found) versus `disabled` (`enabled: false` / `OPENCODE_OTEL_ENABLED=false` was set explicitly, overriding everything else).
+- Its absence, together with `otel_plugin_enabled`, confirms the plugin *did* activate — if you see neither event at all, the plugin isn't loading; check the `plugin` array the same way the [generic oauth2 check](#generic-see-exactly-what-the-plugin-is-doing) below does, substituting `@vymalo/opencode-otel`.
+
+**Fix.** Set `endpoint` in the plugin options or `OTEL_EXPORTER_OTLP_ENDPOINT` in the environment — either is sufficient on its own (see [otel.md → Quick start](./otel.md#quick-start)). Remember configuration is read once at plugin load: an environment variable exported after OpenCode has already started won't be picked up until the next launch.
+
+## Traces arrive but metrics do not (`@vymalo/opencode-otel`)
+
+**What's happening.** This is very often not a failure at all. Traces and logs flush at `session.idle` (the natural turn boundary) plus `beforeExit`/`SIGINT`/`SIGTERM` for hard exits, so they tend to show up quickly. Metrics only export on their own periodic interval — `metricExportIntervalMs` / `OTEL_METRIC_EXPORT_INTERVAL`, **60 seconds by default** — which is not tied to session boundaries at all.
+
+**Look for.** No `otel_metrics_init_failed` and no `otel_export_failed` with `signal: "metrics"` — their absence plus an otherwise-quiet log is the signature of "just wait," not "something broke."
+
+**Fix.** Wait out the interval, or lower `metricExportIntervalMs` for faster feedback while developing against a local collector. If a full 60+ seconds pass with the session still open and still nothing arrives, then treat it as a real failure and check for `otel_metrics_init_failed` (below) or `otel_export_failed` instead.
+
+## Credential helper problems (`@vymalo/opencode-otel` `tokenCommand`)
+
+**What's happening.** A `tokenCommand` credential helper either couldn't be run, exited non-zero, printed nothing to stdout, or its previously-cached token aged past `validUntil` with no successful refresh to replace it. Failure handling is deliberately asymmetric: if the cached token is still valid when a refresh attempt fails, nothing changes — replacing a current token with nothing would lose data for no reason. Only when there is no valid token left does the plugin send the export with no auth header at all, so it fails closed at the collector rather than replaying a credential that has already been refused.
+
+**Look for.**
+
+- `otel_token_command_failed` — either the process itself couldn't be spawned (`command`, `reason`), or it ran but exited non-zero / produced empty stdout (`command`, `exitCode`, `emptyStdout`, `stderrLength`, `durationMs`). Neither variant ever logs stdout or stderr content — stdout *is* the token, and a helper's stderr can echo back the request it was serving.
+- `otel_token_expired` — the cached token's `validUntil` has passed and the most recent refresh attempt didn't produce a usable replacement; the export proceeds with no auth header.
+- `otel_token_refreshed` (debug level) on the happy path — confirms a new token was picked up, with `source` telling you whether the next refresh is scheduled from the token's own JWT `exp` claim (`jwt_exp`) or from the `tokenRefreshMs` fallback interval (`refresh_interval`).
+
+**Fix.** Reproduce the helper manually (`<your tokenCommand> ; echo $?`) — the contract is stdout-only-and-nothing-else on success, non-zero exit with empty stdout on failure. If refreshes keep landing on the `refresh_interval` fallback when you expected `jwt_exp`, the helper's output likely isn't a three-segment JWT, or its `exp` claim isn't a numeric Unix timestamp; `tokenRefreshMs` (default 4 minutes) is intentionally below Keycloak's common 5-minute default so it should still refresh in time either way.
+
+## One signal missing while others work (`@vymalo/opencode-otel`)
+
+**What's happening.** Traces, metrics and logs are three independent providers built in the same `config` hook pass — a failure constructing one is caught and logged without stopping the others, on the principle that partial telemetry beats an exception escaping into the host's plugin loader.
+
+**Look for.** `otel_traces_init_failed`, `otel_metrics_init_failed`, or `otel_logs_init_failed`, each carrying an `error` message. Whichever signal's provider is missing from the log — `otel_plugin_enabled`'s `exporters` field still lists it as configured, but no spans/metrics/logs for that signal ever appear — is the one whose `_init_failed` event to search for.
+
+**Fix.** The logged `error` message names the underlying exporter-construction failure — most often a malformed per-signal endpoint override (`endpoints.metrics`/`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` and friends bypass the base-`endpoint` URL-joining logic entirely and are used verbatim). Fix the offending per-signal config; the other two signals keep working unaffected in the meantime.
 
 ## Generic: see exactly what the plugin is doing
 
