@@ -34,6 +34,7 @@ import { signalUrl } from "./config.js";
 import { type ExporterLike, withFailureLogging } from "./export-logging.js";
 import type { Logger } from "./logging.js";
 import { createTokenSource, type TokenSource } from "./token-source.js";
+import type { VcsInfo } from "./vcs.js";
 import type { ResolvedOtelConfig, SignalName } from "./types.js";
 
 const INSTRUMENTATION_SCOPE = "@vymalo/opencode-otel";
@@ -142,6 +143,8 @@ export function buildResource(
     worktree?: string;
     /** May be a promise, for the same reason as `version` (`vcs.branch.updated`). */
     branch?: MaybePromise<string | undefined>;
+    /** Repository metadata read off disk — see `vcs.ts`. */
+    vcs?: VcsInfo;
   }
 ): Resource {
   const attributes: DetectedResourceAttributes = {
@@ -167,7 +170,33 @@ export function buildResource(
     attributes["opencode.worktree"] = context.worktree;
   }
   if (context.branch) {
+    attributes["vcs.ref.head.name"] = context.branch;
+    // Deprecated in semconv 1.43 in favour of `vcs.ref.head.name`, but it is
+    // what `opencode-otel-plugin` emits and what existing dashboards key on.
+    // Kept as an alias so a collector receiving both plugins stays coherent;
+    // due for removal once those dashboards move.
     attributes["vcs.repository.ref.name"] = context.branch;
+  }
+  const vcs = context.vcs;
+  if (vcs) {
+    if (vcs.url) {
+      attributes["vcs.repository.url.full"] = vcs.url;
+    }
+    if (vcs.name) {
+      attributes["vcs.repository.name"] = vcs.name;
+    }
+    if (vcs.owner) {
+      attributes["vcs.owner.name"] = vcs.owner;
+    }
+    if (vcs.provider) {
+      attributes["vcs.provider.name"] = vcs.provider;
+    }
+    if (vcs.revision) {
+      attributes["vcs.ref.head.revision"] = vcs.revision;
+    }
+    if (vcs.refType) {
+      attributes["vcs.ref.head.type"] = vcs.refType;
+    }
   }
   // Operator-supplied attributes win — they are the escape hatch, and silently
   // ignoring them would make the escape hatch useless.

@@ -256,6 +256,7 @@ export function resolveOtelConfig(raw: unknown, env: EnvSource = process.env): R
     serviceName: env.OTEL_SERVICE_NAME || opts.serviceName || DEFAULTS.serviceName,
     environment: env.OPENCODE_OTEL_ENVIRONMENT || opts.environment || undefined,
     resourceAttributes,
+    collectVcs: parseBool(env.OPENCODE_OTEL_COLLECT_VCS) ?? opts.collectVcs !== false,
     metricExportIntervalMs:
       parsePositiveInt(firstDefined(env, SIGNAL_ENV.metrics.interval)) ??
       (opts.metricExportIntervalMs && opts.metricExportIntervalMs > 0

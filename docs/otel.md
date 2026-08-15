@@ -58,6 +58,7 @@ require restating the rest.
 | `serviceName` | `OTEL_SERVICE_NAME` | `opencode` | `service.name` resource attribute. |
 | `environment` | `OPENCODE_OTEL_ENVIRONMENT` | — | Sets `deployment.environment.name`. Codex's `[otel] environment`. |
 | `resourceAttributes` | `OTEL_RESOURCE_ATTRIBUTES` | `{}` | Extra resource attributes. |
+| `collectVcs` | `OPENCODE_OTEL_COLLECT_VCS` | `true` | Attach repository metadata. See [Repository metadata](#repository-metadata). |
 | `metricExportIntervalMs` | `OTEL_METRIC_EXPORT_INTERVAL` | `60000` | |
 | `logExportIntervalMs` | `OTEL_BLRP_SCHEDULE_DELAY` / `OTEL_LOGS_EXPORT_INTERVAL` | `5000` | |
 | `traceExportIntervalMs` | `OTEL_BSP_SCHEDULE_DELAY` / `OTEL_TRACES_EXPORT_INTERVAL` | `5000` | |
@@ -312,10 +313,15 @@ no `OTEL_LOG_USER_PROMPTS` equivalent because there is nothing to gate.
 | `host.name` | `os.hostname()` |
 | `opencode.project.name` | OpenCode project id |
 | `opencode.directory`, `opencode.worktree` | plugin input |
-| `vcs.repository.ref.name` | the `vcs.branch.updated` event |
+| `vcs.ref.head.name` | the checkout's `HEAD` (falls back to the `vcs.branch.updated` event) |
+| `vcs.ref.head.type` | `branch` or `tag` |
+| `vcs.ref.head.revision` | the HEAD commit SHA |
+| `vcs.repository.url.full` | the `origin` remote, **credentials stripped** |
+| `vcs.repository.name`, `vcs.owner.name` | derived from the remote path |
+| `vcs.provider.name` | `github` / `gitlab` / `bitbucket` / `gitea`, when the host says so |
 
-`service.version` and `vcs.repository.ref.name` are the two attributes OpenCode only reveals as
-*events*, which arrive after the OTel resource is already fixed. They are declared as deferred
+`service.version` is the one attribute OpenCode only reveals as an *event*, which arrives after the
+OTel resource is already fixed. They are declared as deferred
 (promise-valued) resource attributes, which exporters await before the first export. The wait is
 bounded — **2 seconds by default** — so a host that never emits them delays the first export briefly
 and then omits the attribute, rather than blocking export forever.
@@ -327,6 +333,28 @@ in the binary:
 ```bash
 export OTEL_RESOURCE_ATTRIBUTES="enduser.id=dev@example.com,team.id=platform"
 ```
+
+### Repository metadata
+
+The `vcs.*` attributes are read **straight off disk** — `.git/config`, `.git/HEAD`, `.git/refs`,
+`.git/packed-refs`. `git` is never invoked: the plugin runs inside the host process at every session
+start, a subprocess there costs more than the data is worth, and the files are readable whether or
+not `git` is on `PATH`. A linked worktree, where `.git` is a *file* containing `gitdir:`, is handled
+— that is how this project is developed, so it is the case most likely to be exercised.
+
+**Credentials in the remote URL are always stripped.** A remote like
+`https://user:ghp_xxx@github.com/org/repo.git` is ordinary in a CI checkout, and that token would
+otherwise be published on every span, metric and log the process emits. The whole userinfo component
+is dropped — including a bare username, which identifies nothing about the repository — along with
+any query string or fragment. scp-like SSH remotes (`git@github.com:org/repo.git`) become
+`ssh://github.com/org/repo` rather than being rewritten to `https://`, because the transport is a
+fact about the checkout and inventing a different scheme would misreport it.
+
+Every field is independent and best-effort: a repository with no remote still reports its branch and
+revision, and a detached HEAD reports a revision with no ref name. Outside a repository the
+attributes are simply absent.
+
+Set `collectVcs: false` (or `OPENCODE_OTEL_COLLECT_VCS=0`) to publish no repository identity at all.
 
 ### Cardinality
 
