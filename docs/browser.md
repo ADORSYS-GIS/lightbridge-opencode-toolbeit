@@ -457,7 +457,7 @@ surfaces never drift.
 
 ```sh
 # Plugin
-pnpm --filter @vymalo/opencode-browser build      # tsc → dist/
+pnpm --filter @vymalo/opencode-browser build      # oxc → dist/ (no type check; see ADR-0010)
 pnpm --filter @vymalo/opencode-browser test       # vitest
 
 # Extension

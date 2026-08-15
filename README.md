@@ -1,6 +1,6 @@
 # 🧰 OpenCode Toolbelt
 
-> Five small plugins that make [OpenCode](https://opencode.ai) feel like it's running on your own infrastructure — OAuth-secured providers, rich model metadata, polite rate-limiting, and hands in a real browser.
+> Eight small plugins that make [OpenCode](https://opencode.ai) feel like it's running on your own infrastructure — OAuth-secured providers, rich model metadata, polite rate-limiting, hands in a real browser, local utilities, and OpenTelemetry export.
 
 <p>
   <a href="https://github.com/vymalo/opencode-oauth2/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/vymalo/opencode-oauth2/actions/workflows/ci.yml/badge.svg"></a>
@@ -39,7 +39,7 @@ The **OpenCode Toolbelt** is the set of `@vymalo/*` plugins that fill those gaps
 | **browser-mcp** | [`@vymalo/opencode-browser-mcp`](packages/opencode-browser-mcp) | The same browser tools, exposed as an **MCP stdio server** — so Claude Code, Cursor, Cline, and any other MCP client can drive the extension too. |
 | **devtools** | [`@vymalo/opencode-devtools`](packages/opencode-devtools) | A belt of everyday **local utilities** the model can call — `math` (precise eval, units, stats), `codec` (base64/hex/url, JWT decode, gzip), `crypto` (hash/hmac, uuid/ulid, keypairs), `datetime` (parse/format/diff, timezones, cron), `convert` (JSON/YAML/TOML/CSV + JSONPath), and an opt-in, SSRF-guarded `http` client. Deterministic, zero-auth, no server. |
 | **devtools-mcp** | [`@vymalo/opencode-devtools-mcp`](packages/opencode-devtools-mcp) | The same utilities, exposed as an **MCP stdio server** for any MCP client. |
-| **otel** | [`@vymalo/opencode-otel`](packages/opencode-otel) | See what your agent is actually doing and costing: **OTLP traces, metrics and logs** — real USD cost, all five token types (cache read/write included), tool results, permission decisions, API errors, lines of code. What [Claude Code](https://code.claude.com/docs/en/monitoring-usage) and [Codex](https://learn.chatgpt.com/docs/config-file/config-advanced) export, for OpenCode. |
+| **otel** | [`@vymalo/opencode-otel`](packages/opencode-otel) | See what your agent is actually doing and costing: **OTLP traces, metrics and logs** — real USD cost, all five token types (cache read/write included), tool results, permission decisions, API errors, lines of code, repository metadata, and export-failure visibility. Inert until an endpoint is configured. What [Claude Code](https://code.claude.com/docs/en/monitoring-usage) and [Codex](https://learn.chatgpt.com/docs/config-file/config-advanced) export, for OpenCode. |
 | 🧩 **extension** | [`apps/browser-extension`](apps/browser-extension) | The companion Chromium + Firefox extension that the browser plugin / MCP server talk to. Private — ships as a Release asset and on the Chrome Web Store / Firefox AMO. |
 
 ```mermaid
@@ -64,7 +64,7 @@ flowchart LR
 > Every plugin here works with **any** auth scheme — static API key, OAuth2, or none — *except* oauth2 itself, which is the one doing the authenticating. Enable only what you need.
 
 > [!NOTE]
-> The workspace also carries an **experimental, private** plugin — `@vymalo/opencode-code-index` (DuckDB + tree-sitter code indexing: `code_symbol`, `code_callers`, `code_blast_radius`, …). It is **not published**, not part of the five-plugin suite above, and may be removed. See [`docs/code-index.md`](docs/code-index.md).
+> The workspace also carries an **experimental, private** plugin — `@vymalo/opencode-code-index` (DuckDB + tree-sitter code indexing: `code_symbol`, `code_callers`, `code_blast_radius`, …). It is **not published**, not part of the published suite above, and may be removed. See [`docs/code-index.md`](docs/code-index.md).
 
 ## Quickstart
 
@@ -251,6 +251,7 @@ Full index: [`docs/README.md`](docs/README.md). The highlights:
 | [`docs/ratelimit.md`](docs/ratelimit.md) | Reading `x-ratelimit-*`, the throttle/backoff state machine, tiers, the timeout caveat |
 | [`docs/browser.md`](docs/browser.md) | Browser automation — topology, wire protocol, full tool reference, executors, multi-client routing, store publishing |
 | [`docs/devtools.md`](docs/devtools.md) | Devtools utilities — tool groups, full reference, the `math`/`http` security model, plugin + MCP config |
+| [`docs/otel.md`](docs/otel.md) | OpenTelemetry export — config precedence, every metric/log/span, privacy & cardinality |
 | [`docs/recommended-mcps.md`](docs/recommended-mcps.md) | Mature third-party MCP servers to **adopt** (memory, android/iOS, database) instead of rebuilding |
 | [`docs/security.md`](docs/security.md) | Consolidated security model across all plugins — token cache, the browser bridge, blast radius |
 | [`docs/github-actions.md`](docs/github-actions.md) | CI without stored secrets — Keycloak/Auth0/Okta setup, reusable workflow, matrix, fork-PR limits |
@@ -281,7 +282,7 @@ This is a [pnpm](https://pnpm.io) monorepo. Eight packages publish to npm under 
 
 ```sh
 pnpm install          # bootstrap workspace
-pnpm -r build         # compile all packages (tsc → dist/)
+pnpm -r build         # emit all packages to dist/ (oxc, no type checking)
 pnpm -r typecheck     # tsc --noEmit across packages
 pnpm -r test          # fast vitest run (no coverage)
 pnpm coverage         # tests + per-package coverage thresholds (what CI runs)
@@ -295,6 +296,11 @@ Pre-push gate (run all five before opening a PR):
 pnpm -r build && pnpm -r typecheck && pnpm coverage && pnpm lint && pnpm format:check
 ```
 
+> [!NOTE]
+> A green `pnpm build` says nothing about types — it emits with [oxc](https://oxc.rs) and never
+> type-checks. `pnpm typecheck` is the only type-safety gate. See
+> [ADR-0010](docs/adr/0010-oxc-build-isolated-declarations.md).
+
 Per-package iteration is much faster:
 
 ```sh
@@ -306,7 +312,7 @@ For end-to-end usage against a local OpenCode install, see [GETTING_STARTED.md](
 
 ## 🌟 Status
 
-Early but functional, and used in anger. All five plugins are published and on the same version line; the browser extension ships alongside as a Release asset and on the Chrome Web Store / Firefox AMO. Public API may still shift before `1.0` — roadmap in [`plans/prd.md`](plans/prd.md).
+Early but functional, and used in anger. All eight plugins are published and on the same version line; the browser extension ships alongside as a Release asset and on the Chrome Web Store / Firefox AMO. Public API may still shift before `1.0` — roadmap in [`plans/prd.md`](plans/prd.md).
 
 ## 🤝 Contributing
 

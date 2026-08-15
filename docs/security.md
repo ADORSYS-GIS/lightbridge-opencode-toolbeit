@@ -5,8 +5,10 @@ browser plugin — a real browser profile. This page consolidates the security p
 you can reason about the blast radius before enabling one.
 
 > TL;DR: tokens are cached `0o600` and never logged; the rate-limit plugin observes responses but
-> never touches auth; the browser bridge is loopback-only + token-gated and grants control of a
-> real browser profile — **use a throwaway profile**.
+> never touches auth; the otel plugin exports shape only — never prompt, response or tool-argument
+> content — and strips credentials out of any git remote URL before publishing it; the browser
+> bridge is loopback-only + token-gated and grants control of a real browser profile — **use a
+> throwaway profile**.
 
 ## `@vymalo/opencode-oauth2` — tokens & cache
 
@@ -42,6 +44,45 @@ you can reason about the blast radius before enabling one.
 - **In-memory state only** — no disk cache, nothing persisted (a reset window is seconds; stale
   state would be worse than none).
 - Composes with any auth scheme because it's auth-independent.
+
+## `@vymalo/opencode-otel` — telemetry export
+
+Unlike every other plugin here, otel's blast radius runs in the opposite direction: the risk isn't
+that it grants access to something, it's that it might leak something on the way out to a
+third-party backend. The posture is deliberately conservative because a telemetry pipe is exactly
+the kind of thing nobody re-audits once it's wired up.
+
+- **No content capture, anywhere in the pipeline.** Never prompt text, never assistant response
+  text, never tool arguments, never raw API request/response bodies. Every log record carries
+  *shape* only — lengths, counts, durations, sizes, outcomes and error classes — so there is no
+  redaction engine to get wrong because there is nothing to redact in the first place. See
+  [otel.md → Privacy](otel.md#privacy).
+- **Git remote credentials are stripped unconditionally.** A checkout's remote is commonly
+  `https://user:token@host/org/repo.git` in CI. Before `vcs.repository.url.full` is published as a
+  resource attribute on every span, metric and log, `sanitizeRemoteUrl` (in
+  [`src/vcs.ts`](../packages/opencode-otel/src/vcs.ts)) drops the whole userinfo component —
+  including a bare username, which identifies nothing about the repository — along with any query
+  string or fragment. This happens whether or not `collectVcs` scoping narrows anything else; it is
+  not a configurable behavior.
+- **The `tokenCommand` credential helper's stdout is treated as a secret.** Its output is the access
+  token used to authenticate to the OTLP collector, so it is never logged. A failed helper invocation
+  logs the command name, exit code, whether stdout came back empty, and the *length* of stderr — not
+  stderr's contents, because a credential helper's stderr can echo back the request it failed on. See
+  [`src/token-source.ts`](../packages/opencode-otel/src/token-source.ts) and
+  [otel.md → Short-lived credentials](otel.md#short-lived-credentials).
+- **Identifies the machine and the project, never the developer.** Resource attributes cover
+  `service.name`, `host.name`, `opencode.project.name`, `opencode.directory`/`opencode.worktree` and
+  VCS branch/revision — deliberately no git author email. Per-person attribution is available but is
+  an explicit opt-in via `OTEL_RESOURCE_ATTRIBUTES` (e.g. `enduser.id=dev@example.com`), which keeps
+  the choice visible in config instead of baked into the binary.
+- **Cardinality and egress are both switchable.** Session id (`gen_ai.conversation.id`) reaches
+  metrics only when `includeSessionId` is turned on — logs and spans always carry it, but metric
+  backends bill per series, so the default keeps unbounded-cardinality session ids out of the metric
+  path. Repository identity leaves the machine by default whenever `collectVcs` is on (the default);
+  set `collectVcs: false` to publish no repository identity at all.
+- **Inert until configured.** With no endpoint and no explicit exporter, the plugin initializes no
+  providers, opens no sockets, and installs no `fetch` wrapper — installing it costs nothing until an
+  `OTEL_EXPORTER_OTLP_ENDPOINT` or equivalent is actually set.
 
 ## `@vymalo/opencode-browser` & `-mcp` — the bridge
 
