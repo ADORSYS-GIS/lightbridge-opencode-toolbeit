@@ -122,6 +122,6 @@ export function createDevtoolsPlugin(factoryOptions: DevtoolsPluginFactoryOption
   };
 }
 
-export const OpencodeDevtoolsPlugin = createDevtoolsPlugin();
+export const OpencodeDevtoolsPlugin: Plugin = createDevtoolsPlugin();
 
 export default OpencodeDevtoolsPlugin;

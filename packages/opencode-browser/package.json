@@ -1,7 +1,7 @@
 {
   "name": "@vymalo/opencode-browser",
   "version": "0.13.0",
-  "description": "OpenCode plugin that gives the model hands in a real browser: it registers browser_* tools (open, click, type, scroll, screenshot, snapshot, …) and hosts a localhost WebSocket bridge that a companion Chromium/Firefox extension connects to. Tabs are organized into named groups so each task stays isolated and inspectable.",
+  "description": "OpenCode plugin that gives the model hands in a real browser: it registers browser_* tools (open, click, type, scroll, screenshot, snapshot, \u2026) and hosts a localhost WebSocket bridge that a companion Chromium/Firefox extension connects to. Tabs are organized into named groups so each task stays isolated and inspectable.",
   "license": "MIT",
   "author": "vymalo contributors",
   "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
@@ -49,7 +49,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node ../../scripts/build-package.mjs",
     "lint": "biome lint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",

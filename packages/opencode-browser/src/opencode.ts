@@ -219,6 +219,6 @@ export function createBrowserPlugin(factoryOptions: BrowserPluginFactoryOptions 
   };
 }
 
-export const OpencodeBrowserPlugin = createBrowserPlugin();
+export const OpencodeBrowserPlugin: Plugin = createBrowserPlugin();
 
 export default OpencodeBrowserPlugin;

@@ -26,7 +26,7 @@ The plugins are deliberately decoupled: `opencode-models-info`, `opencode-rateli
 
 ```sh
 pnpm install                 # bootstrap workspace
-pnpm -r build                # compile all packages (tsc → dist/)
+pnpm -r build                # compile all packages (oxc → dist/; emit only, no type check)
 pnpm -r typecheck            # tsc --noEmit across packages
 pnpm -r test                 # vitest run in each package that has tests (fast, no coverage)
 pnpm coverage                # vitest run --coverage per package; FAILS below per-package thresholds
@@ -125,7 +125,7 @@ When changing the mapping in [`packages/opencode-models-info/src/mapping.ts`](pa
 ## Conventions worth knowing
 
 - **Biome, not ESLint/Prettier.** Config in [`biome.json`](biome.json) — double quotes, 100-col, no trailing commas, semicolons always. `noNonNullAssertion` is a warning the existing code stays clean of; mirror that in new code (`@vymalo/opencode-oauth2` has 0 warnings, treat that as the bar).
-- **Strict TS.** Base config is in [`tsconfig.base.json`](tsconfig.base.json) — `ES2022` + `NodeNext` + `strict: true`. Per-package tsconfig only sets `rootDir`/`outDir`. `lib.ts` re-exports are the public surface.
+- **Strict TS.** Base config is in [`tsconfig.base.json`](tsconfig.base.json) — `ES2022` + `NodeNext` + `strict: true` + `isolatedDeclarations: true`. That last one is load-bearing: `build` emits with **oxc** and never type-checks, so every export needs a type the compiler can read off a single file. `typecheck` (`tsc --noEmit`) is the only type-safety gate — a green `build` means nothing about types. See [ADR-0010](docs/adr/0010-oxc-build-isolated-declarations.md). Per-package tsconfig only sets `rootDir`/`outDir`. `lib.ts` re-exports are the public surface.
 - **Vitest** is the test runner; each package owns a `vitest.config.ts` (with a `coverage` block + per-package thresholds enforced by `pnpm coverage`). Tests live in `test/`, not co-located. Coverage uses the v8 provider (`@vitest/coverage-v8`).
 - **Node ≥ 22** for the runtime packages (set in each package.json `engines`). Use `node:` prefixed imports for built-ins (`node:fs/promises`, `node:crypto`).
 - **Logging pattern**: every plugin emits structured events through both a JSON console fallback and `client.app.log` (so the host log stream picks them up). Event names use `snake_case` (`models_info_cache_hit`, `oauth2_token_refreshed`). Add new events to that pattern, not ad-hoc `console.log`.

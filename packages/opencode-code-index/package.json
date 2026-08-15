@@ -44,7 +44,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node ../../scripts/build-package.mjs",
     "demo": "node demo/demo.mjs",
     "lint": "biome lint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",

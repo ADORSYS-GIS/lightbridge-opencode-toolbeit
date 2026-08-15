@@ -2,7 +2,7 @@
   "name": "opencode-oauth2-workspace",
   "version": "0.13.0",
   "private": true,
-  "description": "OpenCode Toolbelt — the @vymalo plugin suite for OpenCode: OAuth2/OIDC auth, model-metadata enrichment, rate-limit awareness, and browser automation.",
+  "description": "OpenCode Toolbelt \u2014 the @vymalo plugin suite for OpenCode: OAuth2/OIDC auth, model-metadata enrichment, rate-limit awareness, and browser automation.",
   "packageManager": "pnpm@11.3.0",
   "scripts": {
     "build": "pnpm -r build",
@@ -21,6 +21,7 @@
     "@biomejs/biome": "2.4.15",
     "@types/node": "^25.9.1",
     "@vitest/coverage-v8": "4.1.7",
+    "oxc-transform": "^0.144.0",
     "typescript": "^6.0.3"
   }
 }
