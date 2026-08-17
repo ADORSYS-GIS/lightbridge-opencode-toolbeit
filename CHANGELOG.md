@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All twelve workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`). PR references link to the change.
 
+## [Unreleased]
+
+### Fixed
+
+- **browser-extension:** Dropped `storage` and `activeTab` from the manifest. The Chrome Web Store rejected the 0.14.0 submission under its use-of-permissions policy for requesting `storage` without using it — correctly: every byte the extension persists (settings, history, screenshots, the group registry) goes through Dexie/IndexedDB, which needs no permission, and nothing in `src/` ever touched `chrome.storage`. `activeTab` went with it in the same audit: it grants temporary host access to the active tab on a user gesture, which is strictly narrower than the `<all_urls>` host access the agent genuinely needs to drive arbitrary sites, so it was never doing anything. Nothing else in the list was speculative — `tabs`, `scripting`, `cookies`, `debugger`, `tabGroups` and `sidePanel` each have a call site, now named in a new `test/manifest.test.ts` that pins both the Chromium and Firefox permission sets so a re-addition has to be deliberate. **A store resubmission needs a version bump**, so this fix reaches users only with the next release.
+
 ## [0.14.0] — 2026-08-15
 
 ### Added

@@ -23,7 +23,13 @@ export default defineConfig({
       name: "OpenCode Browser",
       description:
         "Lets an OpenCode agent drive this browser through the @vymalo/opencode-browser plugin's localhost bridge.",
-      permissions: ["tabs", "scripting", "storage", "activeTab", "cookies", ...chromiumOnly],
+      // Keep this list exactly as wide as the code actually uses — the Chrome Web
+      // Store rejects "future proof" permissions (it rejected `storage`, which we
+      // never called: all persistence is Dexie/IndexedDB, which needs no
+      // permission). `activeTab` is likewise redundant next to the `<all_urls>`
+      // host access the agent genuinely needs. Before adding one back, point at
+      // the call site.
+      permissions: ["tabs", "scripting", "cookies", ...chromiumOnly],
       host_permissions: ["<all_urls>"],
       // Firefox (AMO) only: a stable add-on id (so it isn't auto-assigned on
       // first upload) and Mozilla's now-required data-consent declaration. The
