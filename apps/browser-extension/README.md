@@ -61,9 +61,18 @@ session.
 
 ## Permissions
 
-`tabs`, `scripting`, `storage`, `activeTab`, `cookies`, plus `debugger` + `tabGroups` on Chromium
-only (dropped on Firefox, where they don't exist). `<all_urls>` host access is needed because the
-agent can target any site you direct it to. The extension **collects no data off-device** — all
+`tabs`, `scripting`, `cookies`, plus `debugger` + `tabGroups` + `sidePanel` on Chromium only
+(dropped on Firefox, where the first two don't exist and the side panel maps to `sidebar_action`,
+which needs no permission). `<all_urls>` host access is needed because the agent can target any
+site you direct it to.
+
+The list is kept exactly as wide as the code uses — the Chrome Web Store rejects permissions a
+an extension declares but never calls. Notably **`storage` is not requested**: all persistence goes
+through Dexie/IndexedDB, which needs no permission. `activeTab` isn't either — it would only
+grant a subset of the `<all_urls>` access already required. Adding a permission back means
+pointing at the call site that needs it.
+
+The extension **collects no data off-device** — all
 settings/history/screenshots live in local IndexedDB; the only network connection is the
 loopback bridge you configure. The Firefox manifest declares `data_collection_permissions: none`
 accordingly.
