@@ -22,6 +22,13 @@ export interface TokenRuntimeOptions {
    * Override the cached-token read. When supplied, the runtime stores nothing
    * on disk itself; the caller owns persistence (e.g. oauth2's fused
    * CachedServerState). Defaults to reading from this runtime's file cache.
+   *
+   * These overrides cover only the **identity-root token** (what `ensure` /
+   * `refresh` produce). Audience-scoped exchange results always live in this
+   * runtime's default file store under a `identity:audience` key — see
+   * `exchangeToAudience` — because the override interface carries no audience
+   * dimension and routing an exchanged token through it would clobber the
+   * caller's root token (e.g. overwrite oauth2's `CachedServerState.token`).
    */
   getCached?: () => Promise<TokenSet | undefined>;
   /**
@@ -114,8 +121,16 @@ export class TokenRuntime {
   /**
    * RFC 8693 token exchange to an explicit audience, presenting a caller
    * supplied subject token (e.g. the human's token, exchanged to a Source
-   * audience). The result is cached under a derived key so a later
-   * `getExchanged` can return it without re-exchanging.
+   * audience). The result is cached under a derived `identity:audience` key in
+   * this runtime's default file store so a later `getExchanged` can return it
+   * without re-exchanging.
+   *
+   * Note: unlike `ensure` / `refresh`, this always persists to the default file
+   * store and does NOT route through the `getCached`/`setCached` overrides (the
+   * overrides carry no audience dimension; routing an exchanged token through
+   * them would clobber a caller's root token). A persistence-owning caller that
+   * exchanges must copy the returned token into its own store via `getExchanged`
+   * or its own handling.
    */
   async exchangeToAudience(audience: string, subjectToken: string): Promise<TokenSet> {
     const token = await this.client.exchangeToAudience(audience, subjectToken);
