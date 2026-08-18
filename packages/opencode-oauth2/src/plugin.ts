@@ -1,15 +1,21 @@
+import {
+  createJsonConsoleLogger,
+  TokenRuntime,
+  type AuthServerConfig,
+  type Logger,
+  type TokenSet
+} from "@vymalo/opencode-auth-core/lib";
 import { FileCacheStore, resolveCacheDir } from "./cache.js";
 import { type OAuth2ModelSyncConfigInput, validateConfig } from "./config.js";
-import { createJsonConsoleLogger, type Logger } from "./logging.js";
 import { fetchModels } from "./model-discovery.js";
 import { diffModels, normalizeModelList } from "./model-normalization.js";
-import { OAuthClient } from "./oauth/client.js";
 import { startScheduler, type SchedulerHandle } from "./scheduler.js";
-import type { CachedServerState, NormalizedModel, ServerSnapshot, TokenSet } from "./types.js";
+import type { CachedServerState, NormalizedModel, ServerSnapshot } from "./types.js";
 
 interface ServerRuntime {
   state: CachedServerState;
   scheduler?: SchedulerHandle;
+  tokenRuntime?: TokenRuntime;
 }
 
 interface StartOptions {
@@ -49,6 +55,61 @@ export class OAuth2ModelSyncPlugin {
       options.cacheDir ?? resolveCacheDir(this.config.cacheNamespace),
       this.logger
     );
+  }
+
+  private buildTokenRuntime(serverId: string): TokenRuntime {
+    const server = this.requireServerConfig(serverId);
+    const runtime = this.runtimeByServer.get(serverId);
+    const authConfig: AuthServerConfig = {
+      id: server.id,
+      issuer: server.issuer,
+      clientId: server.clientId,
+      clientSecret: server.clientSecret,
+      scopes: server.scopes,
+      authorizationEndpoint: server.authorizationEndpoint,
+      tokenEndpoint: server.tokenEndpoint,
+      deviceAuthorizationEndpoint: server.deviceAuthorizationEndpoint,
+      jwksUri: server.jwksUri,
+      redirectPort: server.redirectPort,
+      authFlow: server.authFlow,
+      pkce: server.pkce,
+      subjectTokenSource: server.subjectTokenSource,
+      tokenExchangeAudience: server.tokenExchangeAudience
+    };
+
+    return new TokenRuntime(server.id, authConfig, {
+      logger: this.logger,
+      fetchImpl: this.options.fetchImpl,
+      timeoutMs: this.config.httpTimeoutMs,
+      onAuthorizationUrl: this.options.onAuthorizationUrl,
+      tokenExpirySkewMs: this.config.tokenExpirySkewMs,
+      // Delegate the token cache to oauth2's fused CachedServerState so the
+      // on-disk location and shape are preserved (tests + existing installs).
+      getCached: async () => runtime?.state.token,
+      setCached: async (token) => {
+        if (!runtime) {
+          return;
+        }
+        const next: CachedServerState = {
+          ...runtime.state,
+          updatedAt: Date.now(),
+          token
+        };
+        await this.cacheStore.saveServerState(next);
+        runtime.state = next;
+      }
+    });
+  }
+
+  private ensureTokenRuntime(serverId: string): TokenRuntime {
+    const runtime = this.runtimeByServer.get(serverId);
+    if (!runtime) {
+      throw new Error(`runtime not initialized for server: ${serverId}`);
+    }
+    if (!runtime.tokenRuntime) {
+      runtime.tokenRuntime = this.buildTokenRuntime(serverId);
+    }
+    return runtime.tokenRuntime;
   }
 
   async initialize(): Promise<void> {
@@ -159,21 +220,13 @@ export class OAuth2ModelSyncPlugin {
     serverId: string,
     options: { interactive?: boolean } = {}
   ): Promise<ServerSnapshot> {
-    const server = this.requireServerConfig(serverId);
-
     const runtime = this.runtimeByServer.get(serverId);
     if (!runtime) {
       throw new Error(`runtime not initialized for server: ${serverId}`);
     }
 
     this.logger.debug("sync_start", { serverId, interactive: options.interactive !== false });
-    const oauth = new OAuthClient(server, {
-      fetchImpl: this.options.fetchImpl,
-      logger: this.logger,
-      timeoutMs: this.config.httpTimeoutMs,
-      onAuthorizationUrl: this.options.onAuthorizationUrl,
-      tokenExpirySkewMs: this.config.tokenExpirySkewMs
-    });
+    const tokenRuntime = this.ensureTokenRuntime(serverId);
 
     const previousState = runtime.state;
 
@@ -184,15 +237,13 @@ export class OAuth2ModelSyncPlugin {
         hadRefreshToken: Boolean(previousState.token?.refreshToken),
         interactive: options.interactive !== false
       });
-      const token = await oauth.ensureToken(previousState.token, {
-        interactive: options.interactive
-      });
+      const token = await tokenRuntime.ensure({ interactive: options.interactive });
       this.logger.trace("oauth2_model_discovery_fetch_start", {
         serverId,
-        baseURL: server.baseURL,
+        baseURL: this.requireServerConfig(serverId).baseURL,
         tokenChanged: token.accessToken !== previousState.token?.accessToken
       });
-      const rawModels = await fetchModels(server.baseURL, token, {
+      const rawModels = await fetchModels(this.requireServerConfig(serverId).baseURL, token, {
         fetchImpl: this.options.fetchImpl,
         timeoutMs: this.config.httpTimeoutMs,
         logger: this.logger
@@ -202,7 +253,10 @@ export class OAuth2ModelSyncPlugin {
         rawModelCount: rawModels.length
       });
 
-      const normalizedModels = normalizeModelList(rawModels, server.nameOverrides);
+      const normalizedModels = normalizeModelList(
+        rawModels,
+        this.requireServerConfig(serverId).nameOverrides
+      );
       const diff = diffModels(previousState.models, normalizedModels);
       this.logger.trace("oauth2_model_discovery_normalized", {
         serverId,
@@ -260,19 +314,12 @@ export class OAuth2ModelSyncPlugin {
     serverId: string,
     options: { interactive?: boolean } = {}
   ): Promise<TokenSet> {
-    const server = this.requireServerConfig(serverId);
     const runtime = this.runtimeByServer.get(serverId);
     if (!runtime) {
       throw new Error(`runtime not initialized for server: ${serverId}`);
     }
 
-    const oauth = new OAuthClient(server, {
-      fetchImpl: this.options.fetchImpl,
-      logger: this.logger,
-      timeoutMs: this.config.httpTimeoutMs,
-      onAuthorizationUrl: this.options.onAuthorizationUrl,
-      tokenExpirySkewMs: this.config.tokenExpirySkewMs
-    });
+    const tokenRuntime = this.ensureTokenRuntime(serverId);
 
     // `interactive` is forwarded so config-time callers can ask for a
     // refresh-only ensure (`interactive: false`): a valid cached token is
@@ -285,9 +332,7 @@ export class OAuth2ModelSyncPlugin {
       hadRefreshToken: Boolean(runtime.state.token?.refreshToken),
       interactive: options.interactive !== false
     });
-    const token = await oauth.ensureToken(runtime.state.token, {
-      interactive: options.interactive
-    });
+    const token = await tokenRuntime.ensure({ interactive: options.interactive });
     if (token.accessToken !== runtime.state.token?.accessToken) {
       this.logger.trace("oauth2_ensure_access_token_refreshed", {
         serverId,
@@ -297,13 +342,6 @@ export class OAuth2ModelSyncPlugin {
             ? Math.max(0, Math.round((token.expiresAt - Date.now()) / 1000))
             : undefined
       });
-      const nextState: CachedServerState = {
-        ...runtime.state,
-        updatedAt: Date.now(),
-        token
-      };
-      await this.cacheStore.saveServerState(nextState);
-      runtime.state = nextState;
     } else {
       this.logger.trace("oauth2_ensure_access_token_reused_cached", {
         serverId,

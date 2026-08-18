@@ -1,43 +1,29 @@
-import type { LogLevel } from "./logging.js";
+import {
+  DEFAULT_AUTH_FLOW,
+  DEFAULT_HTTP_TIMEOUT_MS,
+  DEFAULT_K8S_SA_TOKEN_PATH,
+  DEFAULT_LOG_LEVEL,
+  DEFAULT_TOKEN_EXPIRY_SKEW_MS,
+  validateAuthConfig,
+  type AuthServerConfig,
+  type OAuthAuthFlow,
+  type SubjectTokenSource
+} from "@vymalo/opencode-auth-core/lib";
+import type { LogLevel } from "@vymalo/opencode-auth-core/lib";
+
+export {
+  DEFAULT_AUTH_FLOW,
+  DEFAULT_HTTP_TIMEOUT_MS,
+  DEFAULT_K8S_SA_TOKEN_PATH,
+  DEFAULT_LOG_LEVEL,
+  DEFAULT_TOKEN_EXPIRY_SKEW_MS,
+  type AuthServerConfig,
+  type OAuthAuthFlow,
+  type SubjectTokenSource,
+  validateAuthConfig
+};
 
 export const DEFAULT_SYNC_INTERVAL_MINUTES = 60;
-export const DEFAULT_HTTP_TIMEOUT_MS = 15_000;
-export const DEFAULT_TOKEN_EXPIRY_SKEW_MS = 30_000;
-export const DEFAULT_LOG_LEVEL: LogLevel = "info";
-
-export type OAuthAuthFlow =
-  | "authorization_code"
-  | "device_code"
-  | "client_credentials"
-  | "jwt_bearer"
-  | "token_exchange";
-
-export const DEFAULT_AUTH_FLOW: OAuthAuthFlow = "authorization_code";
-
-/**
- * Where to read the platform-supplied JWT that the plugin presents as the
- * subject token / assertion for the `jwt_bearer` and `token_exchange` flows.
- *
- * - `github_actions` — fetches the OIDC token from the GitHub Actions runtime
- *   via `ACTIONS_ID_TOKEN_REQUEST_URL` + `ACTIONS_ID_TOKEN_REQUEST_TOKEN`,
- *   with the workflow-declared `audience`. The `id-token: write` permission
- *   is required on the job.
- * - `kubernetes_sa` — reads a projected service-account token from the pod
- *   filesystem. Default path `/var/run/secrets/tokens/oauth2/token`; mount a
- *   `projected.sources.serviceAccountToken` volume with the OIDC issuer as
- *   the audience.
- * - `file` — reads any JWT from disk. Useful when an external sidecar
- *   refreshes the token to a fixed path.
- * - `env` — reads the JWT from a named environment variable. Mostly useful
- *   for tests and ad-hoc shells.
- */
-export type SubjectTokenSource =
-  | { type: "github_actions"; audience: string }
-  | { type: "kubernetes_sa"; tokenPath?: string }
-  | { type: "file"; path: string }
-  | { type: "env"; var: string };
-
-export const DEFAULT_K8S_SA_TOKEN_PATH = "/var/run/secrets/tokens/oauth2/token";
 
 export interface OAuthServerConfigInput {
   id: string;

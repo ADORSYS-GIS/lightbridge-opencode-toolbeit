@@ -1,4 +1,4 @@
-import type { OAuthAuthFlow, OAuthServerConfig } from "../config.js";
+import type { AuthServerConfig, OAuthAuthFlow } from "../config.js";
 import { DEFAULT_TOKEN_EXPIRY_SKEW_MS } from "../config.js";
 import type { Logger } from "../logging.js";
 import type { TokenSet } from "../types.js";
@@ -71,7 +71,7 @@ export class OAuthClient {
   private readonly tokenExpirySkewMs: number;
 
   constructor(
-    private readonly server: OAuthServerConfig,
+    private readonly server: AuthServerConfig,
     options: OAuthClientOptions
   ) {
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -276,7 +276,8 @@ export class OAuthClient {
 
   /**
    * Shared driver for jwt_bearer and token_exchange. Both grants:
-   *   - resolve a platform-supplied JWT from `subjectTokenSource`
+   *   - resolve a platform-supplied JWT from `subjectTokenSource` (or take an
+   *     explicitly supplied `subjectToken`, e.g. from exchangeToAudience)
    *   - POST it to the token endpoint with grant-specific form fields
    *   - get back an access token (refresh token is NOT expected for either)
    */
@@ -284,17 +285,22 @@ export class OAuthClient {
     grantType: string;
     extraFields: (jwt: string) => Record<string, string>;
     eventPrefix: string;
+    subjectToken?: string;
   }): Promise<TokenSet> {
-    const subjectTokenSource = this.server.subjectTokenSource;
-    if (!subjectTokenSource) {
-      // Caller already guards this; belt-and-braces for the type narrowing.
-      throw new Error("federated flow requires subjectTokenSource");
+    let subjectToken = spec.subjectToken;
+    let subjectTokenSourceType: string | undefined;
+    if (subjectToken === undefined) {
+      const subjectTokenSource = this.server.subjectTokenSource;
+      if (!subjectTokenSource) {
+        // Caller already guards this; belt-and-braces for the type narrowing.
+        throw new Error("federated flow requires subjectTokenSource");
+      }
+      subjectTokenSourceType = subjectTokenSource.type;
+      subjectToken = await resolveSubjectToken(subjectTokenSource, {
+        fetchImpl: this.fetchImpl,
+        timeoutMs: this.timeoutMs
+      });
     }
-
-    const subjectToken = await resolveSubjectToken(subjectTokenSource, {
-      fetchImpl: this.fetchImpl,
-      timeoutMs: this.timeoutMs
-    });
 
     const endpoints = await this.resolveEndpoints();
     const body = new URLSearchParams({
@@ -314,7 +320,7 @@ export class OAuthClient {
     this.logger.info(`${spec.eventPrefix}_started`, {
       serverId: this.server.id,
       tokenEndpoint: redactUrl(endpoints.tokenEndpoint),
-      subjectTokenSource: subjectTokenSource.type
+      subjectTokenSource: subjectTokenSourceType ?? "explicit"
     });
 
     const response = await this.postWithTimeout(endpoints.tokenEndpoint, body);
@@ -338,6 +344,26 @@ export class OAuthClient {
     });
 
     return token;
+  }
+
+  /**
+   * RFC 8693 token exchange to an explicit audience, presenting a caller-
+   * supplied subject token. Used by consumers (e.g. repo-auth) that want to
+   * scope a human token to a Source audience without configuring a
+   * `subjectTokenSource`. Reuses the same federated-grant machinery as the
+   * `token_exchange` authFlow.
+   */
+  async exchangeToAudience(audience: string, subjectToken: string): Promise<TokenSet> {
+    return this.postFederatedGrant({
+      grantType: "urn:ietf:params:oauth:grant-type:token-exchange",
+      extraFields: () => ({
+        subject_token: subjectToken,
+        subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+        audience
+      }),
+      eventPrefix: "oauth_token_exchange",
+      subjectToken
+    });
   }
 
   /**

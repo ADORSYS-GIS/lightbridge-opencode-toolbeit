@@ -1,22 +1,22 @@
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 
 import {
+  createJsonConsoleLogger,
+  type LogFields,
+  LOG_LEVEL_PRIORITY,
+  type Logger,
+  type LogLevel,
+  type TokenSet
+} from "@vymalo/opencode-auth-core/lib";
+import {
   DEFAULT_LOG_LEVEL,
   type OAuth2ModelSyncConfigInput,
   type OAuthAuthFlow,
   type OAuthServerConfigInput,
   type SubjectTokenSource
 } from "./config.js";
-import {
-  createJsonConsoleLogger,
-  type LogFields,
-  LOG_LEVEL_PRIORITY,
-  type Logger,
-  type LogLevel
-} from "./logging.js";
 import { OAuth2ModelSyncPlugin } from "./plugin.js";
 import { createResponsesRepairFetch } from "./responses-repair.js";
-import type { TokenSet } from "./types.js";
 
 /**
  * Map OpenCode's host-level `config.logLevel` (uppercase `"DEBUG" | "INFO" |

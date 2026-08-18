@@ -1,4 +1,4 @@
-import type { Logger } from "./logging.js";
+import type { Logger } from "@vymalo/opencode-auth-core/lib";
 
 export interface SchedulerHandle {
   stop(): void;

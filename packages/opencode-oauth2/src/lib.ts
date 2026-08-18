@@ -9,7 +9,12 @@ export {
   validateConfig
 } from "./config.js";
 
-export { createJsonConsoleLogger, type LogLevel, type Logger } from "./logging.js";
+export {
+  createJsonConsoleLogger,
+  type LogLevel,
+  type Logger,
+  type TokenSet
+} from "@vymalo/opencode-auth-core/lib";
 
 export { buildModelsUrl, fetchModels } from "./model-discovery.js";
 
@@ -27,6 +32,5 @@ export type {
   ModelDiff,
   NormalizedModel,
   RawModel,
-  ServerSnapshot,
-  TokenSet
+  ServerSnapshot
 } from "./types.js";

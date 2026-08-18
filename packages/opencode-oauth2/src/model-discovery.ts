@@ -1,6 +1,6 @@
-import type { Logger } from "./logging.js";
-import { readResponseBodyPreview, redactUrl, scrubSecrets } from "./oauth/http-utils.js";
-import type { RawModel, TokenSet } from "./types.js";
+import type { Logger, TokenSet } from "@vymalo/opencode-auth-core/lib";
+import { readResponseBodyPreview, redactUrl, scrubSecrets } from "@vymalo/opencode-auth-core/lib";
+import type { RawModel } from "./types.js";
 
 export interface ModelDiscoveryOptions {
   fetchImpl?: typeof fetch;

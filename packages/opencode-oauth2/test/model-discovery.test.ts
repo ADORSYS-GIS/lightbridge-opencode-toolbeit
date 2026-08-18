@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import type { Logger } from "../src/logging.js";
+import type { Logger } from "@vymalo/opencode-auth-core/lib";
 import { fetchModels } from "../src/model-discovery.js";
-import type { TokenSet } from "../src/types.js";
+import type { TokenSet } from "@vymalo/opencode-auth-core/lib";
 
 const token: TokenSet = {
   accessToken: "test-token",
