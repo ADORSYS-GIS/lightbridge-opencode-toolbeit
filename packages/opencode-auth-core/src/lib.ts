@@ -5,7 +5,8 @@ export {
 
 export {
   FileCacheStore,
-  resolveCacheDir
+  resolveCacheDir,
+  resolveCacheRoot
 } from "./cache.js";
 
 export {

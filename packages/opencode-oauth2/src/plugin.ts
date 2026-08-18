@@ -332,8 +332,9 @@ export class OAuth2ModelSyncPlugin {
       hadRefreshToken: Boolean(runtime.state.token?.refreshToken),
       interactive: options.interactive !== false
     });
+    const previousToken = runtime.state.token;
     const token = await tokenRuntime.ensure({ interactive: options.interactive });
-    if (token.accessToken !== runtime.state.token?.accessToken) {
+    if (token.accessToken !== previousToken?.accessToken) {
       this.logger.trace("oauth2_ensure_access_token_refreshed", {
         serverId,
         present: Boolean(token.accessToken),

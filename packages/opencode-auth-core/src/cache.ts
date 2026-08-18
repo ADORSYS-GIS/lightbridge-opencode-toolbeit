@@ -18,6 +18,16 @@ function resolveDefaultCacheRoot(): string {
   return process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache");
 }
 
+/**
+ * The platform's default cache root (never created here, just resolved). Exposed
+ * so consumers can build their own cache paths sharing the same root while
+ * keeping their own on-disk location stable (e.g. oauth2 preserves its existing
+ * `<root>/opencode-oauth2/<ns>` path rather than moving under a new folder).
+ */
+export function resolveCacheRoot(): string {
+  return resolveDefaultCacheRoot();
+}
+
 export function resolveCacheDir(namespace: string): string {
   return join(resolveDefaultCacheRoot(), "opencode-auth-core", namespace);
 }

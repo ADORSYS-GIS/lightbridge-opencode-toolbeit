@@ -2,7 +2,7 @@ import { join } from "node:path";
 
 import {
   FileCacheStore as AuthCacheStore,
-  resolveCacheDir as resolveAuthCacheDir,
+  resolveCacheRoot,
   type Logger
 } from "@vymalo/opencode-auth-core/lib";
 import type { CachedServerState } from "./types.js";
@@ -13,9 +13,14 @@ import type { CachedServerState } from "./types.js";
  * keyed `FileCacheStore`. The state *shape* and validation are oauth2's; the
  * disk IO (per-writer temp + rename, `0o600`) is the shared implementation, so
  * there is no second copy of the atomic-write logic.
+ *
+ * The on-disk location is deliberately preserved as
+ * `<root>/opencode-oauth2/<namespace>` — NOT under auth-core's folder — so
+ * existing installs keep their cached sessions (models + OAuth token) across
+ * the upgrade and users are not forced to re-login.
  */
 export function resolveCacheDir(namespace: string): string {
-  return join(resolveAuthCacheDir("opencode-oauth2"), namespace);
+  return join(resolveCacheRoot(), "opencode-oauth2", namespace);
 }
 
 function hasValidTokenShape(token: unknown): boolean {
