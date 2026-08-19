@@ -4,14 +4,14 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],
-    exclude: ["test/integration/**", "node_modules/**", "dist/**"],
+    exclude: ["node_modules/**", "dist/**"],
     clearMocks: true,
     restoreMocks: true,
     coverage: {
       provider: "v8",
       include: ["src/**"],
       reporter: ["text-summary"],
-      thresholds: { statements: 71, branches: 63, functions: 69, lines: 71 }
+      thresholds: { statements: 75, branches: 62, functions: 75, lines: 75 }
     }
   }
 });

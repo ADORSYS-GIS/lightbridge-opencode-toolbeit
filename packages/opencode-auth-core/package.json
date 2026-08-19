@@ -1,14 +1,14 @@
 {
-  "name": "@vymalo/opencode-oauth2",
+  "name": "@vymalo/opencode-auth-core",
   "version": "0.14.1",
-  "description": "OpenCode plugin for OAuth2/OIDC-secured, OpenAI-compatible model providers with periodic model sync.",
+  "description": "Shared OAuth2/OIDC auth core (token flows, cache, logging, security primitives) for the @vymalo OpenCode plugin suite.",
   "license": "MIT",
   "author": "vymalo contributors",
   "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
-    "directory": "packages/opencode-oauth2"
+    "directory": "packages/opencode-auth-core"
   },
   "bugs": {
     "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
@@ -18,9 +18,8 @@
     "opencode-plugin",
     "oauth2",
     "oidc",
-    "openai-compatible",
-    "ai-sdk",
-    "model-sync"
+    "auth",
+    "token"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -52,17 +51,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "coverage": "vitest run --coverage",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
     "format": "biome format --write .",
     "format:check": "biome format ."
   },
-  "dependencies": {
-    "@opencode-ai/plugin": "1.15.10",
-    "@vymalo/opencode-auth-core": "workspace:*"
-  },
   "devDependencies": {
-    "@ai-sdk/openai": "^2.0.106",
-    "ai": "^5.0.199",
     "vite": "^8.2.1",
     "vitest": "^4.1.7"
   }
