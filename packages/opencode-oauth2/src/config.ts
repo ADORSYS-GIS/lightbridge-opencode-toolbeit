@@ -6,6 +6,7 @@ import {
   DEFAULT_TOKEN_EXPIRY_SKEW_MS,
   validateAuthConfig,
   type AuthServerConfig,
+  type AuthServerConfigInput,
   type OAuthAuthFlow,
   type SubjectTokenSource
 } from "@vymalo/opencode-auth-core/lib";
@@ -125,26 +126,6 @@ function ensureString(value: unknown, path: string): string {
   return value.trim();
 }
 
-function ensureStringArray(value: unknown, path: string): string[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`${path} must be a non-empty array of strings`);
-  }
-
-  return value.map((item, index) => ensureString(item, `${path}[${index}]`));
-}
-
-function validateRedirectPort(value: unknown, path: string): number | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value >= 65536) {
-    throw new Error(`${path} must be a positive integer less than 65536`);
-  }
-
-  return value;
-}
-
 function validateLogLevel(value: unknown, path: string): LogLevel {
   if (value === undefined || value === null) {
     return DEFAULT_LOG_LEVEL;
@@ -165,95 +146,36 @@ function validateLogLevel(value: unknown, path: string): LogLevel {
   );
 }
 
-function validatePkce(value: unknown, path: string): boolean {
-  if (value === undefined || value === null) {
-    return true;
-  }
-  if (typeof value !== "boolean") {
-    throw new Error(`${path} must be a boolean (received ${JSON.stringify(value)})`);
-  }
-  return value;
-}
-
-function validateAuthFlow(value: unknown, path: string): OAuthAuthFlow {
-  if (value === undefined || value === null) {
-    return DEFAULT_AUTH_FLOW;
-  }
-
-  if (
-    value === "authorization_code" ||
-    value === "device_code" ||
-    value === "client_credentials" ||
-    value === "jwt_bearer" ||
-    value === "token_exchange"
-  ) {
-    return value;
-  }
-
-  throw new Error(
-    `${path} must be one of "authorization_code" | "device_code" | "client_credentials" | "jwt_bearer" | "token_exchange" (received ${JSON.stringify(value)})`
-  );
-}
-
-function validateSubjectTokenSource(value: unknown, path: string): SubjectTokenSource | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${path} must be an object`);
-  }
-  const record = value as Record<string, unknown>;
-  const type = record.type;
-  switch (type) {
-    case "github_actions": {
-      const audience = record.audience;
-      if (typeof audience !== "string" || audience.trim().length === 0) {
-        throw new Error(
-          `${path}.audience must be a non-empty string when type is "github_actions"`
-        );
-      }
-      return { type: "github_actions", audience: audience.trim() };
-    }
-    case "kubernetes_sa": {
-      const tokenPath = record.tokenPath;
-      if (tokenPath !== undefined && tokenPath !== null) {
-        if (typeof tokenPath !== "string" || tokenPath.trim().length === 0) {
-          throw new Error(`${path}.tokenPath must be a non-empty string when provided`);
-        }
-        return { type: "kubernetes_sa", tokenPath: tokenPath.trim() };
-      }
-      return { type: "kubernetes_sa" };
-    }
-    case "file": {
-      const filePath = record.path;
-      if (typeof filePath !== "string" || filePath.trim().length === 0) {
-        throw new Error(`${path}.path must be a non-empty string when type is "file"`);
-      }
-      return { type: "file", path: filePath.trim() };
-    }
-    case "env": {
-      const varName = record.var;
-      if (typeof varName !== "string" || varName.trim().length === 0) {
-        throw new Error(`${path}.var must be a non-empty string when type is "env"`);
-      }
-      return { type: "env", var: varName.trim() };
-    }
-    default:
-      throw new Error(
-        `${path}.type must be one of "github_actions" | "kubernetes_sa" | "file" | "env" (received ${JSON.stringify(type)})`
-      );
-  }
+function toAuthInput(input: OAuthServerConfigInput): AuthServerConfigInput {
+  return {
+    id: input.id,
+    issuer: input.issuer,
+    clientId: input.clientId,
+    clientSecret: input.clientSecret,
+    scopes: input.scopes,
+    authorizationEndpoint: input.authorizationEndpoint,
+    tokenEndpoint: input.tokenEndpoint,
+    deviceAuthorizationEndpoint: input.deviceAuthorizationEndpoint,
+    jwksUri: input.jwksUri,
+    redirectPort: input.redirectPort,
+    authFlow: input.authFlow,
+    pkce: input.pkce,
+    subjectTokenSource: input.subjectTokenSource,
+    tokenExchangeAudience: input.tokenExchangeAudience
+  };
 }
 
 function normalizeServerConfig(input: OAuthServerConfigInput, index: number): OAuthServerConfig {
   const path = `servers[${index}]`;
 
-  const id = ensureString(input.id, `${path}.id`);
-  const name = input.name && input.name.trim().length > 0 ? input.name.trim() : id;
-  const issuer = ensureString(input.issuer, `${path}.issuer`);
+  // The auth subset (issuer/client/scopes/endpoints/flows/subject-token-source,
+  // PKCE, redirect-port bounds, and the flow-required clientSecret /
+  // subjectTokenSource checks) is owned by auth-core's validateAuthConfig so
+  // it lives in exactly one place. oauth2 layers its model-sync fields on top.
+  const auth: AuthServerConfig = validateAuthConfig(toAuthInput(input));
+
+  const name = input.name && input.name.trim().length > 0 ? input.name.trim() : auth.id;
   const baseURL = ensureString(input.baseURL, `${path}.baseURL`);
-  const clientId = ensureString(input.clientId, `${path}.clientId`);
-  const scopes = ensureStringArray(input.scopes, `${path}.scopes`);
 
   const syncIntervalMinutes =
     typeof input.syncIntervalMinutes === "number" &&
@@ -262,62 +184,25 @@ function normalizeServerConfig(input: OAuthServerConfigInput, index: number): OA
       ? input.syncIntervalMinutes
       : DEFAULT_SYNC_INTERVAL_MINUTES;
 
-  const redirectPort = validateRedirectPort(input.redirectPort, `${path}.redirectPort`);
-  const authFlow = validateAuthFlow(input.authFlow, `${path}.authFlow`);
-  const pkce = validatePkce(input.pkce, `${path}.pkce`);
-  const subjectTokenSource = validateSubjectTokenSource(
-    input.subjectTokenSource,
-    `${path}.subjectTokenSource`
-  );
-
-  let clientSecret: string | undefined;
-  if (input.clientSecret !== undefined && input.clientSecret !== null) {
-    if (typeof input.clientSecret !== "string" || input.clientSecret.length === 0) {
-      throw new Error(`${path}.clientSecret must be a non-empty string when provided`);
-    }
-    clientSecret = input.clientSecret;
-  }
-
-  if (authFlow === "client_credentials" && !clientSecret) {
-    throw new Error(`${path}.clientSecret is required when authFlow is "client_credentials"`);
-  }
-
-  if ((authFlow === "jwt_bearer" || authFlow === "token_exchange") && !subjectTokenSource) {
-    throw new Error(
-      `${path}.subjectTokenSource is required when authFlow is "${authFlow}" — set it to {type: "github_actions" | "kubernetes_sa" | "file" | "env", ...}`
-    );
-  }
-
-  let tokenExchangeAudience: string | undefined;
-  if (input.tokenExchangeAudience !== undefined && input.tokenExchangeAudience !== null) {
-    if (
-      typeof input.tokenExchangeAudience !== "string" ||
-      input.tokenExchangeAudience.trim().length === 0
-    ) {
-      throw new Error(`${path}.tokenExchangeAudience must be a non-empty string when provided`);
-    }
-    tokenExchangeAudience = input.tokenExchangeAudience.trim();
-  }
-
   return {
-    id,
+    id: auth.id,
     name,
-    issuer,
+    issuer: auth.issuer,
     baseURL,
-    clientId,
-    clientSecret,
-    scopes,
+    clientId: auth.clientId,
+    clientSecret: auth.clientSecret,
+    scopes: auth.scopes,
     syncIntervalMinutes,
     nameOverrides: input.nameOverrides ?? {},
-    authorizationEndpoint: input.authorizationEndpoint,
-    tokenEndpoint: input.tokenEndpoint,
-    deviceAuthorizationEndpoint: input.deviceAuthorizationEndpoint,
-    jwksUri: input.jwksUri,
-    redirectPort,
-    authFlow,
-    pkce,
-    subjectTokenSource,
-    tokenExchangeAudience
+    authorizationEndpoint: auth.authorizationEndpoint,
+    tokenEndpoint: auth.tokenEndpoint,
+    deviceAuthorizationEndpoint: auth.deviceAuthorizationEndpoint,
+    jwksUri: auth.jwksUri,
+    redirectPort: auth.redirectPort,
+    authFlow: auth.authFlow,
+    pkce: auth.pkce,
+    subjectTokenSource: auth.subjectTokenSource,
+    tokenExchangeAudience: auth.tokenExchangeAudience
   };
 }
 
