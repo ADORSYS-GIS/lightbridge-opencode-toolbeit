@@ -1,0 +1,66 @@
+{
+  "name": "@vymalo/opencode-repo-auth",
+  "version": "0.14.1",
+  "description": "OpenCode plugin that gives local-dev requests repo-as-project attribution: a developer logs in once as themselves and every gateway request from an enrolled repo carries a project-scoped bearer.",
+  "license": "MIT",
+  "author": "vymalo contributors",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
+    "directory": "packages/opencode-repo-auth"
+  },
+  "bugs": {
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "oauth2",
+    "token-exchange",
+    "project",
+    "gateway",
+    "ai-sdk"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./lib": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs",
+    "lint": "biome lint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.15.10",
+    "@vymalo/opencode-auth-core": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^8.2.1",
+    "vitest": "^4.1.7"
+  }
+}

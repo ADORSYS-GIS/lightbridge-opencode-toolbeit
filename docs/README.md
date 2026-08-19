@@ -36,6 +36,12 @@ install; come here when you need depth on a specific topic.
 | [otel.md](otel.md) | Config (opencode.json + `OTEL_*`) and precedence, every metric/log/span and its attributes, trace-context propagation, privacy & cardinality, backend recipes |
 | [`../plans/otel.md`](../plans/otel.md) | Design rationale, the build-vs-adopt sweep, and the OpenCode-event → OTel-signal mapping |
 
+### `@vymalo/opencode-repo-auth` — repo-as-project attribution
+| Page | When you need it |
+| --- | --- |
+| [repo-auth.md](repo-auth.md) | Enrolling a repo, the RFC 8693 `project_id` exchange flow, the human-root cache, the model-b renewal policy, the auth-core gap |
+| [adr/0011-repo-auth-project-id-token-exchange.md](adr/0011-repo-auth-project-id-token-exchange.md) | Why a single exchange presenting `project_id` (no `audience`, no mint step) and the fail-closed posture |
+
 ## Cross-cutting
 
 | Page | What it covers |

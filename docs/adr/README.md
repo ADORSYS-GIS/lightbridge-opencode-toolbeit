@@ -35,3 +35,4 @@ Each record is `NNNN-kebab-title.md`, numbered in order, and follows a light
 | [0008](0008-trace-log-tier.md) | A `trace` log tier, unlocked by OpenCode's `DEBUG` | Accepted |
 | [0009](0009-otel-otlp-http-not-grpc.md) | OTLP over HTTP/protobuf, not gRPC | Accepted |
 | [0010](0010-oxc-build-isolated-declarations.md) | Build with oxc under `isolatedDeclarations`; `tsc` keeps type-checking | Accepted |
+| [0011](0011-repo-auth-project-id-token-exchange.md) | repo-auth: `project_id` token exchange, not an audience-scoped Source exchange | Accepted |
