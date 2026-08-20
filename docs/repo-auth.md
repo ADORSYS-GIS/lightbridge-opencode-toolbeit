@@ -320,7 +320,7 @@ cache + inject
 | `repo_auth_exchange_started` / `_success` / `_failed` | token exchange | info / info / error |
 | `repo_auth_exchange_cache_hit` / `_miss` | project-token cache read | trace |
 | `repo_auth_bearer_propagated_to_provider_headers` / `..._skipped_user_set` / `..._skipped_no_token` | config-time stamp | debug |
-| `repo_auth_chat_headers_bearer_injected` / `repo_auth_chat_headers_skipped` | per-request injection | trace |
+| `repo_auth_chat_headers_bearer_injected` / `repo_auth_chat_headers_skipped` / `repo_auth_chat_headers_no_bearer` | per-request injection / unmanaged provider / exchange failure degraded to no header | trace |
 
 Happy-path lifecycle events sit at `debug`/`trace` (silent at default `info`), failures at `warn`/`error` — same convention as oauth2.
 

@@ -260,6 +260,34 @@ describe("createOpencodeRepoAuthPlugin", () => {
     expect(headers.Authorization).toBe("Bearer ok-token");
   });
 
+  it("degrades to no header when the exchange fails inside chat.headers", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-failclosed-"));
+    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit7a-"));
+    const logger = createRecordingLogger();
+    await seedHuman(cacheDir);
+
+    const hooks = await instantiate({
+      logger,
+      cacheDir,
+      cwd,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: "invalid_grant" }), { status: 404 })
+    });
+
+    const config = makeConfig({ gateway: { options: makeRepoAuthProviderOptions() } });
+    await expect(hooks.config?.(config)).resolves.toBeUndefined();
+
+    // The hook must not throw: it returns with no Authorization and the
+    // gateway (not OpenCode) surfaces the 401.
+    const output = { headers: {} as Record<string, string> };
+    await expect(
+      hooks["chat.headers"]?.({ model: { providerID: "gateway" } }, output)
+    ).resolves.toBeUndefined();
+    expect(output.headers.Authorization).toBeUndefined();
+    expect(logger.events.some((e) => e.event === "repo_auth_exchange_failed")).toBe(true);
+    expect(logger.events.some((e) => e.event === "repo_auth_chat_headers_no_bearer")).toBe(true);
+  });
+
   it("keeps only the first IdP group when providers disagree (single-IdP v1 guard)", async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-2idp-"));
     const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit5-"));

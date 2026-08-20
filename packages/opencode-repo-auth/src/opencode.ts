@@ -390,15 +390,23 @@ export function createOpencodeRepoAuthPlugin(
         }
 
         // Fail closed: on any exchange failure we inject NO header — the
-        // gateway 401s, matching the SPI's fail-closed semantics. Errors are
-        // already logged as `repo_auth_exchange_failed`.
-        const token = await plugin.resolveProjectToken({ interactive: true });
-        output.headers.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
-        logger.trace("repo_auth_chat_headers_bearer_injected", {
-          providerId,
-          present: Boolean(token.accessToken),
-          tokenType: token.tokenType || "Bearer"
-        });
+        // request goes out without a bearer and the gateway 401s, matching the
+        // SPI's fail-closed semantics. The failure itself is logged at error
+        // level by `resolveProjectToken` (`repo_auth_exchange_failed`); here we
+        // must not let it escape the hook or the whole chat request would error
+        // instead of degrading to the gateway's 401.
+        try {
+          const token = await plugin.resolveProjectToken({ interactive: true });
+          output.headers.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
+          logger.trace("repo_auth_chat_headers_bearer_injected", {
+            providerId,
+            present: Boolean(token.accessToken),
+            tokenType: token.tokenType || "Bearer"
+          });
+        } catch {
+          logger.trace("repo_auth_chat_headers_no_bearer", { providerId });
+          return;
+        }
       }
     };
   };
