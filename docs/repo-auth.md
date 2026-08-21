@@ -444,7 +444,7 @@ OC->>GW: Send request
   - `git.ts`: scp vs https normalization, `user:pass@` stripping, query/fragment drop, linked-worktree `.git` file resolution, missing remote.
   - `config.ts`: opt-in parsing, missing `projectId`, oauth2-conflict detection, `AuthServerConfigInput` mapping.
   - `plugin.ts`: cache keying (`identity-<hash(identity:key)>` deterministic, NTFS-safe), exchange request shape (asserts `project_id` form param present, no `audience`), model-b re-exchange on expiry, in-flight exchange dedup, no-op matrix, reset clears human + project tokens, fail-closed on exchange error.
-- **Integration** (Keycloak stub — extend the `test-env` WireMock stack; the oauth2 Keycloak stub is already sketched there): exchange carries `project_id`; sealed token lands in the injected header; non-member → 404 → no header.
+- **Integration** (`test/integration/exchange.integration.test.ts`, WireMock via the [`test-env`](../test-env/) compose stack, self-skips unless `INTEGRATION_REPO_AUTH_TOKEN_URL` is set): real-HTTP exchange of a seeded human root (asserts via WireMock's request journal that the POST carries `grant_type=token-exchange` + `subject_token` + `project_id` and **no** `audience`), config-time stamping + `chat.headers` injection of the sealed bearer, cache-hit without a second exchange, stale-bearer re-exchange, and non-member → 403 → fail-closed no header.
 - **Manual e2e** against the real gateway: enrolled repo + logged-in dev → gateway sees the project bearer; unenrolled repo → no header.
 
 ## Out of scope / deferred

@@ -59,17 +59,18 @@ Watch mode: `pnpm --filter <pkg> exec vitest` (no `run`).
 
 ### Integration tests (Docker)
 
-A reusable compose stack of HTTP backends lives under [`test-env/`](test-env/). Currently a WireMock service stubs the OpenRouter-shaped `/v1/models` endpoint for `@vymalo/opencode-models-info`; a Keycloak service is sketched-in (commented out) for the upcoming `@vymalo/opencode-oauth2` integration suite.
+A reusable compose stack of HTTP backends lives under [`test-env/`](test-env/). Currently a WireMock service stubs the OpenRouter-shaped `/v1/models` endpoint for `@vymalo/opencode-models-info` and a Keycloak-shaped RFC 8693 token-exchange endpoint for `@vymalo/opencode-repo-auth`; a Keycloak service is sketched-in (commented out) for the upcoming `@vymalo/opencode-oauth2` integration suite.
 
 ```sh
 pnpm test:env:up               # docker compose up (waits for healthcheck)
 pnpm --filter @vymalo/opencode-models-info test:integration
+pnpm --filter @vymalo/opencode-repo-auth test:integration
 pnpm test:env:down             # docker compose down -v
 # or one-shot:
 pnpm test:integration          # compose up → all packages' integration suites → compose down
 ```
 
-Integration tests live under `test/integration/**/*.test.ts`, run via a separate `vitest.integration.config.ts`, and **skip themselves** when `INTEGRATION_MODELS_INFO_URL` is unset — so the default `pnpm test` stays hermetic. Stubs are at [`test-env/wiremock/mappings/`](test-env/wiremock/mappings/) and [`test-env/wiremock/__files/`](test-env/wiremock/__files/); editing them needs either a `wiremock` container restart or `curl -X POST http://127.0.0.1:18080/__admin/mappings/reset`.
+Integration tests live under `test/integration/**/*.test.ts`, run via a separate `vitest.integration.config.ts`, and **skip themselves** when their `INTEGRATION_*` env var is unset (`INTEGRATION_MODELS_INFO_URL`, `INTEGRATION_REPO_AUTH_TOKEN_URL`) — so the default `pnpm test` stays hermetic. Stubs are at [`test-env/wiremock/mappings/`](test-env/wiremock/mappings/) and [`test-env/wiremock/__files/`](test-env/wiremock/__files/); editing them needs either a `wiremock` container restart or `curl -X POST http://127.0.0.1:18080/__admin/mappings/reset`.
 
 ## Architecture: how the plugins fit OpenCode
 

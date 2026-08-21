@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],
-    exclude: ["node_modules/**", "dist/**"],
+    exclude: ["test/integration/**", "node_modules/**", "dist/**"],
     clearMocks: true,
     restoreMocks: true,
     coverage: {

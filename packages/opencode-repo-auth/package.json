@@ -51,6 +51,7 @@
     "lint": "biome lint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "coverage": "vitest run --coverage",
     "format": "biome format --write .",
     "format:check": "biome format ."
