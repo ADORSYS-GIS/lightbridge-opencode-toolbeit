@@ -356,6 +356,94 @@ describe("OAuthClient token lifecycle", () => {
     }
   });
 
+  it("exchange presents caller extraParams verbatim and never an audience by default", async () => {
+    const server = createServerConfig();
+    let captured: URLSearchParams | undefined;
+    const client = new OAuthClient(server, {
+      logger: createSilentLogger(),
+      timeoutMs: 5000,
+      fetchImpl: async (_input, init) => {
+        captured = parseFormBody(init);
+        return new Response(
+          JSON.stringify({ access_token: "project-scoped", token_type: "Bearer", expires_in: 300 }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    const token = await client.exchange({
+      subjectToken: "human.jwt",
+      extraParams: { project_id: "proj-123" }
+    });
+    expect(token.accessToken).toBe("project-scoped");
+    expect(captured?.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+    expect(captured?.get("subject_token")).toBe("human.jwt");
+    expect(captured?.get("subject_token_type")).toBe("urn:ietf:params:oauth:token-type:jwt");
+    expect(captured?.get("project_id")).toBe("proj-123");
+    expect(captured?.has("audience")).toBe(false);
+  });
+
+  it("exchangeToAudience delegates to exchange with an audience param", async () => {
+    const server = createServerConfig();
+    let captured: URLSearchParams | undefined;
+    const client = new OAuthClient(server, {
+      logger: createSilentLogger(),
+      timeoutMs: 5000,
+      fetchImpl: async (_input, init) => {
+        captured = parseFormBody(init);
+        return new Response(
+          JSON.stringify({ access_token: "aud-scoped", token_type: "Bearer", expires_in: 300 }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    const token = await client.exchangeToAudience(
+      "https://api.example.com/sources/src-1",
+      "human.jwt"
+    );
+    expect(token.accessToken).toBe("aud-scoped");
+    expect(captured?.get("audience")).toBe("https://api.example.com/sources/src-1");
+    expect(captured?.get("subject_token")).toBe("human.jwt");
+  });
+
+  it("exchange ignores reserved extraParams and never overrides protocol fields", async () => {
+    const server = createServerConfig();
+    let captured: URLSearchParams | undefined;
+    const client = new OAuthClient(server, {
+      logger: createSilentLogger(),
+      timeoutMs: 5000,
+      fetchImpl: async (_input, init) => {
+        captured = parseFormBody(init);
+        return new Response(
+          JSON.stringify({ access_token: "t", token_type: "Bearer", expires_in: 300 }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    await client.exchange({
+      subjectToken: "human.jwt",
+      // Reserved fields must be dropped, not honored.
+      extraParams: {
+        subject_token: "evil-token",
+        subject_token_type: "urn:evil",
+        grant_type: "password",
+        client_id: "evil-client",
+        client_secret: "evil-secret",
+        scope: "evil-scope",
+        project_id: "proj-123"
+      }
+    });
+
+    expect(captured?.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+    expect(captured?.get("client_id")).toBe(server.clientId);
+    expect(captured?.get("subject_token")).toBe("human.jwt");
+    expect(captured?.get("subject_token_type")).toBe("urn:ietf:params:oauth:token-type:jwt");
+    expect(captured?.get("project_id")).toBe("proj-123");
+    expect(captured?.has("client_secret")).toBe(false);
+  });
+
   it("re-acquires jwt_bearer when cached token has no expiry (machine flow policy)", async () => {
     const server = createServerConfig({
       authFlow: "jwt_bearer",

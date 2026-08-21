@@ -1,4 +1,4 @@
-import { FileCacheStore, resolveCacheDir } from "./cache.js";
+import { FileCacheStore, hashCacheKey, resolveCacheDir } from "./cache.js";
 import type { AuthServerConfig } from "./config.js";
 import { validateAuthConfig } from "./config.js";
 import type { Logger } from "./logging.js";
@@ -24,11 +24,12 @@ export interface TokenRuntimeOptions {
    * CachedServerState). Defaults to reading from this runtime's file cache.
    *
    * These overrides cover only the **identity-root token** (what `ensure` /
-   * `refresh` produce). Audience-scoped exchange results always live in this
-   * runtime's default file store under a `identity:audience` key — see
-   * `exchangeToAudience` — because the override interface carries no audience
-   * dimension and routing an exchanged token through it would clobber the
-   * caller's root token (e.g. overwrite oauth2's `CachedServerState.token`).
+   * `refresh` produce). Exchanged tokens always live in this runtime's default
+   * file store under a derived `identity-<hash(identity:key)>` key — see
+   * `exchangeTo` / `exchangeToAudience` — because the override interface carries
+   * no exchange-key dimension and routing an exchanged token through it would
+   * clobber the caller's root token (e.g. overwrite oauth2's
+   * `CachedServerState.token`).
    */
   getCached?: () => Promise<TokenSet | undefined>;
   /**
@@ -76,6 +77,19 @@ export class TokenRuntime {
     return this.identity;
   }
 
+  /**
+   * File-cache key for an exchanged token. The identity prefix is joined to a
+   * hash of the *identity:key pair* with a `-` (not `:`): NTFS reserves `:` in
+   * filenames and POSIX treats `/` as a separator, so a raw key (an audience
+   * URL, a project id, …) or even a `:`-joined identity prefix would silently
+   * break the on-disk path on some platforms. Hashing the pair keeps different
+   * identities's exchanges for the same `key` from colliding. See
+   * `hashCacheKey`.
+   */
+  private exchangeCacheKey(key: string): string {
+    return `${this.identity}-${hashCacheKey(`${this.identity}:${key}`)}`;
+  }
+
   async getCached(): Promise<TokenSet | undefined> {
     if (this.getCachedOverride) {
       return this.getCachedOverride();
@@ -121,9 +135,9 @@ export class TokenRuntime {
   /**
    * RFC 8693 token exchange to an explicit audience, presenting a caller
    * supplied subject token (e.g. the human's token, exchanged to a Source
-   * audience). The result is cached under a derived `identity:audience` key in
-   * this runtime's default file store so a later `getExchanged` can return it
-   * without re-exchanging.
+   * audience). The result is cached under a derived
+   * `identity-<hash(identity:audience)>` key in this runtime's default file
+   * store so a later `getExchanged` can return it without re-exchanging.
    *
    * Note: unlike `ensure` / `refresh`, this always persists to the default file
    * store and does NOT route through the `getCached`/`setCached` overrides (the
@@ -134,15 +148,50 @@ export class TokenRuntime {
    */
   async exchangeToAudience(audience: string, subjectToken: string): Promise<TokenSet> {
     const token = await this.client.exchangeToAudience(audience, subjectToken);
-    await this.cacheStore.save(`${this.cacheKey()}:${audience}`, token);
+    await this.cacheStore.save(this.exchangeCacheKey(audience), token);
     return token;
   }
 
   async getExchanged(audience: string): Promise<TokenSet | undefined> {
-    return this.cacheStore.load<TokenSet>(`${this.cacheKey()}:${audience}`);
+    return this.cacheStore.load<TokenSet>(this.exchangeCacheKey(audience));
   }
 
+  /**
+   * RFC 8693 token exchange presenting a caller-supplied subject token plus
+   * extra form parameters (e.g. `{ project_id: "proj-123" }`), cached under a
+   * derived `identity-<hash(identity:key)>` key in this runtime's default file
+   * store. The key is hashed via `hashCacheKey` for path-safety (see there) —
+   * a raw key (a project id, an audience URL, …) is never used verbatim as a
+   * filename, and neither is the identity separator (NTFS-unsafe `:`). Like
+   * `exchangeToAudience`, this always persists to the default file store and
+   * never routes through the `getCached`/`setCached` overrides.
+   */
+  async exchangeTo(
+    key: string,
+    subjectToken: string,
+    extraParams?: Record<string, string>
+  ): Promise<TokenSet> {
+    const token = await this.client.exchange({ subjectToken, extraParams });
+    await this.cacheStore.save(this.exchangeCacheKey(key), token);
+    return token;
+  }
+
+  /**
+   * Read the token produced by `exchangeTo` for `key`, if still persisted.
+   */
+  async getExchangedByKey(key: string): Promise<TokenSet | undefined> {
+    return this.cacheStore.load<TokenSet>(this.exchangeCacheKey(key));
+  }
+
+  /**
+   * Drop the identity root token and every exchanged token derived from it
+   * (`identity-*` cache files). A bare remove of only the root would leave
+   * still-valid exchanged tokens on disk — after a logout/re-login they'd be
+   * served for the previous owner.
+   */
   async reset(): Promise<void> {
     await this.cacheStore.remove(this.cacheKey());
+    const exchangedKeys = await this.cacheStore.listKeys(`${this.identity}-`);
+    await Promise.all(exchangedKeys.map((key) => this.cacheStore.remove(key)));
   }
 }

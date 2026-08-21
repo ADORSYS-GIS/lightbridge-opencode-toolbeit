@@ -13,7 +13,7 @@ const INTEGRATION_URL = process.env.INTEGRATION_MODELS_INFO_URL;
 function logger(): Logger {
   // Silence everything by default; flip to console for debugging.
   const noop = () => undefined;
-  return { debug: noop, info: noop, warn: noop, error: noop };
+  return { trace: noop, debug: noop, info: noop, warn: noop, error: noop };
 }
 
 describe.skipIf(!INTEGRATION_URL)("models-info ↔ WireMock integration", () => {
@@ -134,6 +134,7 @@ describe.skipIf(!INTEGRATION_URL)("models-info ↔ WireMock integration", () => 
 
     let lastWarn: { event: string; fields?: Record<string, unknown> } | undefined;
     const recordingLogger: Logger = {
+      trace: () => undefined,
       debug: () => undefined,
       info: () => undefined,
       warn: (event, fields) => {
