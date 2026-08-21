@@ -34,6 +34,7 @@ pnpm test:integration
 - `http://127.0.0.1:18080/v1/models` with `If-None-Match: "openrouter-v1"` — `304 Not Modified`.
 - `http://127.0.0.1:18080/v1/models?auth=required` — `401` unless an `Authorization: Bearer …` header is present.
 - `http://127.0.0.1:18080/realms/acme/protocol/openid-connect/token` — RFC 8693 token-exchange stub for repo-auth: a form body containing `project_id=proj-123` gets `200` with a sealed bearer (`expires_in: 300`); anything else gets `403 invalid_grant`.
+- `http://127.0.0.1:18080/v1/chat/completions` — static OpenAI-shaped completion stub, so a real `opencode` host can be pointed at the stack as a fake gateway (see the repo-auth e2e recipe in [`docs/local-development.md`](../docs/local-development.md)).
 - `http://127.0.0.1:18080/__admin/health` — WireMock's liveness probe. CI scripts wait on this.
 - `http://127.0.0.1:18080/__admin/requests` — request journal (served **newest-first**); handy for debugging and for wire-contract assertions. `DELETE` on it clears the journal.
 

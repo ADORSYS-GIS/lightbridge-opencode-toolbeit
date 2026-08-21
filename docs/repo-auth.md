@@ -74,7 +74,7 @@ Mirrors `@vymalo/opencode-oauth2`'s config hook ([`opencode.ts`](../packages/ope
 4. Read the cached project token for `projectId` (`human-<hash(human:projectId)>.json`):
    - valid → inject;
    - expired / absent → **re-exchange from the offline root** ("model b") → cache → inject.
-5. **Fail closed:** an exchange failure (non-member, resolver error, network) produces **no header** — the gateway 401s, which is the correct behavior (matches the SPI's fail-closed semantics). Emits `repo_auth_exchange_failed` at error.
+ 5. **Fail closed:** an exchange failure (non-member, resolver error, network) produces **no header** — the gateway 401s, which is the correct behavior (matches the SPI's fail-closed semantics). Emits `repo_auth_exchange_failed` at error. Host-level caveat: if the provider also has a static `apiKey` configured, OpenCode itself sends that as `Authorization: Bearer <apiKey>` when our hook injects nothing — a bogus credential the gateway still refuses, so the posture stays fail-closed; on success the project bearer overwrites it. Verified in the e2e recipe ([local-development.md](local-development.md#repo-auth-end-to-end-against-the-test-env-stack)).
 
 The project token is **never refreshed** — exchanged tokens carry no refresh token and re-exchange is the canonical renewal (epic risk mitigation: "Exchange `aud` not preserved across refresh → default to re-exchange from the offline root"). The human root token *is* refreshed via its `offline_access` refresh token.
 
@@ -445,7 +445,7 @@ OC->>GW: Send request
   - `config.ts`: opt-in parsing, missing `projectId`, oauth2-conflict detection, `AuthServerConfigInput` mapping.
   - `plugin.ts`: cache keying (`identity-<hash(identity:key)>` deterministic, NTFS-safe), exchange request shape (asserts `project_id` form param present, no `audience`), model-b re-exchange on expiry, in-flight exchange dedup, no-op matrix, reset clears human + project tokens, fail-closed on exchange error.
 - **Integration** (`test/integration/exchange.integration.test.ts`, WireMock via the [`test-env`](../test-env/) compose stack, self-skips unless `INTEGRATION_REPO_AUTH_TOKEN_URL` is set): real-HTTP exchange of a seeded human root (asserts via WireMock's request journal that the POST carries `grant_type=token-exchange` + `subject_token` + `project_id` and **no** `audience`), config-time stamping + `chat.headers` injection of the sealed bearer, cache-hit without a second exchange, stale-bearer re-exchange, and non-member → 403 → fail-closed no header.
-- **Manual e2e** against the real gateway: enrolled repo + logged-in dev → gateway sees the project bearer; unenrolled repo → no header.
+- **Manual e2e** against the real gateway: enrolled repo + logged-in dev → gateway sees the project bearer; unenrolled repo → no header. A scripted variant against the test-env stack (real `opencode` binary, WireMock as IdP + gateway) is in [`docs/local-development.md`](local-development.md#repo-auth-end-to-end-against-the-test-env-stack).
 
 ## Out of scope / deferred
 
