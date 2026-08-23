@@ -253,6 +253,37 @@ importers:
         specifier: ^4.1.7
         version: 4.1.7(@opentelemetry/api@1.9.1)(@types/node@25.9.1)(@vitest/coverage-v8@4.1.7)(vite@8.2.1(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.0))
 
+  packages/opencode-lightbridge:
+    dependencies:
+      '@opencode-ai/plugin':
+        specifier: 1.15.10
+        version: 1.15.10
+      '@opentelemetry/api':
+        specifier: ^1.9.1
+        version: 1.9.1
+      '@opentelemetry/api-logs':
+        specifier: ^0.221.0
+        version: 0.221.0
+      '@vymalo/opencode-auth-core':
+        specifier: workspace:*
+        version: link:../opencode-auth-core
+      '@vymalo/opencode-core-otel':
+        specifier: workspace:*
+        version: link:../opencode-core-otel
+    devDependencies:
+      '@opentelemetry/sdk-logs':
+        specifier: ^0.221.0
+        version: 0.221.0(@opentelemetry/api@1.9.1)
+      '@opentelemetry/sdk-trace':
+        specifier: ^2.10.0
+        version: 2.10.0(@opentelemetry/api@1.9.1)
+      vite:
+        specifier: ^8.2.1
+        version: 8.2.1(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.0)
+      vitest:
+        specifier: ^4.1.7
+        version: 4.1.7(@opentelemetry/api@1.9.1)(@types/node@25.9.1)(@vitest/coverage-v8@4.1.7)(vite@8.2.1(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.0))
+
   packages/opencode-models-info:
     dependencies:
       '@opencode-ai/plugin':

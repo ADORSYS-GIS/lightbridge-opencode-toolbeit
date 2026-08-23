@@ -1,6 +1,6 @@
 # ADR-0012 — One credential across the gateway and OTEL: the `@vymalo/opencode-lightbridge` umbrella plugin
 
-- **Status**: Proposed
+- **Status**: Accepted — implemented in `packages/opencode-lightbridge/` (`@vymalo/opencode-lightbridge`).
 - **Date**: 2026-08-23
 - **Applies to**: a new `@vymalo/opencode-lightbridge` plugin composing the gateway-auth (`oauth2`/`repo-auth`) and `otel` concerns over one shared credential. **MCP is out of scope** (see Context).
 

@@ -163,6 +163,20 @@ jobs:
             --pack-destination "$PWD/dist-tarball/repo-auth"
           ls -la dist-tarball/repo-auth/
 
+      - name: Pack core-otel tarball
+        run: |
+          mkdir -p dist-tarball/core-otel
+          pnpm --filter @vymalo/opencode-core-otel pack \
+            --pack-destination "$PWD/dist-tarball/core-otel"
+          ls -la dist-tarball/core-otel/
+
+      - name: Pack lightbridge tarball
+        run: |
+          mkdir -p dist-tarball/lightbridge
+          pnpm --filter @vymalo/opencode-lightbridge pack \
+            --pack-destination "$PWD/dist-tarball/lightbridge"
+          ls -la dist-tarball/lightbridge/
+
       - name: Verify tarball contents
         # Defense-in-depth: confirms each package is shipping its dist/, NOT
         # shipping source or tests, and that the package isn't accidentally
@@ -200,7 +214,7 @@ jobs:
             echo "OK: $tarball"
           }
 
-          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/auth-core/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz dist-tarball/otel/*.tgz dist-tarball/repo-auth/*.tgz; do
+          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/auth-core/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz dist-tarball/otel/*.tgz dist-tarball/repo-auth/*.tgz dist-tarball/core-otel/*.tgz dist-tarball/lightbridge/*.tgz; do
             verify_tarball "$tarball"
           done
 
@@ -218,6 +232,28 @@ jobs:
             exit 0
           fi
           pnpm --filter @vymalo/opencode-auth-core publish \
+            --access public \
+            --no-git-checks \
+            --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Publish core-otel to npm (with provenance)
+        if: ${{ inputs.dry_run != true }}
+        # Alongside auth-core: the other foundational shared package. otel
+        # depends on @vymalo/opencode-core-otel (rewritten from workspace:*
+        # to the real version on publish), and lightbridge depends on BOTH
+        # this and auth-core — both must exist on the registry before either
+        # dependent's tarball is pushed.
+        run: |
+          set -e
+          version=$(node -p "require('./packages/opencode-core-otel/package.json').version")
+          if npm view "@vymalo/opencode-core-otel@${version}" version >/dev/null 2>&1; then
+            echo "::notice::@vymalo/opencode-core-otel@${version} already on npm — skipping."
+            exit 0
+          fi
+          pnpm --filter @vymalo/opencode-core-otel publish \
             --access public \
             --no-git-checks \
             --provenance
@@ -379,6 +415,8 @@ jobs:
 
       - name: Publish otel to npm (with provenance)
         if: ${{ inputs.dry_run != true }}
+        # After core-otel: otel depends on @vymalo/opencode-core-otel
+        # (rewritten from workspace:* to the real version on publish).
         run: |
           set -e
           version=$(node -p "require('./packages/opencode-otel/package.json').version")
@@ -387,6 +425,26 @@ jobs:
             exit 0
           fi
           pnpm --filter @vymalo/opencode-otel publish \
+            --access public \
+            --no-git-checks \
+            --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Publish lightbridge to npm (with provenance)
+        if: ${{ inputs.dry_run != true }}
+        # Last: lightbridge depends on BOTH @vymalo/opencode-auth-core and
+        # @vymalo/opencode-core-otel (each rewritten from workspace:* to the
+        # real version on publish) — both must already be on the registry.
+        run: |
+          set -e
+          version=$(node -p "require('./packages/opencode-lightbridge/package.json').version")
+          if npm view "@vymalo/opencode-lightbridge@${version}" version >/dev/null 2>&1; then
+            echo "::notice::@vymalo/opencode-lightbridge@${version} already on npm — skipping."
+            exit 0
+          fi
+          pnpm --filter @vymalo/opencode-lightbridge publish \
             --access public \
             --no-git-checks \
             --provenance

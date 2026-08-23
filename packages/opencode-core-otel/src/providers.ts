@@ -212,14 +212,20 @@ export function createProviders(
   config: ResolvedOtelConfig,
   resource: Resource,
   logger: Logger,
-  factories: ExporterFactories = {}
+  factories: ExporterFactories = {},
+  injectedTokenSource?: TokenSource
 ): TelemetryProviders {
   const make = { ...defaultFactories, ...factories };
   const flushers: Array<() => Promise<void>> = [];
   const shutdowns: Array<() => Promise<void>> = [];
 
+  // An injected source (e.g. one backed by the shared `TokenRuntime` in the
+  // `@vymalo/opencode-lightbridge` umbrella) wins over the config-driven
+  // credential helper. `createTokenSource` from `config.tokenCommand` remains
+  // the standalone plugin's default when nothing is injected.
   const tokenSource =
-    config.tokenCommand.length > 0
+    injectedTokenSource ??
+    (config.tokenCommand.length > 0
       ? createTokenSource({
           command: config.tokenCommand,
           header: config.tokenHeader,
@@ -228,7 +234,7 @@ export function createProviders(
           timeoutMs: config.tokenTimeoutMs,
           logger
         })
-      : undefined;
+      : undefined);
 
   // A rejected export is the symptom of a dead credential, so drop the cached
   // token and let the next export re-run the helper rather than retrying with
