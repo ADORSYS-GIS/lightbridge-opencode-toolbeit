@@ -50,14 +50,14 @@ npm install @vymalo/opencode-lightbridge
 
 - **`auth`** (required) — the one IdP login, an `AuthServerConfigInput` (same shape as
   `opencode-oauth2`/`opencode-repo-auth`'s per-provider auth block).
-- **`gateway`** (optional) — `projectId` + the OpenCode provider ids to inject
-  `Authorization: Bearer <project-token>` on, per request.
+- **`gateway`** (optional) — the OpenCode provider ids to inject `Authorization: Bearer
+  <project-token>` on, per request (plus an optional `projectId`).
 - **`otel`** (optional) — the same `OtelPluginOptions` shape as `@vymalo/opencode-otel`
   (`endpoint`, `exporters`, `serviceName`, …), minus `tokenCommand`/`tokenHeader`/`tokenPrefix`: the
   shared runtime supersedes that seam entirely.
-- **`projectId`** (optional, top-level) — only needed when `otel` is configured **without**
-  `gateway` (OTEL also consumes the project-scoped token, so it needs a project id from somewhere).
-  When `gateway` is set, `gateway.projectId` is used automatically.
+- **`projectId`** (optional, top-level or under `gateway`) — **fully optional**: omit it and the
+  exchange sends no `project_id`, so the backend mints a token for your **default project**. An
+  explicit top-level `projectId` wins over `gateway.projectId`.
 
 Omitting both `gateway` and `otel` is a valid, inert config — the plugin logs and no-ops.
 
