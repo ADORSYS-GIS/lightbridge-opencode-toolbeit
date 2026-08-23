@@ -8,6 +8,7 @@ export {
   LightbridgeRuntime,
   LIGHTBRIDGE_IDENTITY,
   DEFAULT_CACHE_NAMESPACE,
+  DEFAULT_PROJECT_KEY,
   lightbridgeCacheDir,
   type LightbridgeRuntimeFactory,
   type LightbridgeRuntimeLike,

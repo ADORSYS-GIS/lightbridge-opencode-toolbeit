@@ -37,10 +37,13 @@ describe("parseLightbridgeOptions", () => {
     expect(needsProjectToken(parsed)).toBe(true);
   });
 
-  it("throws on a malformed gateway block (missing projectId)", () => {
-    expect(() =>
-      parseLightbridgeOptions({ auth: makeAuth(), gateway: { providers: ["gateway"] } })
-    ).toThrow(/gateway\.projectId/);
+  it("parses a gateway block with no projectId (default project)", () => {
+    const parsed = parseLightbridgeOptions({
+      auth: makeAuth(),
+      gateway: { providers: ["gateway"] }
+    });
+    expect(parsed.gateway).toEqual({ providers: ["gateway"] });
+    expect(parsed.projectId).toBeUndefined();
   });
 
   it("throws on a malformed gateway block (empty providers)", () => {

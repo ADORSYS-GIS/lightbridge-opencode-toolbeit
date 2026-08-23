@@ -98,6 +98,34 @@ describe("LightbridgeRuntime", () => {
     expect(captured?.has("audience")).toBe(false);
   });
 
+  it("exchanges with NO project_id when constructed without a projectId (default project)", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "lightbridge-exch-default-"));
+    await seedHuman(cacheDir, makeHumanToken("human-token"));
+
+    let captured: URLSearchParams | undefined;
+    const runtime = new LightbridgeRuntime(auth, undefined, {
+      logger: createSilentLogger(),
+      cacheDir,
+      fetchImpl: async (_input, init) => {
+        captured = parseFormBody(init);
+        return makeJsonResponse({
+          access_token: "default-project-token",
+          token_type: "Bearer",
+          expires_in: 300
+        });
+      }
+    });
+
+    const token = await runtime.getProjectToken();
+    expect(token.accessToken).toBe("default-project-token");
+    expect(captured?.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+    expect(captured?.get("subject_token")).toBe("human-token");
+    // The whole point: no project_id is sent, so the backend mints for the
+    // caller's default project (ADR-0012).
+    expect(captured?.has("project_id")).toBe(false);
+    expect(captured?.has("audience")).toBe(false);
+  });
+
   it("treats an undefined project-token expiry as expired", async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), "lightbridge-noexp-"));
     await seedHuman(cacheDir, makeHumanToken("human-token"));

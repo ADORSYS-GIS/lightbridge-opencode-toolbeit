@@ -337,23 +337,24 @@ export function createLightbridgePlugin(
 
     const wantsProjectToken = needsProjectToken(parsed);
     if (wantsProjectToken && !parsed.projectId) {
-      logger.warn("lightbridge_missing_project_id", {
+      // `projectId` is fully optional — the exchange omits `project_id` and the
+      // backend mints a token for the caller's default project (ADR-0012).
+      logger.info("lightbridge_default_project", {
         gateway: Boolean(parsed.gateway),
         otel: Boolean(parsed.otel)
       });
     }
-    const projectId = wantsProjectToken ? parsed.projectId : undefined;
 
-    // The ONE shared runtime (ADR-0012) — constructed exactly once, reused by
-    // both the gateway injector and the OTEL token source below. `undefined`
-    // when nothing needs a project token (auth-only config, or a missing
-    // projectId that was already warned about above).
+    // The ONE shared runtime (ADR-0012) — constructed exactly once whenever a
+    // module (gateway/otel) needs a token, reused by both the gateway injector
+    // and the OTEL token source below. `projectId` is optional (undefined →
+    // default project). `undefined` runtime only for an auth-only config.
     const buildRuntime: LightbridgeRuntimeFactory =
       factoryOptions.runtimeFactory ??
-      ((auth: AuthServerConfig, pid: string, options: LightbridgeRuntimeOptions) =>
+      ((auth: AuthServerConfig, pid: string | undefined, options: LightbridgeRuntimeOptions) =>
         new LightbridgeRuntime(auth, pid, options));
-    const sharedRuntime: LightbridgeRuntimeLike | undefined = projectId
-      ? buildRuntime(parsed.auth, projectId, {
+    const sharedRuntime: LightbridgeRuntimeLike | undefined = wantsProjectToken
+      ? buildRuntime(parsed.auth, parsed.projectId, {
           logger,
           fetchImpl: factoryOptions.fetchImpl,
           onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
@@ -365,9 +366,8 @@ export function createLightbridgePlugin(
     const hooks: Hooks = {};
 
     // ---- gateway module ----
-    // `sharedRuntime` is always defined here: `parseLightbridgeOptions`
-    // guarantees `gateway.projectId` whenever `gateway` is set, so
-    // `projectId` above is never falsy in this branch.
+    // `sharedRuntime` is always defined here: it is built whenever `gateway`
+    // or `otel` is configured (`wantsProjectToken`).
     if (parsed.gateway && sharedRuntime) {
       hooks["chat.headers"] = createGatewayChatHeaders(
         new Set(parsed.gateway.providers),
@@ -406,7 +406,7 @@ export function createLightbridgePlugin(
     logger.info("lightbridge_plugin_ready", {
       gateway: Boolean(hooks["chat.headers"]),
       otel: Boolean(otel),
-      projectId: projectId ?? undefined
+      projectId: parsed.projectId ?? (wantsProjectToken ? "(default)" : undefined)
     });
 
     return hooks;

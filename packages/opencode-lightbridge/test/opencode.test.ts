@@ -148,30 +148,38 @@ describe("createLightbridgePlugin — gateway module", () => {
     expect(logger.events.some((e) => e.event === "lightbridge_gateway_no_bearer")).toBe(true);
   });
 
-  it("rejects (config-invalid, whole plugin inert) a gateway block missing projectId", async () => {
-    // `gateway.projectId` is required by the type, but a served/JSON config
-    // could still omit it at runtime — `parseLightbridgeOptions` throws, and
-    // the factory degrades to inert hooks rather than a half-built plugin.
+  it("activates the gateway with the default project when projectId is omitted", async () => {
+    // `projectId` is fully optional: the exchange sends no `project_id` and the
+    // backend mints a token for the caller's default project (ADR-0012).
     const logger = createRecordingLogger();
-    const hooks = await createLightbridgePlugin({ logger, registerProcessHandlers: false })(
-      pluginInput(),
-      { auth: makeAuth(), gateway: { providers: ["gateway"] } as never }
-    );
-    expect(hooks["chat.headers"]).toBeUndefined();
-    expect(logger.events.some((e) => e.event === "lightbridge_config_invalid")).toBe(true);
+    const runtime = makeSpyRuntime();
+    const { factory } = fixedRuntimeFactory(runtime);
+    const hooks = await createLightbridgePlugin({
+      logger,
+      registerProcessHandlers: false,
+      runtimeFactory: factory
+    })(pluginInput(), { auth: makeAuth(), gateway: { providers: ["gateway"] } });
+    expect(hooks["chat.headers"]).toBeDefined();
+    expect(logger.events.some((e) => e.event === "lightbridge_default_project")).toBe(true);
+    const output = { headers: {} as Record<string, string> };
+    await hooks["chat.headers"]?.({ model: { providerID: "gateway" } } as never, output);
+    expect(output.headers.Authorization).toBe("Bearer shared-project-token");
   });
 
-  it("warns (but activates otel) when otel needs a project token with none resolvable", async () => {
+  it("activates otel with the default project when no projectId is resolvable", async () => {
     const logger = createRecordingLogger();
+    const runtime = makeSpyRuntime();
+    const { factory } = fixedRuntimeFactory(runtime);
     const hooks = await createLightbridgePlugin({
       logger,
       registerProcessHandlers: false,
       deferredTimeoutMs: 5,
+      runtimeFactory: factory,
       exporters: { trace: () => undefined, metric: () => undefined, log: () => undefined }
     })(pluginInput(), { auth: makeAuth(), otel: { endpoint: "http://localhost:4318" } });
     expect(hooks["chat.headers"]).toBeUndefined();
     expect(hooks.event).toBeDefined();
-    expect(logger.events.some((e) => e.event === "lightbridge_missing_project_id")).toBe(true);
+    expect(logger.events.some((e) => e.event === "lightbridge_default_project")).toBe(true);
   });
 });
 
@@ -254,10 +262,11 @@ describe("createLightbridgePlugin — otel module", () => {
     expect(() => capturedTokenSource?.invalidate()).not.toThrow();
   });
 
-  it("builds providers with no TokenSource when otel has no resolvable projectId", async () => {
-    const { hooks, capturedTokenSource } = await loadOtel({});
+  it("builds providers with a runtime-backed TokenSource (default project) when no projectId", async () => {
+    const runtime = makeSpyRuntime();
+    const { hooks, capturedTokenSource } = await loadOtel({ runtime });
     expect(hooks.event).toBeDefined();
-    expect(capturedTokenSource).toBeUndefined();
+    expect(capturedTokenSource).toBeDefined();
   });
 
   it("stays inert (no observing hooks) when otel is unconfigured", async () => {

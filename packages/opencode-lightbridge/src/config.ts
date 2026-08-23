@@ -7,10 +7,14 @@ import type { OtelPluginOptions } from "@vymalo/opencode-core-otel";
 
 /** The `gateway` opt-in: which providers get the shared project bearer. */
 export interface LightbridgeGatewayOptions {
-  /** Project id for the shared RFC 8693 project-token exchange (ADR-0012). */
-  projectId: string;
   /** OpenCode provider ids to inject `Authorization: Bearer <project-token>` on. */
   providers: string[];
+  /**
+   * Optional project id for the shared RFC 8693 exchange (ADR-0012). When
+   * omitted, the exchange sends no `project_id` and the backend mints a token
+   * for the caller's **default project**.
+   */
+  projectId?: string;
 }
 
 /**
@@ -25,12 +29,10 @@ export interface LightbridgeOptions {
   gateway?: LightbridgeGatewayOptions;
   otel?: OtelPluginOptions;
   /**
-   * Project id for the shared project-scoped token exchange. Only needed when
-   * `otel` is configured without `gateway` (OTEL consumes the same
-   * project-scoped token as the gateway, so it needs a project id too). When
-   * `gateway` is also set, `gateway.projectId` is used automatically; an
-   * explicit `projectId` here always wins over `gateway.projectId` if both
-   * are present.
+   * Optional project id for the shared project-scoped token exchange. Fully
+   * optional: when omitted, the exchange sends no `project_id` and the backend
+   * mints a token for the caller's **default project**. An explicit `projectId`
+   * here wins over `gateway.projectId` when both are set.
    */
   projectId?: string;
 }
@@ -67,11 +69,15 @@ function parseGateway(raw: unknown, path: string): LightbridgeGatewayOptions | u
     return undefined;
   }
   if (!isRecord(raw)) {
-    throw new Error(`${path} must be an object with \`projectId\` and \`providers\``);
+    throw new Error(`${path} must be an object with \`providers\` (and an optional \`projectId\`)`);
   }
+  const projectId =
+    raw.projectId === undefined || raw.projectId === null
+      ? undefined
+      : asNonEmptyString(raw.projectId, `${path}.projectId`);
   return {
-    projectId: asNonEmptyString(raw.projectId, `${path}.projectId`),
-    providers: asProviderList(raw.providers, `${path}.providers`)
+    providers: asProviderList(raw.providers, `${path}.providers`),
+    ...(projectId ? { projectId } : {})
   };
 }
 
@@ -119,7 +125,11 @@ export function parseLightbridgeOptions(raw: unknown): ParsedLightbridgeOptions 
   return { auth, gateway, otel, projectId };
 }
 
-/** Whether the parsed config has a module that needs the shared project token. */
+/**
+ * Whether the parsed config has a module (gateway or otel) that needs the
+ * shared token — project-scoped when `projectId` is set, else a default-project
+ * token. Determines whether the one shared runtime is built.
+ */
 export function needsProjectToken(options: ParsedLightbridgeOptions): boolean {
   return Boolean(options.gateway) || Boolean(options.otel);
 }

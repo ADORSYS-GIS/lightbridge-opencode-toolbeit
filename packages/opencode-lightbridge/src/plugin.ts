@@ -19,6 +19,14 @@ export const LIGHTBRIDGE_IDENTITY = "lightbridge";
 /** Own cache namespace — separate from oauth2/repo-auth/otel's stores. */
 export const DEFAULT_CACHE_NAMESPACE = "opencode-lightbridge";
 
+/**
+ * Cache key for the default-project token — used when no `projectId` is
+ * configured, so the exchange sends no `project_id` and the backend mints a
+ * token for the caller's default project (ADR-0012). Distinct from any real
+ * project id so the two never collide in the token cache.
+ */
+export const DEFAULT_PROJECT_KEY = "__default__";
+
 export interface LightbridgeRuntimeOptions {
   logger?: Logger;
   fetchImpl?: typeof fetch;
@@ -38,10 +46,13 @@ export interface LightbridgeRuntimeLike {
   reset?(): Promise<void>;
 }
 
-/** Builds a `LightbridgeRuntimeLike` for a given `(auth, projectId)` pair. */
+/**
+ * Builds a `LightbridgeRuntimeLike` for a given `(auth, projectId)` pair.
+ * `projectId` is optional — `undefined` mints a default-project token.
+ */
 export type LightbridgeRuntimeFactory = (
   auth: AuthServerConfig,
-  projectId: string,
+  projectId: string | undefined,
   options: LightbridgeRuntimeOptions
 ) => LightbridgeRuntimeLike;
 
@@ -75,13 +86,16 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
   private readonly runtime: TokenRuntime;
   private readonly logger: Logger;
   private readonly tokenExpirySkewMs: number;
+  /** Token-cache key: the project id, or `DEFAULT_PROJECT_KEY` when unset. */
+  private readonly projectKey: string;
   private inFlightExchange?: Promise<TokenSet>;
 
   constructor(
     auth: AuthServerConfig,
-    private readonly projectId: string,
+    private readonly projectId: string | undefined,
     options: LightbridgeRuntimeOptions = {}
   ) {
+    this.projectKey = projectId ?? DEFAULT_PROJECT_KEY;
     this.logger = options.logger ?? createJsonConsoleLogger("info");
     this.tokenExpirySkewMs =
       typeof options.tokenExpirySkewMs === "number" &&
@@ -101,7 +115,7 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
 
   /** Non-network read of the cached project token, if any. */
   async getCachedProjectToken(): Promise<TokenSet | undefined> {
-    return this.runtime.getExchangedByKey(this.projectId);
+    return this.runtime.getExchangedByKey(this.projectKey);
   }
 
   /**
@@ -113,8 +127,8 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
    *         ▼
    *   ensure human root (refresh-only unless `interactive`)
    *         ▼
-   *   exchangeTo(projectId, humanToken, { project_id })
-   *         ▼
+   *   exchangeTo(projectKey, humanToken, projectId ? { project_id } : {})
+   *         ▼           (no projectId → backend picks the default project)
    *   cache + return
    *
    * Concurrent callers (a chat request racing an OTEL export) share the
@@ -147,12 +161,18 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
 
   private async performExchange(options: { interactive?: boolean }): Promise<TokenSet> {
     const human = await this.runtime.ensure({ interactive: options.interactive });
-    this.logger.info("lightbridge_exchange_started", { projectId: this.projectId });
+    this.logger.info("lightbridge_exchange_started", { projectId: this.projectId ?? "(default)" });
     try {
-      const exchanged = await this.runtime.exchangeTo(this.projectId, human.accessToken, {
-        project_id: this.projectId
+      // No `projectId` → send no `project_id` param; the backend mints a token
+      // for the caller's default project (ADR-0012).
+      const exchanged = await this.runtime.exchangeTo(
+        this.projectKey,
+        human.accessToken,
+        this.projectId ? { project_id: this.projectId } : {}
+      );
+      this.logger.info("lightbridge_exchange_success", {
+        projectId: this.projectId ?? "(default)"
       });
-      this.logger.info("lightbridge_exchange_success", { projectId: this.projectId });
       return exchanged;
     } catch (error) {
       this.logger.error("lightbridge_exchange_failed", {

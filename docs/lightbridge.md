@@ -33,11 +33,12 @@ flowchart LR
 1. **Login once** — `ensure()` runs the configured OAuth flow (`authorization_code` with PKCE, or
    `device_code` for headless) against `auth.issuer`, producing the human root token
    (`offline_access` scope → silent refresh via its refresh token).
-2. **Exchange once per project** — `exchangeTo(projectId, humanToken, { project_id })`, an RFC 8693
-   token exchange presenting `project_id` as a form param (no `audience`, no mint step — same
-   contract as `@vymalo/opencode-repo-auth`, see [ADR-0011](adr/0011-repo-auth-project-id-token-exchange.md)).
-   The result is short-lived and carries no refresh token; renewal is always a fresh exchange from
-   the human root ("model b").
+2. **Exchange once per project** — `exchangeTo(projectKey, humanToken, projectId ? { project_id } : {})`,
+   an RFC 8693 token exchange presenting `project_id` as a form param when configured (no `audience`,
+   no mint step — same contract as `@vymalo/opencode-repo-auth`, see [ADR-0011](adr/0011-repo-auth-project-id-token-exchange.md)).
+   **`projectId` is fully optional**: omit it and the exchange sends no `project_id`, so the backend
+   mints a token for the caller's **default project**. The result is short-lived and carries no
+   refresh token; renewal is always a fresh exchange from the human root ("model b").
 3. **Two injectors read the SAME cached project token:**
    - **Gateway** (`gateway` config block) — a `chat.headers` hook injects
      `Authorization: Bearer <project-token>` on the configured `providers`, per request. Fails
@@ -83,9 +84,10 @@ config — the plugin logs once and registers no observing hooks.
 | Field | Required | Notes |
 | --- | --- | --- |
 | `auth` | yes | `AuthServerConfigInput` (auth-core) — the one IdP login. Validated eagerly via `validateAuthConfig`; a malformed block fails plugin load with a field-level error rather than a half-built plugin. |
-| `gateway.projectId` + `gateway.providers` | only if `gateway` is set | Which OpenCode provider ids get the project bearer injected on `chat.headers`. |
+| `gateway.providers` | required if `gateway` is set | Which OpenCode provider ids get the project bearer injected on `chat.headers`. |
+| `gateway.projectId` | no | Optional project id for the gateway exchange. Omit for the caller's **default project**. |
 | `otel` | no | Same shape as `@vymalo/opencode-otel`'s options, **minus** `tokenCommand` / `tokenHeader` / `tokenPrefix` — the shared runtime supersedes that seam entirely. |
-| `projectId` (top-level) | only if `otel` is set **without** `gateway` | OTEL also consumes the project-scoped token, so it needs a project id from somewhere. When `gateway` is set, `gateway.projectId` is used automatically; an explicit top-level `projectId` always wins if both are present. |
+| `projectId` (top-level) | no | Optional project id for the shared exchange. When omitted (and no `gateway.projectId`), the backend mints a **default-project** token. An explicit top-level `projectId` wins over `gateway.projectId`. |
 
 If a module needs a project token and none is resolvable, the plugin logs
 `lightbridge_missing_project_id` (warn) and that module's credential injection stays inert — `gateway`
