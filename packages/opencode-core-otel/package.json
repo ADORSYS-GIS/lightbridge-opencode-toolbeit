@@ -1,21 +1,20 @@
 {
-  "name": "@vymalo/opencode-otel",
+  "name": "@vymalo/opencode-core-otel",
   "version": "0.14.1",
-  "description": "OpenTelemetry plugin for OpenCode: exports developer interactions as OTLP traces, metrics and logs \u2014 real USD cost, all five token types (including cache read/write and reasoning), tool results, permission decisions, API errors and lines of code. Configurable from opencode.json or standard OTEL_* environment variables.",
+  "description": "Shared OpenTelemetry engine (exporters, recorder, resource, token-source seam) for the @vymalo OpenCode plugin suite.",
   "license": "MIT",
   "author": "vymalo contributors",
   "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
-    "directory": "packages/opencode-otel"
+    "directory": "packages/opencode-core-otel"
   },
   "bugs": {
     "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
   },
   "keywords": [
     "opencode",
-    "opencode-plugin",
     "opentelemetry",
     "otel",
     "otlp",
@@ -62,11 +61,18 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.15.10",
-    "@vymalo/opencode-core-otel": "workspace:*"
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.221.0",
+    "@opentelemetry/core": "^2.10.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-proto": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.221.0",
+    "@opentelemetry/resources": "^2.10.0",
+    "@opentelemetry/sdk-logs": "^0.221.0",
+    "@opentelemetry/sdk-metrics": "^2.10.0",
+    "@opentelemetry/sdk-trace": "^2.10.0"
   },
   "devDependencies": {
-    "@opentelemetry/sdk-logs": "^0.221.0",
-    "@opentelemetry/sdk-trace": "^2.10.0",
     "vite": "^8.2.1",
     "vitest": "^4.1.7"
   }
