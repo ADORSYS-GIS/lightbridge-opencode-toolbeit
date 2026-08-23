@@ -36,4 +36,4 @@ Each record is `NNNN-kebab-title.md`, numbered in order, and follows a light
 | [0009](0009-otel-otlp-http-not-grpc.md) | OTLP over HTTP/protobuf, not gRPC | Accepted |
 | [0010](0010-oxc-build-isolated-declarations.md) | Build with oxc under `isolatedDeclarations`; `tsc` keeps type-checking | Accepted |
 | [0011](0011-repo-auth-project-id-token-exchange.md) | repo-auth: `project_id` token exchange, not an audience-scoped Source exchange | Accepted |
-| [0012](0012-single-auth-across-gateway-and-otel.md) | One credential across gateway + OTEL: `@vymalo/opencode-lightbridge` umbrella over one `TokenRuntime` (login via authz `/authorize`; MCP out of scope) | Proposed |
+| [0012](0012-single-auth-across-gateway-and-otel.md) | One credential across gateway + OTEL: `@vymalo/opencode-lightbridge` umbrella over one `TokenRuntime` (login via authz `/authorize`; MCP out of scope) | Accepted |

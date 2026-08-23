@@ -42,6 +42,12 @@ install; come here when you need depth on a specific topic.
 | [repo-auth.md](repo-auth.md) | Enrolling a repo, the RFC 8693 `project_id` exchange flow, the human-root cache, the model-b renewal policy, the auth-core gap |
 | [adr/0011-repo-auth-project-id-token-exchange.md](adr/0011-repo-auth-project-id-token-exchange.md) | Why a single exchange presenting `project_id` (no `audience`, no mint step) and the fail-closed posture |
 
+### `@vymalo/opencode-lightbridge` — one credential, every egress
+| Page | When you need it |
+| --- | --- |
+| [lightbridge.md](lightbridge.md) | The umbrella plugin: one shared `TokenRuntime` driving both the gateway bearer and the OTEL export credential, config reference, relationship to the two standalone plugins it composes |
+| [adr/0012-single-auth-across-gateway-and-otel.md](adr/0012-single-auth-across-gateway-and-otel.md) | Why one runtime, why MCP is out of scope, the alternatives considered |
+
 ## Cross-cutting
 
 | Page | What it covers |

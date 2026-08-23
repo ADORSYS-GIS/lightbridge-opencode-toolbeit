@@ -1,0 +1,74 @@
+{
+  "name": "@vymalo/opencode-lightbridge",
+  "version": "0.14.1",
+  "description": "Umbrella OpenCode plugin for ADR-0012: one shared credential (TokenRuntime) drives both the LLM gateway bearer and OTEL export, so a developer authenticates once and every egress rides the same project-scoped token.",
+  "license": "MIT",
+  "author": "vymalo contributors",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
+    "directory": "packages/opencode-lightbridge"
+  },
+  "bugs": {
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "oauth2",
+    "token-exchange",
+    "project",
+    "gateway",
+    "opentelemetry",
+    "otel",
+    "otlp",
+    "observability"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./lib": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs",
+    "lint": "biome lint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.15.10",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.221.0",
+    "@vymalo/opencode-auth-core": "workspace:*",
+    "@vymalo/opencode-core-otel": "workspace:*"
+  },
+  "devDependencies": {
+    "@opentelemetry/sdk-logs": "^0.221.0",
+    "@opentelemetry/sdk-trace": "^2.10.0",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.7"
+  }
+}
