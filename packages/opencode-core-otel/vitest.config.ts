@@ -12,12 +12,10 @@ export default defineConfig({
       include: ["src/**"],
       reporter: ["text-summary"],
       // Floors a few points below current so a regression fails CI without
-      // brittle exact-match churn. `opencode.ts` (the only source file left in
-      // this package now that the engine lives in `@vymalo/opencode-core-otel`)
-      // is the thin spot — it is the host-wiring seam, and the parts still
-      // uncovered are the process-exit drain and the console-mirroring branch
-      // of the fallback logger.
-      thresholds: { statements: 82, branches: 75, functions: 76, lines: 82 }
+      // brittle exact-match churn. The plugin-host wiring (process-exit drain,
+      // the OpenCode-logger adapter) lives in `@vymalo/opencode-otel`, not
+      // here — this package is the engine only.
+      thresholds: { statements: 92, branches: 82, functions: 89, lines: 92 }
     }
   }
 });

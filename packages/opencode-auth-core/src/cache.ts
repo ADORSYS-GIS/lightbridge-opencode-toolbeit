@@ -1,6 +1,6 @@
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -26,6 +26,18 @@ function resolveDefaultCacheRoot(): string {
  */
 export function resolveCacheRoot(): string {
   return resolveDefaultCacheRoot();
+}
+
+/**
+ * Deterministic, path-safe digest of an arbitrary cache key. `FileCacheStore`
+ * uses keys verbatim as filenames (see `statePath`), so a raw caller-supplied
+ * key (an `audience` URL, a `project_id`, …) could carry path-hostile
+ * characters — a URL-shaped key breaks on Windows (`:` is illegal in NTFS
+ * filenames) and creates nested directories on POSIX (`/`). Truncated sha256
+ * keeps the key short, opaque and stable for the same input.
+ */
+export function hashCacheKey(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 export function resolveCacheDir(namespace: string): string {
@@ -120,5 +132,25 @@ export class FileCacheStore {
   async remove(key: string): Promise<void> {
     const filePath = statePath(this.baseDir, key);
     await unlink(filePath).catch(() => {});
+  }
+
+  /**
+   * Keys of the entries currently persisted in this store, optionally filtered
+   * to a key prefix. Used by callers that must rewrite or remove every entry
+   * under a namespace (e.g. `TokenRuntime.reset` clearing all `identity-*`
+   * exchanged tokens). Missing/empty dirs return `[]` — never throws on a
+   * store that has not been written to yet.
+   */
+  async listKeys(prefix = ""): Promise<string[]> {
+    try {
+      const entries = await readdir(this.baseDir, { withFileTypes: true });
+      return entries
+        .filter(
+          (entry) => entry.isFile() && entry.name.startsWith(prefix) && entry.name.endsWith(".json")
+        )
+        .map((entry) => entry.name.slice(0, -".json".length));
+    } catch {
+      return [];
+    }
   }
 }

@@ -156,6 +156,13 @@ jobs:
             --pack-destination "$PWD/dist-tarball/otel"
           ls -la dist-tarball/otel/
 
+      - name: Pack repo-auth tarball
+        run: |
+          mkdir -p dist-tarball/repo-auth
+          pnpm --filter @vymalo/opencode-repo-auth pack \
+            --pack-destination "$PWD/dist-tarball/repo-auth"
+          ls -la dist-tarball/repo-auth/
+
       - name: Verify tarball contents
         # Defense-in-depth: confirms each package is shipping its dist/, NOT
         # shipping source or tests, and that the package isn't accidentally
@@ -193,7 +200,7 @@ jobs:
             echo "OK: $tarball"
           }
 
-          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/auth-core/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz dist-tarball/otel/*.tgz; do
+          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/auth-core/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz dist-tarball/otel/*.tgz dist-tarball/repo-auth/*.tgz; do
             verify_tarball "$tarball"
           done
 
@@ -211,6 +218,26 @@ jobs:
             exit 0
           fi
           pnpm --filter @vymalo/opencode-auth-core publish \
+            --access public \
+            --no-git-checks \
+            --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Publish repo-auth to npm (with provenance)
+        if: ${{ inputs.dry_run != true }}
+        # After auth-core: repo-auth depends on @vymalo/opencode-auth-core
+        # (rewritten from workspace:* to the real version on publish), so the
+        # dependency must exist on the registry first.
+        run: |
+          set -e
+          version=$(node -p "require('./packages/opencode-repo-auth/package.json').version")
+          if npm view "@vymalo/opencode-repo-auth@${version}" version >/dev/null 2>&1; then
+            echo "::notice::@vymalo/opencode-repo-auth@${version} already on npm — skipping."
+            exit 0
+          fi
+          pnpm --filter @vymalo/opencode-repo-auth publish \
             --access public \
             --no-git-checks \
             --provenance

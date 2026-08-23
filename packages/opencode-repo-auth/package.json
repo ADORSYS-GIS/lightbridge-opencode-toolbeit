@@ -1,14 +1,14 @@
 {
-  "name": "@vymalo/opencode-otel",
+  "name": "@vymalo/opencode-repo-auth",
   "version": "0.14.1",
-  "description": "OpenTelemetry plugin for OpenCode: exports developer interactions as OTLP traces, metrics and logs \u2014 real USD cost, all five token types (including cache read/write and reasoning), tool results, permission decisions, API errors and lines of code. Configurable from opencode.json or standard OTEL_* environment variables.",
+  "description": "OpenCode plugin that gives local-dev requests repo-as-project attribution: a developer logs in once as themselves and every gateway request from an enrolled repo carries a project-scoped bearer.",
   "license": "MIT",
   "author": "vymalo contributors",
   "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
-    "directory": "packages/opencode-otel"
+    "directory": "packages/opencode-repo-auth"
   },
   "bugs": {
     "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
@@ -16,16 +16,11 @@
   "keywords": [
     "opencode",
     "opencode-plugin",
-    "opentelemetry",
-    "otel",
-    "otlp",
-    "observability",
-    "telemetry",
-    "tracing",
-    "metrics",
-    "cost-tracking",
-    "gen-ai",
-    "llm"
+    "oauth2",
+    "token-exchange",
+    "project",
+    "gateway",
+    "ai-sdk"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -56,17 +51,16 @@
     "lint": "biome lint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "coverage": "vitest run --coverage",
     "format": "biome format --write .",
     "format:check": "biome format ."
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.15.10",
-    "@vymalo/opencode-core-otel": "workspace:*"
+    "@vymalo/opencode-auth-core": "workspace:*"
   },
   "devDependencies": {
-    "@opentelemetry/sdk-logs": "^0.221.0",
-    "@opentelemetry/sdk-trace": "^2.10.0",
     "vite": "^8.2.1",
     "vitest": "^4.1.7"
   }

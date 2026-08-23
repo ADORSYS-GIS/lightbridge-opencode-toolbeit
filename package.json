@@ -12,7 +12,7 @@
     "coverage": "pnpm -r --if-present coverage",
     "test:env:up": "docker compose -f test-env/docker-compose.yml up -d --wait",
     "test:env:down": "docker compose -f test-env/docker-compose.yml down -v",
-    "test:integration:run": "INTEGRATION_MODELS_INFO_URL=${INTEGRATION_MODELS_INFO_URL:-http://127.0.0.1:18080/v1/models} pnpm -r --if-present test:integration",
+    "test:integration:run": "INTEGRATION_MODELS_INFO_URL=${INTEGRATION_MODELS_INFO_URL:-http://127.0.0.1:18080/v1/models} INTEGRATION_REPO_AUTH_TOKEN_URL=${INTEGRATION_REPO_AUTH_TOKEN_URL:-http://127.0.0.1:18080/realms/acme/protocol/openid-connect/token} pnpm -r --if-present test:integration",
     "test:integration": "pnpm test:env:up && (pnpm test:integration:run; status=$?; pnpm test:env:down; exit $status)",
     "format": "biome format --write packages apps test-env *.json",
     "format:check": "biome format packages apps test-env *.json"

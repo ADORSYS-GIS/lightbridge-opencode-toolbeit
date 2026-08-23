@@ -2,27 +2,29 @@ import { hostname } from "node:os";
 
 import type { Hooks, Plugin, PluginInput, PluginOptions } from "@opencode-ai/plugin";
 
-import { type EnvSource, resolveOtelConfig } from "./config.js";
-import { type DeferredAttribute, deferredAttribute } from "./deferred.js";
 import {
+  buildResource,
   createJsonConsoleLogger,
+  createProviders,
   DEFAULT_LOG_LEVEL,
+  type DeferredAttribute,
+  deferredAttribute,
+  describeError,
+  type EnvSource,
+  type ExporterFactories,
   fromOpenCodeLogLevel,
+  installTracePropagation,
   type LogFields,
   LOG_LEVEL_PRIORITY,
   type Logger,
-  type LogLevel
-} from "./logging.js";
-import { installTracePropagation, type PropagationConfigInput } from "./propagation.js";
-import {
-  buildResource,
-  createProviders,
-  describeError,
-  type ExporterFactories,
-  type TelemetryProviders
-} from "./providers.js";
-import { TelemetryRecorder } from "./recorder.js";
-import { readVcsInfo, type VcsInfo } from "./vcs.js";
+  type LogLevel,
+  type PropagationConfigInput,
+  readVcsInfo,
+  resolveOtelConfig,
+  TelemetryRecorder,
+  type TelemetryProviders,
+  type VcsInfo
+} from "@vymalo/opencode-core-otel";
 
 const PLUGIN_SERVICE_NAME = "opencode-otel-plugin";
 

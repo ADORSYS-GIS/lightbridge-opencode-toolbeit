@@ -24,6 +24,19 @@ interface ResolvedEndpoints {
   deviceAuthorizationEndpoint?: string;
 }
 
+/**
+ * Form-body fields that are protocol-level and must never be overridable by a
+ * caller's `extraParams` on an RFC 8693 exchange.
+ */
+const RESERVED_EXCHANGE_PARAMS = new Set([
+  "grant_type",
+  "client_id",
+  "client_secret",
+  "scope",
+  "subject_token",
+  "subject_token_type"
+]);
+
 export function toTokenSet(
   payload: Record<string, unknown>,
   options?: {
@@ -303,10 +316,13 @@ export class OAuthClient {
     }
 
     const endpoints = await this.resolveEndpoints();
+    // `grant_type`/`client_id` are built LAST so a grant's `extraFields`
+    // (and any `subject_token`/`extraParams` they carry) can never override
+    // them — those base fields are protocol-level, not caller-tunable.
     const body = new URLSearchParams({
+      ...spec.extraFields(subjectToken),
       grant_type: spec.grantType,
-      client_id: this.server.clientId,
-      ...spec.extraFields(subjectToken)
+      client_id: this.server.clientId
     });
     if (this.server.scopes.length > 0) {
       body.set("scope", this.server.scopes.join(" "));
@@ -347,23 +363,45 @@ export class OAuthClient {
   }
 
   /**
-   * RFC 8693 token exchange to an explicit audience, presenting a caller-
-   * supplied subject token. Used by consumers (e.g. repo-auth) that want to
-   * scope a human token to a Source audience without configuring a
-   * `subjectTokenSource`. Reuses the same federated-grant machinery as the
-   * `token_exchange` authFlow.
+   * RFC 8693 token exchange presenting a caller-supplied subject token plus any
+   * extra form parameters. Used by consumers (e.g. repo-auth, which exchanges a
+   * human token to a `project_id`) that want to scope a token without
+   * configuring a `subjectTokenSource`. Reuses the same federated-grant
+   * machinery as the `token_exchange` authFlow. The form body is exactly
+   * `grant_type=…token-exchange`, `client_id`, `subject_token`,
+   * `subject_token_type`, plus `scope` / `client_secret` when configured and
+   * every `extraParams` entry (e.g. `audience=…` or `project_id=…`). The
+   * protocol-level fields — `grant_type`, `client_id`, `client_secret`,
+   * `scope`, `subject_token`, `subject_token_type` — are reserved and silently
+   * dropped from `extraParams` so a caller can never silently swap the subject
+   * token or masquerade as another grant.
    */
-  async exchangeToAudience(audience: string, subjectToken: string): Promise<TokenSet> {
+  async exchange(params: {
+    subjectToken: string;
+    extraParams?: Record<string, string>;
+  }): Promise<TokenSet> {
+    const extraParams = Object.fromEntries(
+      Object.entries(params.extraParams ?? {}).filter(([key]) => !RESERVED_EXCHANGE_PARAMS.has(key))
+    );
     return this.postFederatedGrant({
       grantType: "urn:ietf:params:oauth:grant-type:token-exchange",
       extraFields: () => ({
-        subject_token: subjectToken,
+        subject_token: params.subjectToken,
         subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
-        audience
+        ...extraParams
       }),
       eventPrefix: "oauth_token_exchange",
-      subjectToken
+      subjectToken: params.subjectToken
     });
+  }
+
+  /**
+   * RFC 8693 token exchange to an explicit audience — convenience wrapper over
+   * `exchange` that presents the `audience` form parameter. Kept as a
+   * backward-compatible alias.
+   */
+  async exchangeToAudience(audience: string, subjectToken: string): Promise<TokenSet> {
+    return this.exchange({ subjectToken, extraParams: { audience } });
   }
 
   /**

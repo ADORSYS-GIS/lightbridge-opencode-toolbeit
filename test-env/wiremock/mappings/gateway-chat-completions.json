@@ -1,0 +1,32 @@
+{
+  "mappings": [
+    {
+      "name": "gateway-chat-completions",
+      "priority": 5,
+      "request": {
+        "method": "POST",
+        "urlPath": "/v1/chat/completions"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "id": "chatcmpl-repo-auth-e2e",
+          "object": "chat.completion",
+          "created": 1755700000,
+          "model": "e2e-model",
+          "choices": [
+            {
+              "index": 0,
+              "message": { "role": "assistant", "content": "ok" },
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "mappings": [
+    {
+      "name": "repo-auth-token-exchange-member",
+      "priority": 2,
+      "request": {
+        "method": "POST",
+        "urlPath": "/realms/acme/protocol/openid-connect/token",
+        "bodyPatterns": [{ "contains": "project_id=proj-123" }]
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "access_token": "eyJhbGciOiJSUzI1NiJ9.sealed-project-bearer-for-proj-123.sig",
+          "token_type": "Bearer",
+          "expires_in": 300,
+          "scope": "openid microprofile-jwt"
+        }
+      }
+    },
+    {
+      "name": "repo-auth-token-endpoint-catch-all",
+      "priority": 10,
+      "request": {
+        "method": "POST",
+        "urlPath": "/realms/acme/protocol/openid-connect/token"
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "jsonBody": {
+          "error": "invalid_grant",
+          "error_description": "Project membership check failed"
+        }
+      }
+    }
+  ]
+}
