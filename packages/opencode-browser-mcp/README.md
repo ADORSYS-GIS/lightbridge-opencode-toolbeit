@@ -79,7 +79,7 @@ matches what you typed into the extension.
 The same 33-tool surface as the plugin, partitioned into `page` (observe), `control` (drive), and
 `debug` (powerful/sensitive, **off by default** — add `debug` to `OCB_GROUPS` to enable). Full
 tool reference: [`packages/opencode-browser`](../opencode-browser#the-33-tools) and
-[`docs/browser.md`](https://github.com/vymalo/opencode-oauth2/blob/main/docs/browser.md).
+[`docs/browser.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/browser.md).
 
 Screenshots are returned as inline MCP image content (no on-disk path step needed, unlike the
 text-only OpenCode plugin).
@@ -89,7 +89,7 @@ text-only OpenCode plugin).
 The bridge is an auto-elect broker: you can run the MCP server **and** the OpenCode plugin (and
 multiple editor sessions) against the same port — the first to bind hosts, the rest join as
 guests, and tab groups stay owned by whoever created them. See
-[`plans/multi-client-routing.md`](https://github.com/vymalo/opencode-oauth2/blob/main/plans/multi-client-routing.md).
+[`plans/multi-client-routing.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/plans/multi-client-routing.md).
 
 ## Troubleshooting
 
@@ -103,8 +103,8 @@ guests, and tab groups stay owned by whoever created them. See
 ## Security
 
 Loopback bind + token handshake; grants control of a real browser profile — **use a dedicated /
-throwaway profile**. See [`docs/security.md`](https://github.com/vymalo/opencode-oauth2/blob/main/docs/security.md).
+throwaway profile**. See [`docs/security.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/security.md).
 
 ## License
 
-[MIT](https://github.com/vymalo/opencode-oauth2/blob/main/LICENSE) © vymalo contributors
+[MIT](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/LICENSE) © vymalo contributors

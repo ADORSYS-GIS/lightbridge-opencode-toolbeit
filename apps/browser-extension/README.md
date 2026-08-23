@@ -19,7 +19,7 @@ Pick whichever is easiest:
 | --- | --- |
 | **Chrome Web Store** | Search "OpenCode Browser" (once the listing is live), or use your org's link. |
 | **Firefox Add-ons (AMO)** | Same — install the listed add-on. |
-| **Release zip** | Grab `opencode-browser-extension-<ver>-chrome.zip` / `-firefox.zip` from [Releases](https://github.com/vymalo/opencode-oauth2/releases) and load unpacked. |
+| **Release zip** | Grab `opencode-browser-extension-<ver>-chrome.zip` / `-firefox.zip` from [Releases](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/releases) and load unpacked. |
 | **Build from source** | `pnpm build` (below), then load `.output/chrome-mv3` (or `.output/firefox-mv2`). |
 
 ### Load unpacked (zip / source)

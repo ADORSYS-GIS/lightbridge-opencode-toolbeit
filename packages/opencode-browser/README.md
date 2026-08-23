@@ -70,10 +70,10 @@ restarts — `~/Library/Application Support/opencode-browser/bridge.json` (macOS
 (Windows). Read it from there any time instead of digging through the log; see
 [docs/browser.md → The bridge state file](../../docs/browser.md#the-bridge-state-file-bridgejson).
 
-Get the extension from the [Releases page](https://github.com/vymalo/opencode-oauth2/releases)
+Get the extension from the [Releases page](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/releases)
 (`opencode-browser-extension-<version>-chrome.zip` / `-firefox.zip`), from the Chrome Web Store /
 Firefox Add-ons, or build it from
-[`apps/browser-extension`](https://github.com/vymalo/opencode-oauth2/tree/main/apps/browser-extension).
+[`apps/browser-extension`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/tree/main/apps/browser-extension).
 
 ## Quickstart
 
@@ -269,7 +269,7 @@ executors (browsers) can share one bridge. The first process to bind the port be
 others join as guests. Groups are owned by the agent that created them (owner-exclusive), and
 ownership is rebuilt automatically on failover. Use `browser_targets` to see connected browsers
 and `browser_open({ target })` to pick one. Full design:
-[`plans/multi-client-routing.md`](https://github.com/vymalo/opencode-oauth2/blob/main/plans/multi-client-routing.md).
+[`plans/multi-client-routing.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/plans/multi-client-routing.md).
 
 ## Executors: CDP vs content-script
 
@@ -295,7 +295,7 @@ The bridge binds `127.0.0.1` only and requires a token handshake. It grants the 
 a **real browser profile** — **use a dedicated or throwaway Chrome profile**, not your daily one.
 The `chrome.debugger` banner is a deliberate, continuous indicator that automation is active.
 `debug` tools (`browser_eval`, `browser_cookies`, …) are off by default for this reason. See the
-consolidated [`docs/security.md`](https://github.com/vymalo/opencode-oauth2/blob/main/docs/security.md).
+consolidated [`docs/security.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/security.md).
 
 ## Troubleshooting
 
@@ -306,9 +306,9 @@ consolidated [`docs/security.md`](https://github.com/vymalo/opencode-oauth2/blob
 | `set_viewport` / full-page differs on Firefox | CDP-only features; Firefox uses the content executor. |
 | Screenshot path returned but model "can't see" it | The model must `read` the path — output is text-only. |
 
-Symptom-keyed fixes: [`docs/troubleshooting.md`](https://github.com/vymalo/opencode-oauth2/blob/main/docs/troubleshooting.md).
-Full architecture, wire protocol, and tool reference: [`docs/browser.md`](https://github.com/vymalo/opencode-oauth2/blob/main/docs/browser.md).
+Symptom-keyed fixes: [`docs/troubleshooting.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/troubleshooting.md).
+Full architecture, wire protocol, and tool reference: [`docs/browser.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/browser.md).
 
 ## License
 
-[MIT](https://github.com/vymalo/opencode-oauth2/blob/main/LICENSE) © vymalo contributors
+[MIT](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/LICENSE) © vymalo contributors
