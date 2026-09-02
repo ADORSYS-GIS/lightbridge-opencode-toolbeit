@@ -161,7 +161,16 @@ export async function acquireFileLock(
 
     if (age > staleMs) {
       options.logger?.warn("token_lock_stale_broken", { ...logFields, ageMs: Math.round(age) });
-      await unlink(lockPath).catch(() => {});
+      const removed = await unlink(lockPath).then(
+        () => true,
+        () => false
+      );
+      if (Date.now() >= deadline) {
+        return unavailable("timeout");
+      }
+      if (!removed) {
+        await sleep(pollIntervalMs);
+      }
       continue;
     }
 
