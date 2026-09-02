@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [0.16.0] — 2026-09-02
+
+A single-purpose release: a rotating, single-use refresh token is now presented by at most one OpenCode process at a time. Against an IdP with RFC 6819 §5.2.2.3 reuse detection (lightbridge `authz-idp`), two OpenCode windows sharing one cache file used to log each other out.
+
+### Fixed
+
+- **auth-core / oauth2:** Two OpenCode processes sharing one token cache each refreshed from their own in-memory copy of the refresh token; the second one replayed an already-rotated token minutes later, the IdP's reuse detection revoked the whole chain, and **both** processes were logged out and forced through a new device-code login. `TokenRuntime.ensure()` now single-flights in-process, takes a cross-process advisory file lock (`<cacheDir>/locks/<key>.lock`, `O_EXCL`, stale-broken after `lockStaleMs`, bounded wait, degrades to unlocked with a `token_lock_unavailable` warning rather than blocking auth), re-reads the persisted token inside the lock and adopts it when still valid, and on a 4xx from the token endpoint re-reads once more and retries a single time with a newer refresh token before falling through to interactive login. The `oauth2` plugin's `getCached` re-reads its per-server state file on every call and adopts the persisted snapshot wholesale when it is at least as new as memory. Sixteen new tests, each shown failing against the previous code. ([#104](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/104), [#105](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/105))
+- **auth-core:** A stale lock file that exists but cannot be unlinked no longer busy-spins past the `maxWaitMs` bound; the stale-break path checks the deadline and backs off a poll interval. Found by the in-house reviewer on #105. ([#105](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/105))
+
+### Added
+
+- **auth-core:** `TokenRuntimeOptions.lockStaleMs` (default `30_000`), the typed `RefreshTokenError { status }` thrown by `OAuthClient.refreshToken`, and the lock surface (`acquireFileLock`, `FileLock`, `FileLockOptions`, `DEFAULT_LOCK_STALE_MS`) exported from `./lib`. `OAuthClient.isTokenValid`, `usesRefreshToken` and `refreshToken` are now public so an embedder applies the same expiry-skew rule the runtime does. New structured events: `token_refresh_joined_in_flight`, `token_refresh_adopted_persisted`, `token_refresh_retry_with_newer`, `token_refresh_retry_failed`, `token_lock_wait`, `token_lock_stale_broken`, `token_lock_unavailable`; in oauth2, `oauth2_token_adopted_from_cache`, `oauth2_cache_reread_stale`, `oauth2_cache_reread_no_persisted_token`, `oauth2_cache_reread_failed`. ([#105](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/105))
+
+### Documentation
+
+- **oauth2 / auth-core:** [`docs/architecture.md`](docs/architecture.md) — the token lifecycle and cache-layout sections now describe the state file as shared across processes and re-read before any refresh, with the new events in the table; both package READMEs gained a refresh-coordination section. ([#105](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/105))
+
 ## [0.15.0] — 2026-08-23
 
 The local-development counterpart to CI's repo-as-principal attribution: a developer logs in once as themselves and every gateway request from an enrolled repo carries a short-lived, **project-scoped** bearer. This release lands two new published plugins (`repo-auth`, `lightbridge`), the two shared-core libraries they compose (`auth-core`, `core-otel`, extracted from the existing `oauth2`/`otel` plugins with no behaviour change), and the ADR that ties the credential model together.

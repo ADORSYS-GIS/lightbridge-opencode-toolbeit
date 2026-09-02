@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-core-otel",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Shared OpenTelemetry engine (exporters, recorder, resource, token-source seam) for the @vymalo OpenCode plugin suite.",
   "license": "MIT",
   "author": "vymalo contributors",

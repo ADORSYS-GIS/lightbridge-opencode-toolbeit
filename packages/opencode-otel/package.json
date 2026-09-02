@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-otel",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "OpenTelemetry plugin for OpenCode: exports developer interactions as OTLP traces, metrics and logs \u2014 real USD cost, all five token types (including cache read/write and reasoning), tool results, permission decisions, API errors and lines of code. Configurable from opencode.json or standard OTEL_* environment variables.",
   "license": "MIT",
   "author": "vymalo contributors",
