@@ -65,6 +65,15 @@ export class FileCacheStore {
     private readonly logger?: Logger | undefined
   ) {}
 
+  /**
+   * The directory this store writes into. Exposed so a caller can place
+   * sibling coordination state (e.g. `TokenRuntime`'s refresh lock files)
+   * next to the cached entries without duplicating the path resolution.
+   */
+  get directory(): string {
+    return this.baseDir;
+  }
+
   async ensureReady(): Promise<void> {
     await mkdir(this.baseDir, { recursive: true, mode: 0o700 });
   }

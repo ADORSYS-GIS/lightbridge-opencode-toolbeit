@@ -1,9 +1,13 @@
+import { join } from "node:path";
+
 import { FileCacheStore, hashCacheKey, resolveCacheDir } from "./cache.js";
 import type { AuthServerConfig } from "./config.js";
 import { validateAuthConfig } from "./config.js";
+import type { FileLock } from "./lock.js";
+import { DEFAULT_LOCK_STALE_MS, acquireFileLock } from "./lock.js";
 import type { Logger } from "./logging.js";
 import { createJsonConsoleLogger } from "./logging.js";
-import { OAuthClient } from "./oauth/client.js";
+import { OAuthClient, RefreshTokenError } from "./oauth/client.js";
 import type { TokenSet } from "./types.js";
 
 export interface TokenRuntimeOptions {
@@ -36,6 +40,15 @@ export interface TokenRuntimeOptions {
    * Override the cached-token write. See `getCached`.
    */
   setCached?: (token: TokenSet) => Promise<void>;
+  /**
+   * How long a cross-process refresh lock may sit untouched before another
+   * process treats it as abandoned and breaks it. Default 30s — it must
+   * exceed `timeoutMs` (the HTTP timeout of the refresh the lock guards,
+   * 15s by default) so a slow-but-alive holder is never robbed of its lock.
+   * The total wait is bounded at this value plus a small margin, after which
+   * the runtime proceeds unlocked rather than hanging the caller.
+   */
+  lockStaleMs?: number;
 }
 
 /**
@@ -53,6 +66,15 @@ export class TokenRuntime {
   private readonly logger: Logger;
   private readonly getCachedOverride?: () => Promise<TokenSet | undefined>;
   private readonly setCachedOverride?: (token: TokenSet) => Promise<void>;
+  private readonly lockStaleMs: number;
+  /**
+   * In-process single-flight slot. Every concurrent `ensure` that finds the
+   * cached token unusable joins the one refresh already running for this
+   * runtime instead of sending its own — N callers, one refresh token
+   * presented once.
+   */
+  private inFlight?: Promise<TokenSet>;
+  private lockUnwritableLogged = false;
 
   constructor(identity: string, auth: AuthServerConfig, options: TokenRuntimeOptions = {}) {
     this.identity = identity;
@@ -60,6 +82,13 @@ export class TokenRuntime {
     this.logger = options.logger ?? createJsonConsoleLogger("info");
     this.getCachedOverride = options.getCached;
     this.setCachedOverride = options.setCached;
+
+    this.lockStaleMs =
+      typeof options.lockStaleMs === "number" &&
+      Number.isFinite(options.lockStaleMs) &&
+      options.lockStaleMs > 0
+        ? options.lockStaleMs
+        : DEFAULT_LOCK_STALE_MS;
 
     const cacheDir = options.cacheDir ?? resolveCacheDir(options.cacheNamespace ?? "tokens");
     this.cacheStore = new FileCacheStore(cacheDir, this.logger);
@@ -112,13 +141,182 @@ export class TokenRuntime {
    * `interactive: false` refuses to open a browser / start device polling —
    * it throws instead, so config-time / warmup callers never block on a
    * callback that will never arrive.
+   *
+   * Refreshing is coordinated, because an IdP with single-use rotating refresh
+   * tokens plus reuse detection (RFC 6819 §5.2.2.3) revokes the whole chain
+   * when a rotated token is replayed — one replay logs every process out:
+   *
+   *   1. concurrent calls in this process share one in-flight refresh;
+   *   2. across processes, the refresh runs under an advisory lock file in
+   *      this runtime's cache directory;
+   *   3. inside the lock the cache is re-read, so a token another process
+   *      persisted meanwhile is adopted instead of refreshed again;
+   *   4. a 4xx refusal triggers one more re-read (and one retry with a newer
+   *      refresh token) before any interactive login is considered.
+   *
+   * The valid-cached-token fast path takes no lock at all.
    */
   async ensure(options: { interactive?: boolean } = {}): Promise<TokenSet> {
     const cached = await this.getCached();
-    const token = await this.client.ensureToken(cached, { interactive: options.interactive });
-    if (token.accessToken !== cached?.accessToken) {
+    if (this.client.isTokenValid(cached)) {
+      return cached as TokenSet;
+    }
+
+    const existing = this.inFlight;
+    if (existing) {
+      this.logger.debug("token_refresh_joined_in_flight", { identity: this.identity });
+      return existing;
+    }
+
+    const pending = this.acquireCoordinated(cached, options.interactive).finally(() => {
+      if (this.inFlight === pending) {
+        this.inFlight = undefined;
+      }
+    });
+    this.inFlight = pending;
+    return pending;
+  }
+
+  /**
+   * Lock path for this identity's refresh. A sibling `locks/` directory of the
+   * cache entries themselves, so two processes sharing a cache dir (the whole
+   * point) share the lock, and so a cache directory that happens to be
+   * unwritable for locks does not take the token cache down with it.
+   */
+  private lockPath(): string {
+    return join(this.cacheStore.directory, "locks", `${this.cacheKey()}.lock`);
+  }
+
+  private async acquireRefreshLock(): Promise<FileLock> {
+    const lock = await acquireFileLock(this.lockPath(), {
+      staleMs: this.lockStaleMs,
+      logger: this.logger,
+      logFields: { identity: this.identity }
+    });
+
+    if (!lock.acquired) {
+      // An unwritable lock directory is a permanent property of the
+      // filesystem — warn once, then stay quiet rather than emitting a line
+      // per request. A timeout is a transient event and always worth a line.
+      const permanent = lock.reason === "unwritable";
+      if (!permanent || !this.lockUnwritableLogged) {
+        this.lockUnwritableLogged = this.lockUnwritableLogged || permanent;
+        this.logger.warn("token_lock_unavailable", {
+          identity: this.identity,
+          reason: lock.reason
+        });
+      }
+    }
+
+    return lock;
+  }
+
+  /**
+   * The refresh path proper, run under the advisory lock. `snapshot` is what
+   * the caller already read before the lock was taken; it is only a fallback,
+   * because the whole point of the re-read is that it may be stale.
+   *
+   * An interactive login runs under the lock too. That can outlast
+   * `lockStaleMs` — by design: the lock then reads as abandoned and another
+   * process breaks it, which is the right outcome, since a human sitting on a
+   * browser prompt must not block every other process from refreshing.
+   */
+  private async acquireCoordinated(
+    snapshot: TokenSet | undefined,
+    interactive?: boolean
+  ): Promise<TokenSet> {
+    const lock = await this.acquireRefreshLock();
+    try {
+      const reread = await this.getCached();
+      if (this.client.isTokenValid(reread)) {
+        this.logger.info("token_refresh_adopted_persisted", {
+          identity: this.identity,
+          stage: "lock_entry"
+        });
+        return reread as TokenSet;
+      }
+
+      return await this.refreshOrLogin(reread ?? snapshot, interactive);
+    } finally {
+      await lock.release();
+    }
+  }
+
+  private async refreshOrLogin(
+    base: TokenSet | undefined,
+    interactive?: boolean
+  ): Promise<TokenSet> {
+    let refreshAttempted = false;
+
+    if (base?.refreshToken && this.client.usesRefreshToken()) {
+      refreshAttempted = true;
+      try {
+        return await this.persisted(await this.client.refreshToken(base.refreshToken));
+      } catch (error) {
+        this.logger.warn("oauth_refresh_failed", {
+          serverId: this.config.id,
+          identity: this.identity,
+          error: error instanceof Error ? error.message : String(error)
+        });
+
+        const rejected =
+          error instanceof RefreshTokenError && error.status >= 400 && error.status < 500;
+        if (rejected) {
+          const recovered = await this.recoverFromRejectedRefresh(base);
+          if (recovered) {
+            return recovered;
+          }
+        }
+      }
+    }
+
+    // A refresh token we already presented and that was refused (or that the
+    // IdP has rotated away) must never be presented a second time — replaying
+    // it is exactly what trips reuse detection. Strip it so the client's own
+    // refresh branch is skipped and it goes straight to the login it needs.
+    const fallback = refreshAttempted && base ? { ...base, refreshToken: undefined } : base;
+    const token = await this.client.ensureToken(fallback, { interactive });
+    if (token.accessToken !== base?.accessToken) {
       await this.persist(token);
     }
+    return token;
+  }
+
+  /**
+   * A 4xx on refresh usually means another process already rotated this chain
+   * forward. Re-read once: adopt its access token if that is now valid, else
+   * retry exactly once with the newer refresh token it persisted. Returns
+   * `undefined` when nothing newer exists, leaving the caller to fall through
+   * to its normal (interactive) login.
+   */
+  private async recoverFromRejectedRefresh(base: TokenSet): Promise<TokenSet | undefined> {
+    const newer = await this.getCached();
+    if (this.client.isTokenValid(newer)) {
+      this.logger.info("token_refresh_adopted_persisted", {
+        identity: this.identity,
+        stage: "after_rejection"
+      });
+      return newer as TokenSet;
+    }
+
+    if (!newer?.refreshToken || newer.refreshToken === base.refreshToken) {
+      return undefined;
+    }
+
+    this.logger.info("token_refresh_retry_with_newer", { identity: this.identity });
+    try {
+      return await this.persisted(await this.client.refreshToken(newer.refreshToken));
+    } catch (error) {
+      this.logger.warn("token_refresh_retry_failed", {
+        identity: this.identity,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return undefined;
+    }
+  }
+
+  private async persisted(token: TokenSet): Promise<TokenSet> {
+    await this.persist(token);
     return token;
   }
 

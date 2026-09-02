@@ -113,6 +113,8 @@ What each flow re-acquires:
 
 The machine flows (`client_credentials`, `jwt_bearer`, `token_exchange`) dispatch **before** the refresh branch — re-presenting the platform identity is the canonical way to renew, so a stale refresh token from a different IdP run is never tried.
 
+The `cached` token this state machine reads is **not** a process-local snapshot: oauth2's `getCached` override re-reads the on-disk state file on every call, so the refresh decision is always made against the last token *any* process persisted. See [Cache layout → Shared across processes](#shared-across-processes).
+
 #### PKCE on the user flows
 
 Both interactive flows send PKCE (RFC 7636) by default: a per-login `code_verifier` is generated, its `S256` `code_challenge` goes on the authorization request (`authorization_code`) or the device-authorization request (`device_code`), and the `code_verifier` is replayed on the token exchange / poll. This is mandatory for some IdPs — a Keycloak client with *Proof Key for Code Exchange Code Challenge Method* set rejects the request with `invalid_request: Missing parameter: code_challenge_method` if the challenge is absent, **including on the device endpoint**. Compliant servers that don't require PKCE simply ignore the extra parameters, so it's on unconditionally unless you set `pkce: false` per server (escape hatch for non-compliant IdPs that 400 on unknown parameters). The machine flows never use PKCE.
@@ -192,6 +194,18 @@ One file per server, named `<serverId>.json`:
 ```
 
 `token.refreshToken` is **optional** in the file shape — `client_credentials` doesn't issue one. `accessToken` and `tokenType` are required; anything missing those gets the entire `token` field evicted on load (see `hasValidTokenShape`). `models` / `rawModels` survive eviction so a stale-but-known model list stays in OpenCode while re-auth happens.
+
+### Shared across processes
+
+Several OpenCode processes (several project windows, a CLI run alongside the desktop app) share **one** `<serverId>.json`, and a refresh token is single-use: after a rotation only the process that performed it holds a usable chain. So the state file — not the in-memory copy loaded at `initialize()` — is the source of truth, and `OAuth2ModelSyncPlugin.readCachedToken` **re-reads it on every cached-token read**, i.e. before every refresh decision, on the warmup path, the scheduler path and the per-request `chat.headers` path alike.
+
+The adoption rule, in one line: **the persisted state wins unless memory is strictly newer** (`persisted.updatedAt >= runtime.state.updatedAt`), and it is adopted *wholesale* — token, `models`, `rawModels`, `lastSyncAt` together, since the file is one consistent snapshot and a field-by-field merge would pair one process's token with another's model list. Memory is kept when the file is missing, unreadable, invalid, strictly older, or carries no `token` at all (a tokenless file can't be more authoritative about a token it doesn't have, and honouring it would force a needless interactive re-login). Writes are unchanged: `setCached` and `syncServer` both build the next snapshot from the *current* in-memory state, so a write never rolls back a snapshot just adopted from disk.
+
+Without this, process B kept serving its boot-time copy, replayed a refresh token process A had already rotated, and the IdP's reuse detection revoked the whole chain — logging **both** processes out ([#104](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/104)).
+
+Re-reading is all this plugin does. Coordinating the refresh itself — single-flight within a process, a cross-process lock, re-reading inside that lock, and the retry when the IdP answers `400` because another process rotated first — belongs to `TokenRuntime` in `@vymalo/opencode-auth-core`. The two halves are complementary: the lock is pointless if the holder then refreshes from a stale in-memory token, and the re-read alone still lets two processes race into a refresh.
+
+Two `trace`/`debug` events make this visible in the log stream (never the token itself): `oauth2_token_adopted_from_cache` when a re-read yields a token different from memory, plus `oauth2_cache_reread_stale` / `oauth2_cache_reread_no_persisted_token` / `oauth2_cache_reread_failed` for the memory-wins branches.
 
 ### Eviction
 
@@ -279,6 +293,10 @@ Anywhere the plugin logs a URL it ran (`tokenEndpoint`, `modelsUrl`), it goes th
 | `oauth2_bearer_propagation_skipped_user_set` | skipped — user already set `Authorization` | `providerId` |
 | `oauth2_bearer_propagation_skipped_no_token` | skipped — refresh-only ensure couldn't produce a token without a fresh prompt | `providerId`, `error` |
 | `oauth2_bearer_propagation_skipped_empty_token` | skipped — ensure resolved but returned no access token | `providerId` |
+| `oauth2_token_adopted_from_cache` | a state-file re-read yielded a token different from the in-memory one (another process rotated it) | `serverId`, `hadInMemoryToken`, `persistedUpdatedAt`, `memoryUpdatedAt`, `modelCount` |
+| `oauth2_cache_reread_stale` | re-read found a strictly older snapshot — memory kept | `serverId`, `persistedUpdatedAt`, `memoryUpdatedAt` |
+| `oauth2_cache_reread_no_persisted_token` | state file missing, invalid, or carrying no `token` — memory kept | `serverId`, `hit`, `hasInMemoryToken` |
+| `oauth2_cache_reread_failed` | the state-file read itself threw — memory kept | `serverId`, `error` |
 
 **Log level of the happy path.** The lifecycle events you see on a *successful* boot — `plugin_initialized`, `sync_start`, `sync_success`, `oauth_refresh_success` (oauth2) and `models_info_enriched` (models-info) — are emitted at **`debug`**, not `info`. At the default `info` level a clean startup is therefore silent; you only see output when something goes wrong (`sync_failed` / `sync_startup_failed` / `oauth_refresh_failed` at `warn`/`error`, `models_info_enrichment_failed` at `error`). The **one exception** is `sync_success`: it stays at `debug` when the model set is unchanged, but is promoted to `info` when the diff is non-empty (`added`/`removed`/`renamed` > 0), so a model list shifting under you is still visible at the default level. To get the full per-tick lifecycle back when diagnosing, set the host `logLevel` to `DEBUG`.
 

@@ -195,6 +195,12 @@ Refresh tokens are mandatory for the flows that issue them (`authorization_code`
 - Cached tokens missing `refreshToken` are invalidated on load (unless the flow doesn't issue one — `client_credentials`, `jwt_bearer`, `token_exchange`).
 - Refresh flow preserves the previous refresh token when providers omit it in refresh responses.
 
+### One rotating refresh token, several OpenCode processes
+
+The cached state lives in a single `<cacheNamespace>/<serverId>.json` that every OpenCode process on the machine shares, and a refresh token is single-use. So the plugin **re-reads that file before every refresh decision** (warmup, scheduler tick, and the per-request `chat.headers` path alike) instead of trusting the copy it loaded at startup: the persisted state wins unless the in-memory one is strictly newer, and it is adopted as a whole. Without this, a second process replays a refresh token the first has already rotated, and the IdP's reuse detection revokes the chain out from under both.
+
+Coordinating the refresh itself — single-flight, the cross-process lock, and the retry when the IdP rejects a token another process just rotated — belongs to `TokenRuntime` in [`@vymalo/opencode-auth-core`](../opencode-auth-core), not to this plugin. Details: [architecture.md → Shared across processes](../../docs/architecture.md#shared-across-processes).
+
 ## Hooks Used
 
 - `config`: register/patch provider config and merge cached discovered models

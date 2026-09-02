@@ -37,6 +37,33 @@ const RESERVED_EXCHANGE_PARAMS = new Set([
   "subject_token_type"
 ]);
 
+/**
+ * Grants that re-acquire by re-presenting a platform identity / client secret
+ * and therefore never hold (or need) a refresh token.
+ */
+const MACHINE_FLOWS: ReadonlyArray<OAuthAuthFlow> = [
+  "client_credentials",
+  "jwt_bearer",
+  "token_exchange"
+];
+
+/**
+ * Refresh-token exchange rejected by the token endpoint. Carries the HTTP
+ * status so a caller can tell a 4xx (this refresh token is gone — rotated
+ * away by another process, or the whole chain revoked) apart from a 5xx /
+ * network fault, which says nothing about the token. The message is unchanged
+ * from the plain `Error` this replaces.
+ */
+export class RefreshTokenError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`refresh token exchange failed (${status})`);
+    this.name = "RefreshTokenError";
+    this.status = status;
+  }
+}
+
 export function toTokenSet(
   payload: Record<string, unknown>,
   options?: {
@@ -99,7 +126,13 @@ export class OAuthClient {
         : DEFAULT_TOKEN_EXPIRY_SKEW_MS;
   }
 
-  private isTokenValid(token?: TokenSet): boolean {
+  /**
+   * Whether `token` can still be presented as-is. Public so a coordinating
+   * caller (`TokenRuntime`) can apply exactly the same rule — including the
+   * configured expiry skew — to a token it re-read from shared storage,
+   * instead of duplicating (and drifting from) the predicate.
+   */
+  isTokenValid(token?: TokenSet): boolean {
     if (!token?.accessToken) {
       return false;
     }
@@ -115,15 +148,20 @@ export class OAuthClient {
       // keep the old behavior — assume non-expiring when expires_in is
       // missing — because the cost of forcing an unnecessary browser dance
       // is high.
-      const machineFlows: ReadonlyArray<OAuthAuthFlow> = [
-        "client_credentials",
-        "jwt_bearer",
-        "token_exchange"
-      ];
-      return !machineFlows.includes(this.server.authFlow);
+      return this.usesRefreshToken();
     }
 
     return Date.now() + this.tokenExpirySkewMs < token.expiresAt;
+  }
+
+  /**
+   * Whether this server's flow refreshes (`authorization_code`,
+   * `device_code`) rather than re-acquiring from a machine identity. Public so
+   * a caller driving the refresh itself knows whether presenting a stored
+   * refresh token is even meaningful.
+   */
+  usesRefreshToken(): boolean {
+    return !MACHINE_FLOWS.includes(this.server.authFlow);
   }
 
   /**
@@ -462,7 +500,14 @@ export class OAuthClient {
     }
   }
 
-  private async refreshToken(refreshToken: string): Promise<TokenSet> {
+  /**
+   * RFC 6749 §6 refresh. Public so a coordinating caller can drive the refresh
+   * under a cross-process lock and inspect the failure (see
+   * `RefreshTokenError`) before deciding whether an interactive login is
+   * actually warranted — `ensureToken` itself swallows the failure and falls
+   * straight through to interactive login.
+   */
+  async refreshToken(refreshToken: string): Promise<TokenSet> {
     const endpoints = await this.resolveEndpoints();
     const body = new URLSearchParams({
       grant_type: "refresh_token",
@@ -477,7 +522,7 @@ export class OAuthClient {
     const response = await this.postWithTimeout(endpoints.tokenEndpoint, body);
 
     if (!response.ok) {
-      throw new Error(`refresh token exchange failed (${response.status})`);
+      throw new RefreshTokenError(response.status);
     }
 
     const payload = (await response.json()) as Record<string, unknown>;
