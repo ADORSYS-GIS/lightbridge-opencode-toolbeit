@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-browser-extension",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "private": true,
   "description": "Companion Chromium/Firefox extension for @vymalo/opencode-browser — connects to the plugin's localhost bridge and drives real browser tabs (open, click, type, scroll, screenshot) on behalf of an OpenCode agent, organized into named tab groups.",
   "type": "module",
