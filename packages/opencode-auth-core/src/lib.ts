@@ -35,8 +35,19 @@ export type { TokenSet } from "./types.js";
 
 export {
   OAuthClient,
+  RefreshTokenError,
   toTokenSet
 } from "./oauth/client.js";
+
+export {
+  DEFAULT_LOCK_POLL_INTERVAL_MS,
+  DEFAULT_LOCK_STALE_MS,
+  LOCK_WAIT_MARGIN_MS,
+  acquireFileLock,
+  type FileLock,
+  type FileLockOptions,
+  type FileLockUnavailableReason
+} from "./lock.js";
 
 export {
   acquireTokenViaDeviceCode,

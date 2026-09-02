@@ -24,3 +24,41 @@ export function createServerConfig(overrides: Partial<AuthServerConfig> = {}): A
     ...overrides
   };
 }
+
+export interface RecordedLogEvent {
+  level: "trace" | "debug" | "info" | "warn" | "error";
+  event: string;
+  fields?: Record<string, unknown>;
+}
+
+export interface RecordingLogger {
+  logger: Logger;
+  events: RecordedLogEvent[];
+  eventNames(): string[];
+}
+
+/**
+ * Logger that records every structured event instead of printing it, so tests
+ * can assert on the coordination events (`token_lock_wait`, …) the runtime
+ * emits.
+ */
+export function createRecordingLogger(): RecordingLogger {
+  const events: RecordedLogEvent[] = [];
+  const record =
+    (level: RecordedLogEvent["level"]) =>
+    (event: string, fields?: Record<string, unknown>): void => {
+      events.push({ level, event, fields });
+    };
+
+  return {
+    events,
+    eventNames: () => events.map((entry) => entry.event),
+    logger: {
+      trace: record("trace"),
+      debug: record("debug"),
+      info: record("info"),
+      warn: record("warn"),
+      error: record("error")
+    }
+  };
+}

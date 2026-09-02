@@ -57,9 +57,93 @@ export class OAuth2ModelSyncPlugin {
     );
   }
 
+  /**
+   * Re-read the persisted per-server state and reconcile it with this
+   * process's in-memory copy, returning the token the next ensure/refresh
+   * decision must be made against.
+   *
+   * Several OpenCode processes share one
+   * `<cache>/opencode-oauth2/<namespace>/<serverId>.json`, and a refresh token
+   * is single-use: whichever process refreshed last holds the only usable
+   * chain. Serving the in-memory copy (loaded once in `initialize()` and never
+   * re-read) made a second process replay an already-rotated refresh token,
+   * which the IdP answers with reuse detection — revoking the chain and
+   * logging BOTH processes out. So the state file, not memory, is the source
+   * of truth and is re-read on every cached-token read.
+   *
+   * Adoption rule: the persisted state wins unless memory is strictly newer
+   * (`persisted.updatedAt >= runtime.state.updatedAt`), and it is adopted
+   * WHOLESALE — token, models, rawModels, lastSyncAt together. A field-by-field
+   * merge would pair one process's token with another's model list; the file is
+   * a single consistent snapshot and is taken as one. Memory is kept when the
+   * file is missing, unreadable, invalid, strictly older, or carries no token —
+   * a tokenless file cannot be more authoritative about a token it does not
+   * have, and honouring it would force a needless interactive re-login.
+   *
+   * Refresh coordination itself (single-flight, the cross-process lock, the
+   * retry after a rotated-token 400) is `TokenRuntime`'s job in auth-core; this
+   * method only guarantees every `getCached()` it makes sees the disk.
+   */
+  private async readCachedToken(serverId: string): Promise<TokenSet | undefined> {
+    const runtime = this.runtimeByServer.get(serverId);
+    if (!runtime) {
+      return undefined;
+    }
+
+    let persisted: CachedServerState | undefined;
+    try {
+      persisted = await this.cacheStore.loadServerState(serverId);
+    } catch (error) {
+      this.logger.debug("oauth2_cache_reread_failed", {
+        serverId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return runtime.state.token;
+    }
+
+    if (!persisted?.token) {
+      this.logger.trace("oauth2_cache_reread_no_persisted_token", {
+        serverId,
+        hit: Boolean(persisted),
+        hasInMemoryToken: Boolean(runtime.state.token)
+      });
+      return runtime.state.token;
+    }
+
+    const memoryUpdatedAt = runtime.state.updatedAt;
+    if (persisted.updatedAt < memoryUpdatedAt) {
+      this.logger.trace("oauth2_cache_reread_stale", {
+        serverId,
+        persistedUpdatedAt: persisted.updatedAt,
+        memoryUpdatedAt
+      });
+      return runtime.state.token;
+    }
+
+    const previousToken = runtime.state.token;
+    const rotated =
+      persisted.token.accessToken !== previousToken?.accessToken ||
+      persisted.token.refreshToken !== previousToken?.refreshToken;
+
+    runtime.state = persisted;
+
+    if (rotated) {
+      // Never log token material — only whether one was present, and when the
+      // snapshots carrying them were written.
+      this.logger.debug("oauth2_token_adopted_from_cache", {
+        serverId,
+        hadInMemoryToken: Boolean(previousToken),
+        persistedUpdatedAt: persisted.updatedAt,
+        memoryUpdatedAt,
+        modelCount: persisted.models.length
+      });
+    }
+
+    return persisted.token;
+  }
+
   private buildTokenRuntime(serverId: string): TokenRuntime {
     const server = this.requireServerConfig(serverId);
-    const runtime = this.runtimeByServer.get(serverId);
     const authConfig: AuthServerConfig = {
       id: server.id,
       issuer: server.issuer,
@@ -85,11 +169,18 @@ export class OAuth2ModelSyncPlugin {
       tokenExpirySkewMs: this.config.tokenExpirySkewMs,
       // Delegate the token cache to oauth2's fused CachedServerState so the
       // on-disk location and shape are preserved (tests + existing installs).
-      getCached: async () => runtime?.state.token,
+      // The read goes to DISK every time, not to the in-memory snapshot: see
+      // `readCachedToken` for why (single-use refresh tokens shared across
+      // processes).
+      getCached: () => this.readCachedToken(serverId),
       setCached: async (token) => {
+        const runtime = this.runtimeByServer.get(serverId);
         if (!runtime) {
           return;
         }
+        // Built from the CURRENT in-memory state, which `readCachedToken` may
+        // have just replaced with a newer persisted snapshot — so a write never
+        // resurrects the pre-adoption models/rawModels.
         const next: CachedServerState = {
           ...runtime.state,
           updatedAt: Date.now(),
@@ -257,6 +348,9 @@ export class OAuth2ModelSyncPlugin {
         rawModels,
         this.requireServerConfig(serverId).nameOverrides
       );
+      // `previousState` is only the pre-ensure snapshot, used for the
+      // added/removed/renamed diff. It is deliberately NOT the base of the
+      // state we persist below.
       const diff = diffModels(previousState.models, normalizedModels);
       this.logger.trace("oauth2_model_discovery_normalized", {
         serverId,
@@ -266,8 +360,12 @@ export class OAuth2ModelSyncPlugin {
         renamed: diff.renamed.length
       });
 
+      // Base the write on the CURRENT in-memory state, not on `previousState`:
+      // `ensure()` re-reads the shared state file and may have adopted a newer
+      // snapshot another process wrote (see `readCachedToken`), and spreading
+      // the pre-ensure snapshot would silently roll that back.
       const nextState: CachedServerState = {
-        ...previousState,
+        ...runtime.state,
         updatedAt: Date.now(),
         lastSyncAt: Date.now(),
         token,
