@@ -53,6 +53,14 @@ export interface OtelPluginFactoryOptions {
  *
  * Note this is the plugin's *own* diagnostic logging — entirely separate from
  * the OTLP logs signal it exports.
+ *
+ * Unlike the rest of the suite, this logger never mirrors `warn`/`error` to
+ * the console: a telemetry exporter must never interrupt the work it
+ * observes with terminal output. Every record still reaches `client.app.log`
+ * at its true level, so the diagnostic (a failed export, an expired
+ * `tokenCommand`, …) is always persisted to OpenCode's own log — just not on
+ * the developer's screen. See ADR-0013. Set `VYMALO_PLUGIN_CONSOLE_LOG=1`
+ * (`consoleAll` below) to opt back into the console mirror for every level.
  */
 function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
   const fallback = createJsonConsoleLogger("debug");
@@ -62,7 +70,7 @@ function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => 
     if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
       return;
     }
-    if (consoleAll || level === "warn" || level === "error") {
+    if (consoleAll) {
       fallback[level](event, fields);
     }
     const hostLevel = level === "trace" ? "debug" : level;

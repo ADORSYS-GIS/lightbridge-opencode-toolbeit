@@ -150,7 +150,7 @@ describe("host logging", () => {
     );
   });
 
-  it("reaches every log level of the default logger", async () => {
+  it("reaches every log level of the default logger, but never touches console.warn", async () => {
     const input = pluginInput();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
@@ -173,11 +173,17 @@ describe("host logging", () => {
     } as never);
 
     const log = input.client.app.log as unknown as ReturnType<typeof vi.fn>;
-    const messages = log.mock.calls.map((call) => call[0]?.body?.message);
-    expect(messages).toContain("otel_plugin_enabled");
-    expect(messages).toContain("otel_traces_init_failed");
-    expect(messages).toContain("otel_trace_propagation_ready");
-    expect(warn).toHaveBeenCalled();
+    const calls = log.mock.calls.map((call) => ({
+      message: call[0]?.body?.message,
+      level: call[0]?.body?.level
+    }));
+    expect(calls).toContainEqual({ message: "otel_plugin_enabled", level: "info" });
+    // `otel_traces_init_failed` is logged at `warn` and still reaches the host
+    // log stream labelled `warn` (ADR-0013 never touches severity, only the
+    // console mirror) — it just never reaches the terminal (asserted below).
+    expect(calls).toContainEqual({ message: "otel_traces_init_failed", level: "warn" });
+    expect(calls).toContainEqual({ message: "otel_trace_propagation_ready", level: "debug" });
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 
@@ -203,6 +209,112 @@ describe("host logging", () => {
     await expect(
       createOtelPlugin({ env: {}, registerProcessHandlers: false })(input, {})
     ).resolves.toBeDefined();
+  });
+});
+
+describe("ADR-0013: the plugin's own diagnostics never touch the terminal", () => {
+  // A trace exporter that throws at construction is the simplest reliable way
+  // to exercise a real `warn` record (`otel_traces_init_failed`) without
+  // waiting on a live collector.
+  function withFailingTraceExporter() {
+    return {
+      registerProcessHandlers: false,
+      exporters: {
+        trace: () => {
+          throw new Error("no exporter");
+        },
+        metric: () => undefined,
+        log: () => new InMemoryLogRecordExporter()
+      }
+    };
+  }
+
+  it("never mirrors a warn record to the console fallback", async () => {
+    const input = pluginInput();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await createOtelPlugin({ env: {}, ...withFailingTraceExporter() })(input, {
+      endpoint: "http://localhost:4318"
+    });
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    warn.mockRestore();
+    log.mockRestore();
+  });
+
+  it("still forwards the warn record to client.app.log at its true level", async () => {
+    const input = pluginInput();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await createOtelPlugin({ env: {}, ...withFailingTraceExporter() })(input, {
+      endpoint: "http://localhost:4318"
+    });
+
+    const log = input.client.app.log as unknown as ReturnType<typeof vi.fn>;
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          service: "opencode-otel-plugin",
+          level: "warn",
+          message: "otel_traces_init_failed"
+        })
+      })
+    );
+    vi.restoreAllMocks();
+  });
+
+  it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
+    const input = pluginInput();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+    process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
+
+    try {
+      await createOtelPlugin({ env: {}, ...withFailingTraceExporter() })(input, {
+        endpoint: "http://localhost:4318"
+      });
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+      } else {
+        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+      }
+      warn.mockRestore();
+    }
+  });
+
+  it("leaves the trace tier unchanged: gated at DEBUG, folded to debug on the wire", async () => {
+    const input = pluginInput();
+    const hooks = await createOtelPlugin({
+      env: {},
+      registerProcessHandlers: false
+    })(input, { endpoint: "http://localhost:4318" });
+
+    // Before DEBUG, the host's default `info` level gates the trace record out.
+    await hooks.config?.({ provider: { openai: { options: {} } } } as never);
+    const log = input.client.app.log as unknown as ReturnType<typeof vi.fn>;
+    expect(log.mock.calls.map((call) => call[0]?.body?.message)).not.toContain(
+      "otel_trace_propagation_installed"
+    );
+
+    log.mockClear();
+    // ADR-0008: host DEBUG unlocks the `trace` tier locally; ADR-0013 does not
+    // touch this — the fold-to-`debug`-on-the-wire behaviour is unchanged.
+    await hooks.config?.({
+      logLevel: "DEBUG",
+      provider: { openai: { options: {} } }
+    } as never);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          level: "debug",
+          message: "otel_trace_propagation_installed"
+        })
+      })
+    );
   });
 });
 
