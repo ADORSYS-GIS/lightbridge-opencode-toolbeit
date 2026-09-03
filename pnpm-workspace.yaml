@@ -40,6 +40,13 @@ minimumReleaseAgeExclude:
 # backslash authority introducer (GHSA-7p8r-x3mc-p8w7, fixed in 3.1.5). The
 # earlier `^3.1.4` pin satisfied the first two and still resolved below the
 # third's floor, so the gate failed again on the next release.
+# Then a fourth round, and the same thing happened to `^3.1.5`: four more
+# advisories all land on a 3.1.6 floor — SSRF via a percent-encoded scheme
+# (GHSA-f65p-4m7j-42xc, GHSA-fph4-wmhf-6fwf) and host confusion, one general
+# (GHSA-jqff-g426-hqxp) and one via skipped IDN processing
+# (GHSA-5jgf-p345-68v8). Hence `^3.1.6`. This package has now moved the floor
+# three times in as many releases; if it does it again, consider whether the
+# `@modelcontextprotocol/sdk` → `ajv` path can be dropped instead of chased.
 #
 # ip-address (via express-rate-limit): Address4 decodes leading-zero octets as
 # decimal while resolvers read them as octal, allowing SSRF and a
@@ -56,7 +63,7 @@ minimumReleaseAgeExclude:
 # (GHSA-28wg-ghj8-5hjv, fixed in 3.3.16) and a pool-reuse collision
 # (GHSA-2v37-7h3g-55p8, fixed in 3.3.18).
 overrides:
-  fast-uri: ^3.1.5
+  fast-uri: ^3.1.6
   ip-address: ^10.3.1
   postcss@<8.5.18: ^8.5.18
   nanoid@<3.3.18: ^3.3.18
