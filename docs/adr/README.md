@@ -37,3 +37,4 @@ Each record is `NNNN-kebab-title.md`, numbered in order, and follows a light
 | [0010](0010-oxc-build-isolated-declarations.md) | Build with oxc under `isolatedDeclarations`; `tsc` keeps type-checking | Accepted |
 | [0011](0011-repo-auth-project-id-token-exchange.md) | repo-auth: `project_id` token exchange, not an audience-scoped Source exchange | Accepted |
 | [0012](0012-single-auth-across-gateway-and-otel.md) | One credential across gateway + OTEL: `@vymalo/opencode-lightbridge` umbrella over one `TokenRuntime` (login via authz `/authorize`; MCP out of scope) | Accepted |
+| [0013](0013-otel-no-terminal-mirror.md) | The otel plugin's own diagnostics never reach the terminal — a plugin-scoped exception to ADR-0008's console-mirror rule | Accepted |

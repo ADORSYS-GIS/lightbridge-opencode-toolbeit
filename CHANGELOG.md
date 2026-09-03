@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [Unreleased]
+
+### Changed
+
+- **otel:** The plugin's own diagnostic logging (`otel_traces_init_failed`, `otel_export_failed`, `otel_token_command_failed`, …) no longer mirrors `warn`/`error` records to the console — a telemetry exporter must never interrupt the session it is observing with terminal output. Every record still reaches OpenCode's own log stream at its true, unchanged level, so nothing is lost, it just isn't printed to the screen. Set `VYMALO_PLUGIN_CONSOLE_LOG=1` to restore the console mirror. See [ADR-0013](docs/adr/0013-otel-no-terminal-mirror.md).
+
 ## [0.16.0] — 2026-09-02
 
 A single-purpose release: a rotating, single-use refresh token is now presented by at most one OpenCode process at a time. Against an IdP with RFC 6819 §5.2.2.3 reuse detection (lightbridge `authz-idp`), two OpenCode windows sharing one cache file used to log each other out.
