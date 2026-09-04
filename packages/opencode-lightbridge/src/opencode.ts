@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { join } from "node:path";
 
 import type { Hooks, Plugin, PluginInput, PluginOptions } from "@opencode-ai/plugin";
 
@@ -34,12 +35,26 @@ import {
 } from "@vymalo/opencode-core-otel";
 
 import {
+  applyResponsesApiOptions,
+  mergeDiscoveredModels,
+  ProviderModelSyncEngine,
+  resolveProviderNpm,
+  type OpenCodeProviderConfig,
+  type ProviderServerConfig
+} from "@vymalo/opencode-provider-sync/lib";
+
+import {
+  hasOAuth2Conflict,
   needsProjectToken,
   parseLightbridgeOptions,
+  type LightbridgeRegisterOptions,
+  type OpenCodeConfigLike,
   type ParsedLightbridgeOptions
 } from "./config.js";
 import {
   LightbridgeRuntime,
+  ROOT_CACHE_NAMESPACE,
+  ROOT_CACHE_SEGMENT,
   type LightbridgeRuntimeFactory,
   type LightbridgeRuntimeLike,
   type LightbridgeRuntimeOptions
@@ -216,6 +231,128 @@ function createGatewayChatHeaders(
       logger.trace("lightbridge_gateway_no_bearer", { providerId });
     }
   };
+}
+
+/**
+ * Translate `auth` (already-validated `AuthServerConfig`) + `register` into
+ * the ONE `ProviderServerConfig` the shared `ProviderModelSyncEngine` needs
+ * (ADR-0017 requirement 1 — "everything oauth2 does"). `auth.id` is the
+ * provider id AND the shared cache identity (see `plugin.ts`'s
+ * `ROOT_CACHE_SEGMENT`/`ROOT_CACHE_NAMESPACE`).
+ */
+function buildRegisterServerConfig(
+  auth: AuthServerConfig,
+  register: LightbridgeRegisterOptions
+): ProviderServerConfig {
+  return {
+    id: auth.id,
+    name: register.name ?? auth.id,
+    issuer: auth.issuer,
+    baseURL: register.baseURL,
+    clientId: auth.clientId,
+    clientSecret: auth.clientSecret,
+    scopes: auth.scopes,
+    syncIntervalMinutes: register.syncIntervalMinutes ?? 60,
+    nameOverrides: register.nameOverrides ?? {},
+    authorizationEndpoint: auth.authorizationEndpoint,
+    tokenEndpoint: auth.tokenEndpoint,
+    deviceAuthorizationEndpoint: auth.deviceAuthorizationEndpoint,
+    jwksUri: auth.jwksUri,
+    redirectPort: auth.redirectPort,
+    authFlow: auth.authFlow,
+    pkce: auth.pkce,
+    subjectTokenSource: auth.subjectTokenSource,
+    tokenExchangeAudience: auth.tokenExchangeAudience
+  };
+}
+
+interface RegisterModuleState {
+  engine?: ProviderModelSyncEngine;
+  started: boolean;
+  skippedForConflict: boolean;
+}
+
+/**
+ * The `register` module (ADR-0017 requirement 1): register `auth`'s IdP as an
+ * OpenCode provider and keep `config.provider[<auth.id>].models` in sync via
+ * the SAME `ProviderModelSyncEngine` `@vymalo/opencode-oauth2` uses — built
+ * ONCE (register's config is fixed at plugin-construction time, unlike
+ * oauth2's, which is re-derived from the host config on every `config` hook),
+ * then merged into the host config on every `config` hook call so a later
+ * OpenCode config pass still sees the discovered models.
+ *
+ * Guard (requirement 4a): if `auth.id` is ALSO managed by
+ * `@vymalo/opencode-oauth2` in this same host config, lightbridge must not
+ * also register/own it — skip entirely (never construct the engine, never
+ * touch `config.provider[id]`), logged at `debug` (ADR-0014: nothing reaches
+ * the terminal), and fail safe (the gateway/OTEL bearer still works via
+ * `LightbridgeRuntime`'s own lightweight, read/refresh-only participation in
+ * the same shared cache file). The double-scheduling guard (requirement 4b —
+ * two engine instances in one process ticking the same cache file) is
+ * enforced generically inside `ProviderModelSyncEngine.start()` itself.
+ */
+async function applyRegisterModule(
+  hostConfig: OpenCodeConfigLike & { provider?: Record<string, OpenCodeProviderConfig> },
+  register: LightbridgeRegisterOptions,
+  auth: AuthServerConfig,
+  state: RegisterModuleState,
+  logger: Logger,
+  factoryOptions: LightbridgePluginFactoryOptions
+): Promise<void> {
+  const providerId = auth.id;
+
+  if (!state.engine && hasOAuth2Conflict(hostConfig, providerId)) {
+    if (!state.skippedForConflict) {
+      state.skippedForConflict = true;
+      logger.debug("lightbridge_register_skipped_oauth2_conflict", { providerId });
+    }
+    return;
+  }
+
+  if (!state.engine) {
+    state.engine = new ProviderModelSyncEngine(
+      {
+        servers: [buildRegisterServerConfig(auth, register)],
+        cacheNamespace: ROOT_CACHE_NAMESPACE
+      },
+      {
+        logger,
+        fetchImpl: factoryOptions.fetchImpl,
+        onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
+        cacheDir: factoryOptions.cacheDir
+          ? join(factoryOptions.cacheDir, ROOT_CACHE_SEGMENT, ROOT_CACHE_NAMESPACE)
+          : undefined,
+        cacheNamespaceSegment: ROOT_CACHE_SEGMENT,
+        serviceLabel: "opencode-lightbridge"
+      }
+    );
+  }
+
+  if (!state.started) {
+    await state.engine.initialize();
+    await state.engine.start({ warmup: true });
+    state.started = true;
+  }
+
+  const providers = (hostConfig.provider ??= {});
+  const providerConfig = (providers[providerId] ??= {});
+  const providerOptions = (providerConfig.options ?? {}) as Record<string, unknown>;
+
+  providerConfig.npm = resolveProviderNpm(register.responseApi);
+  providerConfig.name = providerConfig.name ?? register.name ?? providerId;
+  providerConfig.options = applyResponsesApiOptions(
+    { ...providerOptions, baseURL: register.baseURL },
+    register.responseApi,
+    providerId,
+    logger
+  );
+
+  const models = state.engine.getServerModels(providerId);
+  if (models.length > 0) {
+    mergeDiscoveredModels(providerConfig, models);
+  }
+
+  logger.trace("lightbridge_register_config_applied", { providerId, modelCount: models.length });
 }
 
 interface OtelModule {
@@ -408,11 +545,15 @@ export function createLightbridgePlugin(
           fetchImpl: factoryOptions.fetchImpl,
           onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
           cacheDir: factoryOptions.cacheDir,
-          tokenExpirySkewMs: factoryOptions.tokenExpirySkewMs
+          tokenExpirySkewMs: factoryOptions.tokenExpirySkewMs,
+          exchange: parsed.gateway?.exchange ?? false
         })
       : undefined;
 
     const hooks: Hooks = {};
+
+    // ---- register module (ADR-0017 requirement 1) ----
+    const registerState: RegisterModuleState = { started: false, skippedForConflict: false };
 
     // ---- gateway module ----
     // `sharedRuntime` is always defined here: it is built whenever `gateway`
@@ -443,6 +584,20 @@ export function createLightbridgePlugin(
 
     hooks.config = async (hostConfig: OpenCodeConfig) => {
       currentLogLevel = fromOpenCodeLogLevel(hostConfig.logLevel) ?? DEFAULT_LOG_LEVEL;
+
+      if (parsed.register) {
+        await applyRegisterModule(
+          hostConfig as unknown as OpenCodeConfigLike & {
+            provider?: Record<string, OpenCodeProviderConfig>;
+          },
+          parsed.register,
+          parsed.auth,
+          registerState,
+          logger,
+          factoryOptions
+        );
+      }
+
       if (otel?.config.propagateTraceContext) {
         const activeOtel = otel;
         const wrapped = installTracePropagation(hostConfig as PropagationConfigInput, {
@@ -455,7 +610,9 @@ export function createLightbridgePlugin(
 
     logger.info("lightbridge_plugin_ready", {
       gateway: Boolean(hooks["chat.headers"]),
+      exchange: parsed.gateway?.exchange ?? false,
       otel: Boolean(otel),
+      register: Boolean(parsed.register),
       projectId: parsed.projectId ?? (wantsProjectToken ? "(default)" : undefined)
     });
 

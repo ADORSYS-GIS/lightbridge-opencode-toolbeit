@@ -34,8 +34,36 @@ any more, with one deliberate exception: the device-code login prompt.
   is now a thin subclass of `ProviderModelSyncEngine`, and every symbol its `lib.ts` exported before
   this extraction still exports the same name from the same subpath. See
   [ADR-0016](docs/adr/0016-provider-sync-extraction.md) and
-  [`docs/provider-sync.md`](docs/provider-sync.md). A follow-up PR wires a gateway module of
-  `@vymalo/opencode-lightbridge` onto this engine.
+  [`docs/provider-sync.md`](docs/provider-sync.md).
+- **lightbridge:** A new `register` option block (ADR-0017) — `@vymalo/opencode-lightbridge` is now
+  the all-in-one plugin: `register.baseURL` registers `auth`'s IdP as an OpenCode provider and keeps
+  its models in sync via the SAME `@vymalo/opencode-provider-sync` `ProviderModelSyncEngine`
+  `@vymalo/opencode-oauth2` uses — everything oauth2 does, from lightbridge. Independent of
+  `gateway`/`otel`; `gateway.providers`'s existing simple header-injection behaviour is completely
+  unchanged. Skips registering/owning a provider id already managed by oauth2 in the same host
+  config (config-detectable, logged once at `debug`, `lightbridge_register_skipped_oauth2_conflict`).
+  See [ADR-0017](docs/adr/0017-lightbridge-all-in-one.md) and
+  [`docs/lightbridge.md`](docs/lightbridge.md#register--provider-registration--model-discovery-adr-0017).
+- **lightbridge:** The human/IdP root token now lives in the SAME on-disk file
+  `@vymalo/opencode-oauth2` writes for a server of that id
+  (`<cacheRoot>/opencode-oauth2/opencode-oauth2-model-sync/<auth.id>.json`) instead of lightbridge's
+  own bespoke store — configure the same `id`/`issuer`/`clientId` in both plugins and log in through
+  **either one**; the other reuses the same token. A pre-upgrade install's old-format root token
+  (`<cacheRoot>/opencode-lightbridge/lightbridge.json`) is adopted into the new location
+  automatically, non-destructively, the first time it's needed — **no forced re-login**. The
+  exchanged project-scoped token (only relevant with `gateway.exchange: true`, see below) has no
+  oauth2 equivalent and is unaffected — same shape, same location as before. See
+  [ADR-0017](docs/adr/0017-lightbridge-all-in-one.md).
+- **provider-sync:** `ProviderModelSyncEngine.start()` now claims a process-wide, in-memory
+  scheduler-ownership slot per `<cacheDir, serverId>` before running its warmup sync + starting its
+  polling scheduler for a server. A second engine instance in the SAME process targeting the same
+  cache file (e.g. oauth2's engine and lightbridge's `register` engine, or two of lightbridge's own
+  across a config hot-reload) skips its own warmup + scheduler entirely rather than double-polling
+  the upstream `/models` endpoint and racing writes to one file — logged once at `debug`
+  (`sync_scheduler_ownership_skipped`), never throws, and still serves cached reads +
+  on-demand `ensureAccessToken`/`syncServer` calls normally. `stop()` releases the claim. This
+  protects any future third consumer of the engine, not just this pairing. See
+  [ADR-0017](docs/adr/0017-lightbridge-all-in-one.md).
 
 ### Fixed
 
@@ -43,6 +71,18 @@ any more, with one deliberate exception: the device-code login prompt.
 
 ### Changed
 
+- **lightbridge — BREAKING (ADR-0017, amends ADR-0012):** the RFC 8693 token exchange lightbridge's
+  `gateway`/`otel` modules used to perform UNCONDITIONALLY is now opt-in via
+  `gateway.exchange`, **defaulting to `false`**. Before: the human token was always exchanged for a
+  project-scoped one before being used as the gateway bearer / OTEL export credential. Now: by
+  default, the IdP access token from `auth` is used **directly** as the bearer — no exchange, no
+  extra grant required. **If you relied on the exchange, set `gateway.exchange: true` explicitly on
+  upgrade** to keep the exact previous behaviour (including `gateway.projectId`/top-level
+  `projectId`, unchanged). Chosen as the new default because it matches our own fleet (whose IdP
+  already issues a fully project-scoped token, and whose `opencode-cli` client has no
+  `token-exchange` grant — the unconditional exchange failed outright with `unauthorized_client`)
+  and because most IdP setups don't need a second network round trip to a token that's already
+  correctly scoped. See [ADR-0017](docs/adr/0017-lightbridge-all-in-one.md).
 - **lightbridge, oauth2, repo-auth, browser, code-index, devtools, models-info, ratelimit:** Each plugin's own diagnostic logging no longer mirrors `warn`/`error` records to the console — matching the fix `opencode-otel` got in 0.16.1. Every record still reaches OpenCode's own `client.app.log` stream at its true, unchanged level, so nothing is lost, it just isn't printed to the screen. Set `VYMALO_PLUGIN_CONSOLE_LOG=1` to restore the console mirror for every level, exactly as before. See [ADR-0014](docs/adr/0014-suite-wide-no-terminal-mirror.md), which supersedes [ADR-0013](docs/adr/0013-otel-no-terminal-mirror.md).
 - **auth-core:** The device-code login prompt and the browser-open-failure fallback (both `process.stderr` writes — the one deliberate carve-out from the no-terminal-mirror rule, since the login URL/code is required UX, not a diagnostic) no longer hardcode a `[opencode-oauth2]` prefix. `auth-core` is shared by `lightbridge`, `oauth2` and `repo-auth`, so the prefix was misattributing the prompt whenever a different plugin drove the flow. It is now a `serviceLabel` passed through `TokenRuntime`, defaulting to the neutral `[opencode]` when unset.
 

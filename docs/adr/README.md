@@ -41,3 +41,4 @@ Each record is `NNNN-kebab-title.md`, numbered in order, and follows a light
 | [0014](0014-suite-wide-no-terminal-mirror.md) | No plugin in the suite writes to the terminal (device-code login excepted) | Accepted |
 | [0015](0015-otel-fail-closed-credential-gate.md) | OTEL export fails closed on the credential, not just the header: `TokenSource.headers()` returning `undefined` skips the export before it reaches the network | Accepted |
 | [0016](0016-provider-sync-extraction.md) | Extract the provider-registration/model-sync engine into `@vymalo/opencode-provider-sync`, so `opencode-lightbridge` can compose it instead of forking it | Accepted |
+| [0017](0017-lightbridge-all-in-one.md) | `opencode-lightbridge` becomes the all-in-one plugin: `register` (provider registration + model discovery), a shared root-token cache with `opencode-oauth2`, and the RFC 8693 exchange made opt-in (amends [ADR-0012](0012-single-auth-across-gateway-and-otel.md)) | Accepted |
