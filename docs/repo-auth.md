@@ -161,7 +161,7 @@ The flow is two-phase — **boot** (config hook) and **per request** (`chat.head
 
 1. Alice types a message; opencode resolves the model to provider `gateway` and calls repo-auth's `chat.headers` hook.
 2. **Guard:** `gateway` is a managed provider (has `options.meta.repoAuth`) → proceed. Any other provider → return untouched.
-3. **Human token** (`ensure(human)`, interactive allowed): if Alice never logged in, this is where the device-code flow runs — the plugin prints "open https://idp.acme.com/device and enter ABC-DEFG" in the terminal, Alice completes it in her browser, the plugin polls and stores the human token + refresh token. If she has one, it's reused/refreshed silently.
+3. **Human token** (`ensure(human)`, interactive allowed): if Alice never logged in, this is where the device-code flow runs — the plugin prints a `[opencode-repo-auth] device-code login for …` block to the terminal with the verification URL and code (the one deliberate exception to the plugin's otherwise-silent terminal, [ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md) — every other diagnostic goes only to OpenCode's own log), Alice completes it in her browser, the plugin polls and stores the human token + refresh token. If she has one, it's reused/refreshed silently.
 4. **Project token:** read `<cacheDir>/human-<hash(human:proj-123)>.json`:
    - still valid → use it;
    - expired or absent → re-run the exchange POST from step 6 (no user interaction — the human refresh token makes it automatic) → save → use it.

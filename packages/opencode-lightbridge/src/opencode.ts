@@ -81,6 +81,15 @@ export interface LightbridgePluginFactoryOptions {
 /**
  * Pipe plugin logs through OpenCode's `client.app.log`, JSON console as
  * fallback. Mirrors every other plugin in the suite.
+ *
+ * This plugin mutates the session (gateway bearer injection, OTEL export), so
+ * it might seem like a warn/error printed to the terminal would be actionable
+ * developer feedback. It is not: no plugin in this suite may write to the
+ * user's TUI (ADR-0014, superseding ADR-0013's narrower per-plugin scope).
+ * Every record still reaches `client.app.log` at its true level, so the
+ * diagnostic is always persisted to OpenCode's own log — just not on the
+ * developer's screen. Set `VYMALO_PLUGIN_CONSOLE_LOG=1` (`consoleAll` below)
+ * to opt back into the console mirror for every level.
  */
 function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
   const fallback = createJsonConsoleLogger("debug");
@@ -90,7 +99,7 @@ function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => 
     if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
       return;
     }
-    if (consoleAll || level === "warn" || level === "error") {
+    if (consoleAll) {
       fallback[level](event, fields);
     }
     const hostLevel = level === "trace" ? "debug" : level;

@@ -154,7 +154,10 @@ The cache **is** 1-day-TTL by default (`meta.modelsInfoTtlSeconds`, `86400`). Th
 
 ## Log events
 
-All structured, `snake_case`, emitted through both the JSON console and OpenCode's `client.app.log`:
+All structured, `snake_case`, emitted through OpenCode's `client.app.log`. The plugin never writes
+its own diagnostics to the terminal — not even `warn`/`error` records like
+`models_info_fetch_failed_no_cache` — per [ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md); set
+`VYMALO_PLUGIN_CONSOLE_LOG=1` to also mirror every level to the JSON console for local debugging:
 
 | Event | Level | Meaning |
 | --- | --- | --- |

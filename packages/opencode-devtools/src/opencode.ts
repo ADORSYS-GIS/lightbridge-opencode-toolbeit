@@ -58,6 +58,12 @@ export function resolveOptions(raw: PluginOptions | undefined): ResolvedDevtools
  * Pipe plugin logs through OpenCode's `client.app.log` so they show up in the
  * host's structured log stream, with the JSON console as a reliable fallback.
  * Mirrors `@vymalo/opencode-browser`.
+ *
+ * No plugin in this suite may write to the user's TUI (ADR-0014, superseding
+ * ADR-0013's narrower per-plugin scope) — even a warn/error about a failed
+ * tool call stays off the terminal and goes only to the host log via
+ * `client.app.log` at its true level. Set `VYMALO_PLUGIN_CONSOLE_LOG=1`
+ * (`consoleAll` below) to opt back into the console mirror for every level.
  */
 function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
   const fallback = createJsonConsoleLogger("debug");
@@ -67,7 +73,7 @@ function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => 
     if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
       return;
     }
-    if (consoleAll || level === "warn" || level === "error") {
+    if (consoleAll) {
       fallback[level](event, fields);
     }
     const hostLevel = level === "trace" ? "debug" : level;

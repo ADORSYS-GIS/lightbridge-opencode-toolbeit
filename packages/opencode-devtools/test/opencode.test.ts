@@ -95,3 +95,64 @@ describe("createDevtoolsPlugin", () => {
     expect(events).toContain("devtools_tool_failed");
   });
 });
+
+describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
+  // devtools is one of the eight plugins ADR-0014 newly brings under the
+  // no-terminal-mirror rule (ADR-0013 originally scoped this to opencode-otel
+  // only). `devtools_tool_failed` (tools.ts, warn level) is the easiest real
+  // warn-level record to force without mocking internals: drive `math_eval`
+  // with a non-string expression so the handler throws.
+  async function driveFailingTool() {
+    const log = vi.fn().mockResolvedValue(undefined);
+    const input = { client: { app: { log } } } as never;
+    const plugin = createDevtoolsPlugin(); // no injected logger → real createOpenCodeLogger
+    const hooks = await plugin(input, { groups: ["math"] });
+    await expect(
+      (hooks.tool as ToolMap).math_eval.execute({ expression: 1 }, {} as never)
+    ).rejects.toThrow();
+    return log;
+  }
+
+  it("never mirrors the warn record to the console fallback", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await driveFailingTool();
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    warn.mockRestore();
+    log.mockRestore();
+  });
+
+  it("still forwards the warn record to client.app.log at its true level", async () => {
+    const appLog = await driveFailingTool();
+
+    expect(appLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          level: "warn",
+          message: "devtools_tool_failed"
+        })
+      })
+    );
+  });
+
+  it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+    process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
+
+    try {
+      await driveFailingTool();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+      } else {
+        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+      }
+      warn.mockRestore();
+    }
+  });
+});

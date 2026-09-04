@@ -437,13 +437,13 @@ tier (see [ADR-0008](adr/0008-trace-log-tier.md)), or set `VYMALO_PLUGIN_CONSOLE
 plugin diagnostics to stdout.
 
 **No plugin diagnostics ever appear on the terminal — not even `otel_traces_init_failed` or
-`otel_token_command_failed`.** This is deliberate ([ADR-0013](adr/0013-otel-no-terminal-mirror.md)):
-`@vymalo/opencode-otel` is the suite's one pure observer, so its own logging never writes to
-stdout/stderr regardless of level — a failed export or an expired `tokenCommand` is not something
-that should interrupt a session mid-flow. Every record still reaches OpenCode's own log at its true
-level (`warn` stays `warn`, `error` stays `error`), so nothing is lost — it just isn't printed to the
-screen. To see it there anyway, set `VYMALO_PLUGIN_CONSOLE_LOG=1`, which restores the console mirror
-for every level this plugin emits.
+`otel_token_command_failed`.** This is deliberate: no plugin in the suite writes its own logging to
+stdout/stderr by default ([ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md), which extends the
+otel-specific [ADR-0013](adr/0013-otel-no-terminal-mirror.md) to every plugin) — a failed export or an
+expired `tokenCommand` is not something that should interrupt a session mid-flow. Every record still
+reaches OpenCode's own log at its true level (`warn` stays `warn`, `error` stays `error`), so nothing
+is lost — it just isn't printed to the screen. To see it there anyway, set
+`VYMALO_PLUGIN_CONSOLE_LOG=1`, which restores the console mirror for every level this plugin emits.
 
 ## Relationship to `opencode-otel-plugin`
 

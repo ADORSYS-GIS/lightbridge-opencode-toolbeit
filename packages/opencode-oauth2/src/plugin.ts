@@ -167,6 +167,7 @@ export class OAuth2ModelSyncPlugin {
       timeoutMs: this.config.httpTimeoutMs,
       onAuthorizationUrl: this.options.onAuthorizationUrl,
       tokenExpirySkewMs: this.config.tokenExpirySkewMs,
+      serviceLabel: "opencode-oauth2",
       // Delegate the token cache to oauth2's fused CachedServerState so the
       // on-disk location and shape are preserved (tests + existing installs).
       // The read goes to DISK every time, not to the in-memory snapshot: see

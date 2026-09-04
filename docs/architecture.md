@@ -260,7 +260,11 @@ So forwarding the plugin's structured logs to a centralized aggregator (Loki, Da
 
 ### What only goes to stderr
 
-Two paths bypass the structured logger and write directly to `process.stderr` so the **terminal user** can see them, but the values never enter centralized log forwarding:
+These are the **only** two things this plugin (or any plugin in the suite) ever writes to the
+terminal — the deliberate carve-out from [ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md)'s
+otherwise-universal no-terminal-output rule. Both bypass the structured logger and write directly to
+`process.stderr` so the **terminal user** can see them, but the values never enter centralized log
+forwarding:
 
 1. **Browser-open failure during `authorization_code`.** When `openExternalUrl` throws (no display, missing handler), the plugin writes the authorization URL — which contains the `state` nonce — straight to stderr. Logging it through the logger would land the nonce in shared aggregation, which could enable login-CSRF via a forged callback.
 2. **Device-code user code + verification URL.** The user needs to read these out of their terminal to complete the flow. They are *also* logged (`oauth_device_code_issued`) — `user_code` is intentionally not redacted because it's an ephemeral single-use code with no value outside the active flow (RFC 8628 §3.2). But stderr is the reliable channel.
@@ -298,11 +302,11 @@ Anywhere the plugin logs a URL it ran (`tokenEndpoint`, `modelsUrl`), it goes th
 | `oauth2_cache_reread_no_persisted_token` | state file missing, invalid, or carrying no `token` — memory kept | `serverId`, `hit`, `hasInMemoryToken` |
 | `oauth2_cache_reread_failed` | the state-file read itself threw — memory kept | `serverId`, `error` |
 
-**Log level of the happy path.** The lifecycle events you see on a *successful* boot — `plugin_initialized`, `sync_start`, `sync_success`, `oauth_refresh_success` (oauth2) and `models_info_enriched` (models-info) — are emitted at **`debug`**, not `info`. At the default `info` level a clean startup is therefore silent; you only see output when something goes wrong (`sync_failed` / `sync_startup_failed` / `oauth_refresh_failed` at `warn`/`error`, `models_info_enrichment_failed` at `error`). The **one exception** is `sync_success`: it stays at `debug` when the model set is unchanged, but is promoted to `info` when the diff is non-empty (`added`/`removed`/`renamed` > 0), so a model list shifting under you is still visible at the default level. To get the full per-tick lifecycle back when diagnosing, set the host `logLevel` to `DEBUG`.
+**Log level of the happy path.** The lifecycle events at a *successful* boot — `plugin_initialized`, `sync_start`, `sync_success`, `oauth_refresh_success` (oauth2) and `models_info_enriched` (models-info) — are emitted at **`debug`**, not `info`. The **one exception** is `sync_success`: it stays at `debug` when the model set is unchanged, but is promoted to `info` when the diff is non-empty (`added`/`removed`/`renamed` > 0). None of this — including a failure at `warn`/`error` (`sync_failed`, `sync_startup_failed`, `oauth_refresh_failed`, `models_info_enrichment_failed`) — ever prints to the terminal by default: every level goes only to OpenCode's own `client.app.log` stream ([ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md)). To see it on the terminal anyway, set `VYMALO_PLUGIN_CONSOLE_LOG=1`; to get the full per-tick lifecycle in the host log when diagnosing, set the host `logLevel` to `DEBUG`.
 
 **The `trace` tier.** Below `debug` sits a `trace` level (priority 5) carrying the fine-grained, per-step breadcrumbs — every config-hook step and provider considered (oauth2), each model match/merge decision (models-info), every parsed `x-ratelimit` header and throttle/tier choice (ratelimit), and every frame the bridge routes between agents and executors, plus host-vs-guest election (browser). It's deliberately high-volume, so it isn't its own host knob: **OpenCode's `DEBUG` maps to `trace`** (`fromOpenCodeLogLevel("DEBUG") → "trace"`), so running the host at `--log-level DEBUG` unlocks the entire trace stream on top of the `debug` lifecycle events. There's no way to get `debug` without `trace` from the host — that's intentional, since "DEBUG" is the operator's universal "tell me everything" signal. One wrinkle: OpenCode's `client.app.log()` enum only has `debug|info|warn|error`, so a `trace` record is forwarded to the host stream **labelled `debug`** (the finer gating already happened locally); the JSON-console fallback keeps the true `trace` label. (Rationale + the alternatives we rejected: [ADR-0008](adr/0008-trace-log-tier.md).)
 
-When OpenCode is the host, the plugin pipes everything through `client.app.log()` *in addition* to stderr (best-effort, non-blocking). Stderr is the reliable channel.
+When OpenCode is the host, every record goes through `client.app.log()` (best-effort, non-blocking) — not additionally to stderr. Stderr is reserved for the two carve-outs in [What only goes to stderr](#what-only-goes-to-stderr) above; the plugin's own structured logging never touches it by default ([ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md)).
 
 ## Token policy (recap)
 

@@ -49,6 +49,15 @@ export interface TokenRuntimeOptions {
    * the runtime proceeds unlocked rather than hanging the caller.
    */
   lockStaleMs?: number;
+  /**
+   * Human-readable label for the terminal login prompts the underlying
+   * `OAuthClient` writes directly to stderr (browser-open fallback,
+   * device-code prompt). `auth-core` is shared across several plugins
+   * (lightbridge, oauth2, repo-auth), so a hardcoded plugin name in those
+   * prompts would misidentify the caller. Defaults to the neutral
+   * `"opencode"`.
+   */
+  serviceLabel?: string;
 }
 
 /**
@@ -98,7 +107,8 @@ export class TokenRuntime {
       logger: this.logger,
       timeoutMs: options.timeoutMs ?? 15_000,
       onAuthorizationUrl: options.onAuthorizationUrl,
-      tokenExpirySkewMs: options.tokenExpirySkewMs
+      tokenExpirySkewMs: options.tokenExpirySkewMs,
+      serviceLabel: options.serviceLabel
     });
   }
 

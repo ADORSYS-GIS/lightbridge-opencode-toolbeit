@@ -2,7 +2,7 @@
 
 Symptom-keyed. Each entry covers what's happening internally, where to look in logs, and a diagnostic you can run.
 
-The plugin emits structured JSON logs to stderr (and through `client.app.log()` when running under OpenCode). Anywhere this guide says "look for `<event>` in the logs", that's an event name in the `event` field of those entries — see [architecture.md → Logging](./architecture.md#logging) for the full table.
+The plugin emits structured JSON logs through `client.app.log()` when running under OpenCode — not to the terminal by default ([ADR-0014](./adr/0014-suite-wide-no-terminal-mirror.md); set `VYMALO_PLUGIN_CONSOLE_LOG=1` to also mirror to stderr for local debugging). Anywhere this guide says "look for `<event>` in the logs", that's an event name in the `event` field of those entries — see [architecture.md → Logging](./architecture.md#logging) for the full table.
 
 > This page covers `@vymalo/opencode-oauth2`, plus a handful of `@vymalo/opencode-otel` symptoms
 > below that are cross-cutting enough to belong here. For the companion plugins, see the

@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { Hooks } from "@opencode-ai/plugin";
 import { FileCacheStore, type Logger } from "@vymalo/opencode-auth-core/lib";
@@ -37,9 +37,16 @@ async function instantiate(options: {
   fetchImpl?: typeof fetch;
   cacheDir: string;
   cwd: string;
+  /**
+   * Optional spy standing in for the host's `client.app.log` — pass one when
+   * a test needs to inspect what reached the host log (e.g. the ADR-0014
+   * no-terminal-mirror tests below, which deliberately omit `logger` so the
+   * real `createOpenCodeLogger` runs).
+   */
+  appLog?: (...args: unknown[]) => Promise<void>;
 }): Promise<NonNullable<Hooks>> {
   const plugin = createOpencodeRepoAuthPlugin(options);
-  return plugin({ client: { app: { log: async () => undefined } } as never });
+  return plugin({ client: { app: { log: options.appLog ?? (async () => undefined) } } as never });
 }
 
 function makeConfig(provider: Record<string, unknown>): OpenCodeConfig {
@@ -372,5 +379,83 @@ describe("createOpencodeRepoAuthPlugin", () => {
     await hooks["chat.headers"]?.({ model: { providerID: "some-other-provider" } }, output);
 
     expect(output.headers.Authorization).toBeUndefined();
+  });
+});
+
+describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
+  // A provider opted into repoAuth without a projectId is the simplest
+  // reliable way to exercise a real `warn` record
+  // (`repo_auth_skipped_no_project_id`) purely through config validation —
+  // no network, no cache seeding. `logger` is deliberately omitted from
+  // `instantiate` so the real (non-injected) `createOpenCodeLogger` runs.
+  async function triggerNoProjectIdWarning(
+    appLog: (...args: unknown[]) => Promise<void>
+  ): Promise<void> {
+    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-adr0014-"));
+    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-adr0014-nogit-"));
+
+    const hooks = await instantiate({
+      cacheDir,
+      cwd,
+      appLog,
+      fetchImpl: async () => makeJsonResponse({})
+    });
+    const config = makeConfig({
+      gateway: {
+        options: {
+          baseURL: "https://gateway.example.com/v1",
+          meta: { repoAuth: { issuer: "https://idp.example.com", clientId: "c", scopes: ["s"] } }
+        }
+      }
+    });
+    await hooks.config?.(config);
+  }
+
+  it("never mirrors a warn record to the console fallback", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const appLog = vi.fn().mockResolvedValue(undefined);
+
+    await triggerNoProjectIdWarning(appLog);
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    warn.mockRestore();
+    log.mockRestore();
+  });
+
+  it("still forwards the warn record to client.app.log at its true level", async () => {
+    const appLog = vi.fn().mockResolvedValue(undefined);
+
+    await triggerNoProjectIdWarning(appLog);
+
+    expect(appLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          service: "opencode-repo-auth-plugin",
+          level: "warn",
+          message: "repo_auth_skipped_no_project_id"
+        })
+      })
+    );
+  });
+
+  it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const appLog = vi.fn().mockResolvedValue(undefined);
+    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+    process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
+
+    try {
+      await triggerNoProjectIdWarning(appLog);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+      } else {
+        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+      }
+      warn.mockRestore();
+    }
   });
 });

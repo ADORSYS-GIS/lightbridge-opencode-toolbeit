@@ -42,6 +42,14 @@ export interface AcquireTokenViaDeviceCodeOptions {
    * Clock used to measure elapsed time. Overridable for tests.
    */
   now?: () => number;
+  /**
+   * Human-readable label for the stderr login prompt (e.g.
+   * `"opencode-lightbridge"`). `auth-core` is shared across several plugins
+   * (lightbridge, oauth2, repo-auth), so a hardcoded plugin name here would
+   * misidentify the caller whenever a different plugin drives the flow.
+   * Defaults to the neutral `"opencode"`.
+   */
+  serviceLabel?: string;
 }
 
 interface DeviceAuthorizationResponse {
@@ -194,9 +202,13 @@ export async function acquireTokenViaDeviceCode(
   });
 
   // Also surface to stderr so terminal users can see the code regardless of log
-  // routing. Mirrors the browser-fallback pattern in client.ts.
+  // routing. This is the one deliberate carve-out from the suite's no-TUI-output
+  // rule (ADR-0014): the login URL/code is required UX, not a diagnostic —
+  // hiding it would make a first-time login look like a hang. Mirrors the
+  // browser-fallback pattern in client.ts.
+  const serviceLabel = options.serviceLabel ?? "opencode";
   process.stderr.write(
-    `\n[opencode-oauth2] device-code login for ${serverId}:\n  visit: ${verificationUri}\n  code:  ${deviceAuth.user_code}\n  (expires in ${deviceAuth.expires_in}s)\n\n`
+    `\n[${serviceLabel}] device-code login for ${serverId}:\n  visit: ${verificationUri}\n  code:  ${deviceAuth.user_code}\n  (expires in ${deviceAuth.expires_in}s)\n\n`
   );
 
   // Step 2: poll the token endpoint.

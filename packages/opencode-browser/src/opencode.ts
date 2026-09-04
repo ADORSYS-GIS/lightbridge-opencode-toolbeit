@@ -63,15 +63,18 @@ function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => 
   // OpenCode already captures plugin logs via client.app.log (and filters them
   // by its own log level). Mirroring every event to stdout on top of that is
   // what floods the terminal (e.g. `opencode web` re-loads the plugin per
-  // session). So only mirror warn/error to the JSON console by default; set
-  // VYMALO_PLUGIN_CONSOLE_LOG=1 to restore full console output for debugging.
+  // session) — and no plugin in this suite may write to the user's TUI at all
+  // (ADR-0014, superseding ADR-0013's narrower per-plugin scope), so even a
+  // warn/error about a down bridge stays off the terminal. Only mirror to the
+  // JSON console when explicitly requested; set VYMALO_PLUGIN_CONSOLE_LOG=1 to
+  // restore full console output for debugging.
   const consoleAll = /^(1|true|yes|on)$/i.test(process.env.VYMALO_PLUGIN_CONSOLE_LOG ?? "");
 
   const write = (level: LogLevel, event: string, fields?: LogFields) => {
     if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
       return;
     }
-    if (consoleAll || level === "warn" || level === "error") {
+    if (consoleAll) {
       fallback[level](event, fields);
     }
     // OpenCode's host log API has no `trace` tier — fold it into `debug` for the

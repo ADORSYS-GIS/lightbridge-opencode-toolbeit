@@ -109,7 +109,8 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
       fetchImpl: options.fetchImpl,
       onAuthorizationUrl: options.onAuthorizationUrl,
       cacheDir: options.cacheDir ?? join(resolveCacheRoot(), DEFAULT_CACHE_NAMESPACE),
-      tokenExpirySkewMs: this.tokenExpirySkewMs
+      tokenExpirySkewMs: this.tokenExpirySkewMs,
+      serviceLabel: "opencode-lightbridge"
     });
   }
 

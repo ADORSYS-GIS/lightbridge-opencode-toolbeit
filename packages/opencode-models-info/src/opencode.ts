@@ -32,16 +32,18 @@ export interface OpenCodePluginFactoryOptions {
 function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
   const fallback = createJsonConsoleLogger("debug");
   // OpenCode already captures plugin logs via client.app.log (and filters them
-  // by its own log level). Mirroring every event to stdout on top of that just
-  // floods the terminal, so only mirror warn/error to the JSON console by
-  // default; set VYMALO_PLUGIN_CONSOLE_LOG=1 to restore full console output.
+  // by its own log level). No plugin in this suite may write to the user's
+  // TUI (ADR-0014, superseding ADR-0013's narrower per-plugin scope) — even a
+  // warn/error about a failed catalog fetch stays off the terminal and goes
+  // only to the host log, so only mirror to the JSON console when explicitly
+  // requested; set VYMALO_PLUGIN_CONSOLE_LOG=1 to restore full console output.
   const consoleAll = /^(1|true|yes|on)$/i.test(process.env.VYMALO_PLUGIN_CONSOLE_LOG ?? "");
 
   const write = (level: LogLevel, event: string, fields?: LogFields) => {
     if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
       return;
     }
-    if (consoleAll || level === "warn" || level === "error") {
+    if (consoleAll) {
       fallback[level](event, fields);
     }
     // OpenCode's log API has no `trace` tier — fold it into the host's most
