@@ -4,6 +4,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSocketFactory } from "../src/agent-client.js";
 import type { BridgeTransport, TransportHandlers } from "../src/transport.js";
 
+/**
+ * Mirrors the shape of endpoint.test.ts's `failingSocket` — a guest socket
+ * factory that throws synchronously so `AgentClient.connect()`'s promise
+ * auto-rejects instead of hanging forever waiting for a `ready` frame that a
+ * dumb fake socket (like `fakeAgentSocket` below) would never deliver.
+ */
+const failingAgentSocket: AgentSocketFactory = () => {
+  throw new Error("no guest socket in test");
+};
+
 // Isolate the shared-token state file so the factory never touches the real
 // ~/Library/Application Support (…) bridge.json that a live OpenCode shares.
 vi.mock("../src/token-file.js", () => ({
@@ -111,5 +121,120 @@ describe("createBrowserPlugin", () => {
   it("config hook resolves and accepts a log level", async () => {
     const { hooks } = await load(undefined);
     await expect(hooks.config?.({ logLevel: "WARN" } as never)).resolves.toBeUndefined();
+  });
+});
+
+describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
+  // A transport whose `listen()` rejects with a non-EADDRINUSE error is the
+  // simplest reliable way to exercise a real `warn` record
+  // (`browser_endpoint_bind_error`, endpoint.ts) without a real bind failure.
+  class ThrowingBindTransport implements BridgeTransport {
+    listen(_opts: { host: string; port: number }, _handlers: TransportHandlers): Promise<void> {
+      return Promise.reject(new Error("bind exploded"));
+    }
+    stop(): void {}
+  }
+
+  /**
+   * Loads the plugin WITHOUT injecting a custom `logger`, so the real
+   * (non-injected) `createOpenCodeLogger` from opencode.ts runs — the only
+   * thing under test here. The host bind fails (a non-EADDRINUSE error), which
+   * logs a real `warn` (`browser_endpoint_bind_error`) before falling through
+   * to a guest connect that also fails fast via `failingAgentSocket`. The
+   * failed guest then schedules a real 500ms reelect retry (endpoint.ts's
+   * default `reelectMs`, not overridable from here) — fake timers keep that
+   * retry from ever actually firing in the background and bleeding into a
+   * later test once we switch back to real timers.
+   */
+  async function loadWithBindError() {
+    const client = fakeClient();
+    const plugin = createBrowserPlugin({
+      createServerTransport: () => new ThrowingBindTransport(),
+      createAgentSocket: failingAgentSocket,
+      generateToken: () => "generated-token"
+    });
+    vi.useFakeTimers();
+    try {
+      const hooks = await plugin({ client: client.client } as PluginInput, undefined);
+      return { hooks, client };
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("never mirrors a warn record (a failed host bind) to the console fallback", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await loadWithBindError();
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
+
+  it("still forwards the warn record to client.app.log at its true level", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { client } = await loadWithBindError();
+
+    expect(client.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          service: "opencode-browser-plugin",
+          level: "warn",
+          message: "browser_endpoint_bind_error"
+        })
+      })
+    );
+    vi.restoreAllMocks();
+  });
+
+  it("never mirrors an error record (a failed onHost callback) to the console fallback, but still forwards it to client.app.log at its true level", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    // `onHost` (advertiseToken in opencode.ts) calls `writeBridgeFile` — make it
+    // throw so `endpoint.ts`'s `elect()` catches it and logs a real `error`
+    // (`browser_endpoint_onhost_error`) through the real, non-injected logger.
+    vi.mocked(writeBridgeFile).mockImplementationOnce(() => {
+      throw new Error("disk full");
+    });
+
+    const { client } = await load(undefined);
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    expect(client.log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          service: "opencode-browser-plugin",
+          level: "error",
+          message: "browser_endpoint_onhost_error"
+        })
+      })
+    );
+    vi.restoreAllMocks();
+  });
+
+  it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+    process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
+
+    try {
+      await loadWithBindError();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+      } else {
+        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+      }
+      vi.restoreAllMocks();
+    }
   });
 });

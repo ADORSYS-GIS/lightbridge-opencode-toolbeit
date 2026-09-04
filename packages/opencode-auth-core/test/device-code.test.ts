@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { acquireTokenViaDeviceCode } from "../src/oauth/device-code.js";
 import { createSilentLogger } from "./helpers.js";
@@ -694,5 +694,81 @@ describe("acquireTokenViaDeviceCode", () => {
     // and stay there — not keep climbing into hour-scale waits.
     const maxSleep = Math.max(...sleeps);
     expect(maxSleep).toBeLessThanOrEqual(60_000);
+  });
+});
+
+describe("ADR-0014: the device-code stderr prompt carve-out is labeled, not hardcoded", () => {
+  // The login URL/code is required UX, not a diagnostic (ADR-0014's one
+  // carve-out from the suite's no-TUI-output rule) — this stays on stderr for
+  // every caller. What changes is the bracketed label: auth-core is shared by
+  // lightbridge, oauth2 and repo-auth, so a hardcoded "[opencode-oauth2]"
+  // would misidentify the caller when a different plugin drives the flow.
+  function deviceAuthResponse(): Response {
+    return new Response(
+      JSON.stringify({
+        device_code: "dev-code-abc",
+        user_code: "WDJB-MJHT",
+        verification_uri: "https://auth.example.com/device",
+        expires_in: 600,
+        interval: 1
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  function tokenResponse(): Response {
+    return new Response(
+      JSON.stringify({
+        access_token: "device-access",
+        refresh_token: "device-refresh",
+        token_type: "Bearer",
+        expires_in: 3600
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("defaults the stderr prompt label to the neutral [opencode]", async () => {
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const { fetch: fetchImpl } = recordingFetch([deviceAuthResponse, tokenResponse]);
+
+    await acquireTokenViaDeviceCode({
+      deviceAuthorizationEndpoint: "https://auth.example.com/device/authorize",
+      tokenEndpoint: "https://auth.example.com/oauth/token",
+      clientId: "device-client",
+      scopes: ["openid"],
+      serverId: "example-ai",
+      logger: createSilentLogger(),
+      fetchImpl,
+      timeoutMs: 5000,
+      sleep: async () => {}
+    });
+
+    const written = write.mock.calls.map((call) => String(call[0])).join("");
+    expect(written).toContain("[opencode] device-code login for example-ai");
+  });
+
+  it("uses the caller-supplied serviceLabel instead of a hardcoded plugin name", async () => {
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const { fetch: fetchImpl } = recordingFetch([deviceAuthResponse, tokenResponse]);
+
+    await acquireTokenViaDeviceCode({
+      deviceAuthorizationEndpoint: "https://auth.example.com/device/authorize",
+      tokenEndpoint: "https://auth.example.com/oauth/token",
+      clientId: "device-client",
+      scopes: ["openid"],
+      serverId: "example-ai",
+      logger: createSilentLogger(),
+      fetchImpl,
+      timeoutMs: 5000,
+      sleep: async () => {},
+      serviceLabel: "opencode-lightbridge"
+    });
+
+    const written = write.mock.calls.map((call) => String(call[0])).join("");
+    expect(written).toContain("[opencode-lightbridge] device-code login for example-ai");
+    expect(written).not.toContain("[opencode-oauth2]");
   });
 });

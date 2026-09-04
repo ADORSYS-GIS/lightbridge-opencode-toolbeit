@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import * as browserModule from "../src/oauth/browser.js";
 import { OAuthClient } from "../src/oauth/client.js";
 import { createServerConfig, createSilentLogger } from "./helpers.js";
 
@@ -924,5 +925,84 @@ describe("OAuthClient token lifecycle", () => {
     });
 
     await expect(client.ensureToken()).rejects.toThrow(/refresh_token/i);
+  });
+});
+
+describe("ADR-0014: the browser-fallback stderr prompt carve-out is labeled, not hardcoded", () => {
+  // The login URL is required UX, not a diagnostic (ADR-0014's one carve-out
+  // from the suite's no-TUI-output rule) — this stays on stderr whenever
+  // opening the browser fails and no `onAuthorizationUrl` override is given.
+  // What changes is the bracketed label: auth-core is shared by lightbridge,
+  // oauth2 and repo-auth, so a hardcoded "[opencode-oauth2]" would misidentify
+  // the caller when a different plugin drives the flow.
+  afterEach(() => vi.restoreAllMocks());
+
+  async function completeViaStderrPrompt(write: ReturnType<typeof vi.spyOn>): Promise<string> {
+    const written = write.mock.calls.map((call) => String(call[0])).join("");
+    const urlMatch = written.match(/https:\/\/auth\.example\.com\/oauth\/authorize\?\S+/);
+    if (!urlMatch) {
+      throw new Error(`no authorize URL found in stderr output: ${written}`);
+    }
+    const authorizeUrl = new URL(urlMatch[0]);
+    const redirectUri = authorizeUrl.searchParams.get("redirect_uri");
+    const state = authorizeUrl.searchParams.get("state");
+    await fetch(`${redirectUri}?code=auth-code-123&state=${state}`);
+    return written;
+  }
+
+  it("defaults the stderr prompt label to the neutral [opencode]", async () => {
+    vi.spyOn(browserModule, "openExternalUrl").mockRejectedValue(new Error("no display"));
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const client = new OAuthClient(createServerConfig(), {
+      logger: createSilentLogger(),
+      timeoutMs: 5000,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            access_token: "fallback-access",
+            refresh_token: "fallback-refresh",
+            token_type: "Bearer",
+            expires_in: 3600
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+    });
+
+    const tokenPromise = client.ensureToken();
+    await vi.waitFor(() => expect(write).toHaveBeenCalled());
+    const written = await completeViaStderrPrompt(write);
+
+    expect(written).toContain("[opencode] open this URL to authenticate");
+    await expect(tokenPromise).resolves.toMatchObject({ accessToken: "fallback-access" });
+  });
+
+  it("uses the caller-supplied serviceLabel instead of a hardcoded plugin name", async () => {
+    vi.spyOn(browserModule, "openExternalUrl").mockRejectedValue(new Error("no display"));
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    const client = new OAuthClient(createServerConfig(), {
+      logger: createSilentLogger(),
+      timeoutMs: 5000,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            access_token: "fallback-access",
+            refresh_token: "fallback-refresh",
+            token_type: "Bearer",
+            expires_in: 3600
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ),
+      serviceLabel: "opencode-lightbridge"
+    });
+
+    const tokenPromise = client.ensureToken();
+    await vi.waitFor(() => expect(write).toHaveBeenCalled());
+    const written = await completeViaStderrPrompt(write);
+
+    expect(written).toContain("[opencode-lightbridge] open this URL to authenticate");
+    expect(written).not.toContain("[opencode-oauth2]");
+    await expect(tokenPromise).resolves.toMatchObject({ accessToken: "fallback-access" });
   });
 });

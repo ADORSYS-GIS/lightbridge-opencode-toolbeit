@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { FileCacheStore } from "../src/cache.js";
 import { createOpencodeOauth2Plugin, fromOpenCodeLogLevel } from "../src/opencode.js";
@@ -717,6 +717,101 @@ describe("OpenCode plugin hooks", () => {
     };
 
     await expect(hooks.config?.(config as never)).rejects.toThrow(/responseApi/);
+  });
+});
+
+describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
+  // Builds hooks WITHOUT an injected `logger` option, so the real
+  // `createOpenCodeLogger` (from src/opencode.ts) runs — unlike `createHooks`
+  // above, which always passes `createSilentLogger()` and therefore bypasses
+  // it entirely.
+  async function createRealLoggerHooks(cacheDir: string) {
+    const log = vi.fn(async () => ({ data: true }));
+    const plugin = createOpencodeOauth2Plugin({
+      cacheDir,
+      fetchImpl: async () => {
+        throw new Error("fetch is not expected in these hook tests");
+      }
+    });
+
+    const hooks = await plugin({
+      client: { app: { log } },
+      project: { id: "project-1" },
+      directory: process.cwd(),
+      worktree: process.cwd(),
+      serverUrl: new URL("http://127.0.0.1:3000"),
+      $: {} as never
+    } as never);
+
+    return { hooks, log };
+  }
+
+  // A malformed (non-object) entry in `pluginConfig.oauth2ModelSync.servers`
+  // is the simplest way to trigger a real `warn` record
+  // (`plugin_config_server_invalid`) purely from the `config` hook, with no
+  // network calls and no valid managed provider left over afterwards.
+  const invalidServerConfig: Record<string, unknown> = {
+    pluginConfig: {
+      oauth2ModelSync: {
+        servers: ["not-an-object"]
+      }
+    }
+  };
+
+  it("never mirrors a warn record to the console fallback", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-adr0014-console-"));
+    const { hooks } = await createRealLoggerHooks(cacheDir);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await hooks.config?.(invalidServerConfig as never);
+
+    expect(warn).not.toHaveBeenCalled();
+    expect(log).not.toHaveBeenCalled();
+    warn.mockRestore();
+    log.mockRestore();
+  });
+
+  it("still forwards the warn record to client.app.log at its true level", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-adr0014-hostlog-"));
+    const { hooks, log } = await createRealLoggerHooks(cacheDir);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await hooks.config?.(invalidServerConfig as never);
+
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.objectContaining({
+          service: "opencode-oauth2-plugin",
+          level: "warn",
+          message: "plugin_config_server_invalid"
+        })
+      })
+    );
+    vi.restoreAllMocks();
+  });
+
+  it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-adr0014-restore-"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+    // createOpenCodeLogger reads this env var once, at plugin-construction
+    // time (inside the factory's returned hook, not per write() call) — so it
+    // must be set BEFORE building the hooks, not merely before invoking them.
+    process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
+
+    try {
+      const { hooks } = await createRealLoggerHooks(cacheDir);
+      await hooks.config?.(invalidServerConfig as never);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+      } else {
+        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+      }
+      warn.mockRestore();
+    }
   });
 });
 

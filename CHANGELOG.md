@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [Unreleased]
+
+A single-purpose release: the ADR-0013 no-terminal-mirror fix that shipped for `opencode-otel` alone
+in 0.16.1 now covers every plugin in the suite. No plugin writes its own diagnostics to the terminal
+any more, with one deliberate exception: the device-code login prompt.
+
+### Changed
+
+- **lightbridge, oauth2, repo-auth, browser, code-index, devtools, models-info, ratelimit:** Each plugin's own diagnostic logging no longer mirrors `warn`/`error` records to the console — matching the fix `opencode-otel` got in 0.16.1. Every record still reaches OpenCode's own `client.app.log` stream at its true, unchanged level, so nothing is lost, it just isn't printed to the screen. Set `VYMALO_PLUGIN_CONSOLE_LOG=1` to restore the console mirror for every level, exactly as before. See [ADR-0014](docs/adr/0014-suite-wide-no-terminal-mirror.md), which supersedes [ADR-0013](docs/adr/0013-otel-no-terminal-mirror.md).
+- **auth-core:** The device-code login prompt and the browser-open-failure fallback (both `process.stderr` writes — the one deliberate carve-out from the no-terminal-mirror rule, since the login URL/code is required UX, not a diagnostic) no longer hardcode a `[opencode-oauth2]` prefix. `auth-core` is shared by `lightbridge`, `oauth2` and `repo-auth`, so the prefix was misattributing the prompt whenever a different plugin drove the flow. It is now a `serviceLabel` passed through `TokenRuntime`, defaulting to the neutral `[opencode]` when unset.
+
 ## [0.16.1] — 2026-09-03
 
 A single-purpose release: `@vymalo/opencode-otel` stops printing its own diagnostics to the terminal. The suite's only pure observer no longer interrupts a session over telemetry it cannot ask the developer to fix mid-turn.

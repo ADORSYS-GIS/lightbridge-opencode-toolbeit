@@ -16,6 +16,15 @@ interface OAuthClientOptions {
   timeoutMs: number;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
   tokenExpirySkewMs?: number;
+  /**
+   * Human-readable label for the terminal login prompts this client writes
+   * directly to stderr (the browser-open fallback below, and the device-code
+   * prompt in `device-code.ts`). `auth-core` is shared across several plugins
+   * (lightbridge, oauth2, repo-auth), so a hardcoded plugin name here would
+   * misidentify the caller whenever a different plugin drives the flow.
+   * Defaults to the neutral `"opencode"`.
+   */
+  serviceLabel?: string;
 }
 
 interface ResolvedEndpoints {
@@ -109,6 +118,7 @@ export class OAuthClient {
   private readonly timeoutMs: number;
   private readonly onAuthorizationUrl?: (url: string) => Promise<void> | void;
   private readonly tokenExpirySkewMs: number;
+  private readonly serviceLabel: string;
 
   constructor(
     private readonly server: AuthServerConfig,
@@ -118,6 +128,7 @@ export class OAuthClient {
     this.logger = options.logger;
     this.timeoutMs = options.timeoutMs;
     this.onAuthorizationUrl = options.onAuthorizationUrl;
+    this.serviceLabel = options.serviceLabel ?? "opencode";
     this.tokenExpirySkewMs =
       typeof options.tokenExpirySkewMs === "number" &&
       Number.isFinite(options.tokenExpirySkewMs) &&
@@ -552,7 +563,8 @@ export class OAuthClient {
       logger: this.logger,
       fetchImpl: this.fetchImpl,
       timeoutMs: this.timeoutMs,
-      pkce: this.server.pkce
+      pkce: this.server.pkce,
+      serviceLabel: this.serviceLabel
     });
   }
 
@@ -606,9 +618,11 @@ export class OAuthClient {
           // Write the URL to stderr directly so the terminal user can copy-paste
           // it. Bypasses the structured logger to avoid leaking the `state`
           // nonce (and other query params) into centralized log aggregation,
-          // which would enable login-CSRF via a forged localhost callback.
+          // which would enable login-CSRF via a forged localhost callback. This
+          // is the one deliberate carve-out from the suite's no-TUI-output rule
+          // (ADR-0014): the login URL is required UX, not a diagnostic.
           process.stderr.write(
-            `\n[opencode-oauth2] open this URL to authenticate (${this.server.id}):\n${authorizeUrl.toString()}\n\n`
+            `\n[${this.serviceLabel}] open this URL to authenticate (${this.server.id}):\n${authorizeUrl.toString()}\n\n`
           );
         }
       }

@@ -76,6 +76,17 @@ export interface OpenCodePluginFactoryOptions {
   cwd?: string;
 }
 
+/**
+ * Pipe plugin logs through OpenCode's `client.app.log`, JSON console as
+ * fallback. Mirrors the pattern used across the @vymalo suite.
+ *
+ * No plugin in this suite may write to the user's TUI (ADR-0014, superseding
+ * ADR-0013's narrower per-plugin scope) — even a warn/error about the
+ * caller's own skipped/failed bearer stamp stays off the terminal and goes
+ * only to the host log via `client.app.log` at its true level. Set
+ * `VYMALO_PLUGIN_CONSOLE_LOG=1` (`consoleAll` below) to opt back into the
+ * console mirror for every level.
+ */
 function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
   const fallback = createJsonConsoleLogger("debug");
   const consoleAll = /^(1|true|yes|on)$/i.test(process.env.VYMALO_PLUGIN_CONSOLE_LOG ?? "");
@@ -89,7 +100,7 @@ function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => 
       return;
     }
 
-    if (consoleAll || level === "warn" || level === "error") {
+    if (consoleAll) {
       fallback[level](event, fields);
     }
 

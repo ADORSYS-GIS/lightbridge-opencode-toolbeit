@@ -1,6 +1,10 @@
 # ADR-0013 — The otel plugin's own diagnostics never reach the terminal
 
-- **Status:** Accepted (2026-09).
+- **Status:** Superseded by [ADR-0014](0014-suite-wide-no-terminal-mirror.md) (2026-09). ADR-0014
+  extends this ADR's console-mirror fix to the other eight plugins and overrides the "pure observer
+  vs. session-mutating plugin" distinction this ADR drew below — no plugin in the suite prints its own
+  `warn`/`error` to the terminal any more. The Context/Decision/Consequences below are preserved
+  as-written for history; they no longer describe the suite's live behavior for the other plugins.
 - **Scope:** `@vymalo/opencode-otel`'s own diagnostic logging — the `createOpenCodeLogger` host
   bridge in `packages/opencode-otel/src/opencode.ts`. Does **not** touch
   `@vymalo/opencode-core-otel` (the shared OTel engine also consumed by

@@ -354,6 +354,72 @@ describe("createLightbridgePlugin — default logger + exit handling", () => {
     );
   });
 
+  describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
+    // Malformed options (missing `auth`) is the simplest reliable way to
+    // exercise a real `error` record (`lightbridge_config_invalid`) through
+    // the REAL `createOpenCodeLogger` — no injected logger, no otel/exporter
+    // seams required. Mirrors `@vymalo/opencode-otel`'s ADR-0013 test block,
+    // adapted to ADR-0014 (this plugin is one of the eight the wider ADR now
+    // covers, not the original narrower-scoped exception).
+    it("never mirrors an error record to the console fallback", async () => {
+      const input = pluginInput();
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await createLightbridgePlugin({ registerProcessHandlers: false })(input, {
+        gateway: { providers: ["gateway"] } // missing `auth`
+      });
+
+      expect(error).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    });
+
+    it("still forwards the error record to client.app.log at its true level", async () => {
+      const input = pluginInput();
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await createLightbridgePlugin({ registerProcessHandlers: false })(input, {
+        gateway: { providers: ["gateway"] } // missing `auth`
+      });
+
+      const log = input.client.app.log as unknown as ReturnType<typeof vi.fn>;
+      expect(log).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.objectContaining({
+            service: "opencode-lightbridge-plugin",
+            level: "error",
+            message: "lightbridge_config_invalid"
+          })
+        })
+      );
+      vi.restoreAllMocks();
+    });
+
+    it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
+      const input = pluginInput();
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+      process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
+
+      try {
+        await createLightbridgePlugin({ registerProcessHandlers: false })(input, {
+          gateway: { providers: ["gateway"] } // missing `auth`
+        });
+        expect(error).toHaveBeenCalled();
+      } finally {
+        if (previous === undefined) {
+          delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+        } else {
+          process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+        }
+        error.mockRestore();
+      }
+    });
+  });
+
   it("registers exit handlers exactly once when otel is active and drains on beforeExit", async () => {
     const before = process.listenerCount("beforeExit");
     await createLightbridgePlugin({
