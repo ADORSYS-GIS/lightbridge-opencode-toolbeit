@@ -6,6 +6,7 @@ settings:
 
 overrides:
   fast-uri: ^3.1.6
+  toml: ^4.2.0
   ip-address: ^10.3.1
   postcss@<8.5.18: ^8.5.18
   nanoid@<3.3.18: ^3.3.18
@@ -2486,8 +2487,8 @@ packages:
     resolution: {integrity: sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA==}
     engines: {node: '>=0.6'}
 
-  toml@4.1.1:
-    resolution: {integrity: sha512-EBJnVBr3dTXdA89WVFoAIPUqkBjxPMwRqsfuo1r240tKFHXv3zgca4+NJib/h6TyvGF7vOawz0jGuryJCdNHrw==}
+  toml@4.3.0:
+    resolution: {integrity: sha512-lVb8X9BsPVuH0M4BKeS91tXAmJvCjQ5UIyAbQFaxkKGyUFK2RPkhwaFSQH8vbpl1d23eu/IBH+dwVMHWaq9A5A==}
     engines: {node: '>=20'}
 
   tree-sitter-javascript@0.23.1:
@@ -3694,7 +3695,7 @@ snapshots:
       kubernetes-types: 1.30.0
       msgpackr: 1.11.12
       multipasta: 0.2.7
-      toml: 4.1.1
+      toml: 4.3.0
       uuid: 13.0.2
       yaml: 2.9.0
 
@@ -4553,7 +4554,7 @@ snapshots:
 
   toidentifier@1.0.1: {}
 
-  toml@4.1.1: {}
+  toml@4.3.0: {}
 
   tree-sitter-javascript@0.23.1(tree-sitter@0.21.1):
     dependencies:
