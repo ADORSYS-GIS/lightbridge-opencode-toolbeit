@@ -51,6 +51,10 @@ flowchart LR
      standalone credential helper (`tokenCommand`). `invalidate()` is a documented no-op in v1: the
      project token is short-lived and `getProjectToken` re-checks its own expiry on every call, so
      there is no stale in-memory copy to drop.
+     **When the exchange fails, `headers()` resolves to `undefined`, not `{}`** — that tells
+     `core-otel`'s export gate to skip the export before it reaches the network, rather than sending
+     it unauthenticated for the collector to reject. See [ADR-0015](adr/0015-otel-fail-closed-credential-gate.md)
+     and [`otel.md` → Fail-closed export](otel.md#fail-closed-export).
 
 Both modules are independent opt-ins. `auth` alone (no `gateway`, no `otel`) is a valid, inert
 config — the plugin logs once and registers no observing hooks.
@@ -86,14 +90,15 @@ config — the plugin logs once and registers no observing hooks.
 | `auth` | yes | `AuthServerConfigInput` (auth-core) — the one IdP login. Validated eagerly via `validateAuthConfig`; a malformed block fails plugin load with a field-level error rather than a half-built plugin. |
 | `gateway.providers` | required if `gateway` is set | Which OpenCode provider ids get the project bearer injected on `chat.headers`. |
 | `gateway.projectId` | no | Optional project id for the gateway exchange. Omit for the caller's **default project**. |
-| `otel` | no | Same shape as `@vymalo/opencode-otel`'s options, **minus** `tokenCommand` / `tokenHeader` / `tokenPrefix` — the shared runtime supersedes that seam entirely. |
+| `otel` | no | Same shape as `@vymalo/opencode-otel`'s options. `tokenCommand` / `tokenHeader` / `tokenPrefix` are accepted (they are just `OtelPluginOptions` fields) but always **ignored** — the shared runtime's `TokenSource` supersedes that seam entirely and always wins in `createProviders`. Setting any of them logs `lightbridge_otel_token_command_ignored` once at `debug` rather than silently no-opping. |
 | `projectId` (top-level) | no | Optional project id for the shared exchange. When omitted (and no `gateway.projectId`), the backend mints a **default-project** token. An explicit top-level `projectId` wins over `gateway.projectId`. |
 
-If a module needs a project token and none is resolvable, the plugin logs
-`lightbridge_missing_project_id` (warn) and that module's credential injection stays inert — `gateway`
-registers no `chat.headers` hook at all; `otel` still activates (telemetry is still useful) but its
-`TokenSource` is `undefined`, so exports carry no `Authorization` header unless `otel.headers` supplies
-one directly.
+When the shared exchange itself fails (expired login, rejected exchange, no session at all), `gateway`
+injects no header on that request and the gateway 401s as normal; `otel`'s `TokenSource.headers()`
+resolves to `undefined` on that call, which skips the export entirely rather than sending it with no
+`Authorization` header. Both modules keep re-trying on their own natural cadence (`gateway` on the
+next request, `otel` on the next batch flush), so a later successful login resumes both without a
+restart.
 
 ## Scope: gateway + OTEL, not MCP
 
@@ -138,8 +143,9 @@ packages/opencode-lightbridge/
 
 Same posture as `@vymalo/opencode-repo-auth`, extended to the OTEL egress:
 
-- **Fail closed** — an exchange failure means no gateway header and no OTEL `Authorization` header;
-  neither module ever invents a token.
+- **Fail closed** — an exchange failure means no gateway header and, for OTEL, no export attempt at
+  all (not just no `Authorization` header — see [ADR-0015](adr/0015-otel-fail-closed-credential-gate.md)).
+  Neither module ever invents a token.
 - **Own cache namespace** — `<cacheRoot>/opencode-lightbridge/`, separate from oauth2/repo-auth/otel.
 - **Redaction** — auth-core's logger redacts `token|secret|password` fields.
 - **Disk** — `0o600` files, atomic rename (auth-core `FileCacheStore`, [ADR-0005](adr/0005-atomic-file-writes-per-writer-temp.md)).

@@ -1,10 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { ExportResultCode } from "@opentelemetry/core";
+import type { SpanExporter } from "@opentelemetry/sdk-trace";
+import { describe, expect, it, vi } from "vitest";
 
 import { resolveOtelConfig } from "../src/config.js";
 import { buildResource, createProviders, describeError } from "../src/providers.js";
+import type { TokenSource } from "../src/token-source.js";
 import { silentLogger } from "./helpers.js";
 
 const base = () => resolveOtelConfig({ endpoint: "http://localhost:4318" }, {});
+
+/** A minimal `SpanExporter` whose `export` calls are individually observable. */
+function spySpanExporter(): { exporter: SpanExporter; exportSpy: ReturnType<typeof vi.fn> } {
+  const exportSpy = vi.fn((_spans: unknown, resultCallback: (result: unknown) => void) => {
+    resultCallback({ code: ExportResultCode.SUCCESS });
+  });
+  return {
+    exporter: { export: exportSpy, shutdown: async () => {} } as unknown as SpanExporter,
+    exportSpy
+  };
+}
+
+function fixedTokenSource(headers: Record<string, string> | undefined): TokenSource {
+  return { headers: async () => headers, invalidate: () => {} };
+}
 
 describe("buildResource", () => {
   it("identifies the machine and project, never the developer", () => {
@@ -97,6 +115,73 @@ describe("createProviders", () => {
     const providers = createProviders(config, buildResource(config, {}), silentLogger());
     expect(providers.tracer).toBeDefined();
     expect(providers.otelLogger).toBeDefined();
+  });
+
+  describe("fail-closed credential gate (ADR-0015)", () => {
+    it("never reaches the underlying OTLP exporter when the injected token source has no credential", async () => {
+      const { exporter, exportSpy } = spySpanExporter();
+      const providers = createProviders(
+        base(),
+        buildResource(base(), {}),
+        silentLogger(),
+        { trace: () => exporter },
+        fixedTokenSource(undefined)
+      );
+
+      providers.tracer?.startSpan("op").end();
+      await providers.forceFlush();
+
+      expect(exportSpy).not.toHaveBeenCalled();
+    });
+
+    it("reaches the underlying OTLP exporter once the injected token source resolves a credential", async () => {
+      const { exporter, exportSpy } = spySpanExporter();
+      const providers = createProviders(
+        base(),
+        buildResource(base(), {}),
+        silentLogger(),
+        { trace: () => exporter },
+        fixedTokenSource({ Authorization: "Bearer good-token" })
+      );
+
+      providers.tracer?.startSpan("op").end();
+      await providers.forceFlush();
+
+      expect(exportSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not gate a console exporter on the token source", async () => {
+      // A console exporter never leaves the process, so it must keep printing
+      // locally even while the network credential is unusable.
+      const config = resolveOtelConfig({ exporters: { traces: "console" } }, {});
+      const { exporter, exportSpy } = spySpanExporter();
+      const providers = createProviders(
+        config,
+        buildResource(config, {}),
+        silentLogger(),
+        { trace: () => exporter }, // stands in for the real ConsoleSpanExporter
+        fixedTokenSource(undefined)
+      );
+
+      providers.tracer?.startSpan("op").end();
+      await providers.forceFlush();
+
+      expect(exportSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("exports normally with no token source at all — the standalone unauthenticated case", async () => {
+      // Regression guard: `@vymalo/opencode-otel` with no `tokenCommand` and no
+      // injected source must keep exporting exactly as before this change.
+      const { exporter, exportSpy } = spySpanExporter();
+      const providers = createProviders(base(), buildResource(base(), {}), silentLogger(), {
+        trace: () => exporter
+      });
+
+      providers.tracer?.startSpan("op").end();
+      await providers.forceFlush();
+
+      expect(exportSpy).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

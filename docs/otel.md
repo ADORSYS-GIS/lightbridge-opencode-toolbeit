@@ -114,14 +114,38 @@ job. When `exp` is absent or unreadable, `tokenRefreshMs` (default 4 minutes) ap
 
 **Failure behaviour is deliberately asymmetric.** If the helper fails while the cached token is
 still valid, nothing changes — that token is current, not stale, and discarding it would lose data
-for no reason. If it fails with no valid token left, the plugin sends **no auth header at all**, so
-the export fails closed at the collector rather than retrying forever with a dead credential. A
-rejected export also drops the cached token, so the next attempt re-runs the helper instead of
-replaying something the collector already refused.
+for no reason. If it fails with no valid token left, the plugin **skips the export entirely** rather
+than sending it with no auth header for the collector to reject — see
+[Fail-closed export](#fail-closed-export) below. A rejected export also drops the cached token, so
+the next attempt re-runs the helper instead of replaying something the collector already refused.
 
 The token is never logged. Failures log the command name, exit code, whether stdout was empty, and
 the *length* of stderr — never its contents, since a credential helper's stderr can echo the
 request.
+
+### Fail-closed export
+
+A configured credential source (`tokenCommand` here, or the shared runtime in
+[`@vymalo/opencode-lightbridge`](lightbridge.md)) changes what "fail closed" means. Three cases,
+each handled differently ([ADR-0015](adr/0015-otel-fail-closed-credential-gate.md)):
+
+1. **No credential source configured at all** — no `tokenCommand`, nothing injected. Every export
+   proceeds exactly as configured, authenticated or not. This is the default shape in the
+   [Quick start](#quick-start) above, and it is not touched by anything below.
+2. **A credential source is configured and it produces a token.** The export proceeds with the
+   resolved `Authorization` header, as always.
+3. **A credential source is configured and it currently cannot produce a token** — the helper
+   failed, the cached token aged past its expiry, or (in `opencode-lightbridge`) the shared exchange
+   was rejected. **The export is skipped before it reaches the network** — not sent with a missing
+   header for the collector to 401/403. The skip is logged at `debug` as
+   `otel_export_skipped_no_credential` (not `warn`: it is a policy decision, not a failure), and is
+   re-evaluated on the very next batch flush — no extra timer, no backoff, and no restart needed once
+   a credential becomes available again (e.g. after `governance-auth login`, or a fresh interactive
+   login in `opencode-lightbridge`).
+
+This applies uniformly to every OTLP exporter this plugin builds and to `opencode-lightbridge`'s
+runtime-backed export path — `console` exporters (local debug output) are never gated on a
+credential, since they never leave the process.
 
 ### Backend examples
 
@@ -424,6 +448,13 @@ carries the `signal`, the HTTP `status` where the backend supplied one, the erro
 `consecutiveFailures` count. A `401`/`403` means the credential is rejected; with a `tokenCommand`
 configured, check for `otel_token_command_failed` or `otel_token_expired` alongside it. Recovery is
 reported once, as `otel_export_recovered`.
+
+**Data stops arriving and there is no `otel_export_failed` at all.** With a credential source
+configured (`tokenCommand`, or `opencode-lightbridge`'s shared auth), check for
+`otel_export_skipped_no_credential` at `debug` instead — see [Fail-closed export](#fail-closed-export).
+This means the export is being skipped *before* it reaches the network, which is the expected
+behaviour while the credential is unavailable, not a bug. It stops on its own once a credential is
+available again (no restart needed).
 
 **One signal is missing.** Look for `otel_traces_init_failed` / `otel_metrics_init_failed` /
 `otel_logs_init_failed` in the host log stream. Each signal is built independently, so one failing

@@ -247,13 +247,37 @@ describe("createLightbridgePlugin — otel module", () => {
     expect(runtime.calls).toEqual([{ interactive: false }]);
   });
 
-  it("TokenSource.headers() degrades to {} on an exchange failure (never throws)", async () => {
+  it("TokenSource.headers() degrades to undefined on an exchange failure (never throws)", async () => {
+    // `undefined`, not `{}`: the shared export gate in `@vymalo/opencode-core-otel`
+    // (`withFailureLogging`, ADR-0015) treats `{}` as "export with no extra
+    // headers" and `undefined` as "skip the export entirely." A logged-out
+    // session must resolve to the latter.
     const runtime = makeSpyRuntime(async () => {
       throw new Error("exchange failed");
     });
     const { capturedTokenSource } = await loadOtel({ runtime, projectId: "proj-1" });
 
-    await expect(capturedTokenSource?.headers()).resolves.toEqual({});
+    await expect(capturedTokenSource?.headers()).resolves.toBeUndefined();
+  });
+
+  it("TokenSource.headers() resumes returning the Bearer once a later exchange succeeds", async () => {
+    // Lazy re-evaluation: a call that fails does not poison later calls — the
+    // very next `headers()` call after a successful login resumes exporting.
+    let succeed = false;
+    const runtime = makeSpyRuntime(async () => {
+      if (!succeed) {
+        throw new Error("exchange failed");
+      }
+      return makeToken({ accessToken: "recovered-token" });
+    });
+    const { capturedTokenSource } = await loadOtel({ runtime, projectId: "proj-1" });
+
+    await expect(capturedTokenSource?.headers()).resolves.toBeUndefined();
+
+    succeed = true;
+    await expect(capturedTokenSource?.headers()).resolves.toEqual({
+      Authorization: "Bearer recovered-token"
+    });
   });
 
   it("invalidate() is a documented no-op", async () => {
@@ -275,6 +299,49 @@ describe("createLightbridgePlugin — otel module", () => {
       registerProcessHandlers: false
     })(pluginInput(), { auth: makeAuth() });
     expect(hooks.event).toBeUndefined();
+  });
+
+  it("logs that otel.tokenCommand/tokenHeader/tokenPrefix are ignored, never silently", async () => {
+    // The shared runtime-backed TokenSource always wins in `createProviders`
+    // (ADR-0012) — these fields are otherwise dead config. ADR-0015 requires a
+    // diagnostic instead of a silent no-op.
+    const logger = createRecordingLogger();
+    const runtime = makeSpyRuntime();
+    const { factory } = fixedRuntimeFactory(runtime);
+    await createLightbridgePlugin({
+      logger,
+      registerProcessHandlers: false,
+      deferredTimeoutMs: 5,
+      runtimeFactory: factory,
+      exporters: { trace: () => undefined, metric: () => undefined, log: () => undefined }
+    })(pluginInput(), {
+      auth: makeAuth(),
+      otel: {
+        endpoint: "http://localhost:4318",
+        tokenCommand: "some-other-helper"
+      }
+    });
+
+    expect(logger.events.some((e) => e.event === "lightbridge_otel_token_command_ignored")).toBe(
+      true
+    );
+  });
+
+  it("says nothing when otel has no tokenCommand/tokenHeader/tokenPrefix set", async () => {
+    const logger = createRecordingLogger();
+    const runtime = makeSpyRuntime();
+    const { factory } = fixedRuntimeFactory(runtime);
+    await createLightbridgePlugin({
+      logger,
+      registerProcessHandlers: false,
+      deferredTimeoutMs: 5,
+      runtimeFactory: factory,
+      exporters: { trace: () => undefined, metric: () => undefined, log: () => undefined }
+    })(pluginInput(), { auth: makeAuth(), otel: { endpoint: "http://localhost:4318" } });
+
+    expect(logger.events.some((e) => e.event === "lightbridge_otel_token_command_ignored")).toBe(
+      false
+    );
   });
 
   it("propagates trace context through the config hook when otel traces are active", async () => {

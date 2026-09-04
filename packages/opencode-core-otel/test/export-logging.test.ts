@@ -2,6 +2,7 @@ import { ExportResultCode } from "@opentelemetry/core";
 import { describe, expect, it, vi } from "vitest";
 
 import { type ExporterLike, withFailureLogging } from "../src/export-logging.js";
+import type { TokenSource } from "../src/token-source.js";
 import { silentLogger } from "./helpers.js";
 
 function fakeExporter(results: Array<{ code: ExportResultCode; error?: unknown }>): ExporterLike {
@@ -14,6 +15,26 @@ function fakeExporter(results: Array<{ code: ExportResultCode; error?: unknown }
     },
     shutdown: async () => {},
     forceFlush: async () => {}
+  };
+}
+
+/** A fake exporter whose `export` calls are individually observable. */
+function spyExporter(): { exporter: ExporterLike; exportSpy: ReturnType<typeof vi.fn> } {
+  const exportSpy = vi.fn((_items: never, resultCallback: (result: unknown) => void) => {
+    resultCallback({ code: ExportResultCode.SUCCESS });
+  });
+  return {
+    exporter: { export: exportSpy as ExporterLike["export"], shutdown: async () => {} },
+    exportSpy
+  };
+}
+
+/** A `TokenSource` whose `headers()` answers are scripted, one per call. */
+function fakeTokenSource(answers: Array<Record<string, string> | undefined>): TokenSource {
+  let i = 0;
+  return {
+    headers: async () => answers[Math.min(i++, answers.length - 1)],
+    invalidate: () => {}
   };
 }
 
@@ -159,5 +180,95 @@ describe("withFailureLogging", () => {
     );
     await exportOnce(wrapped);
     expect(logger.events[0][1]).toMatchObject({ error: "unknown", status: undefined });
+  });
+});
+
+/**
+ * The fail-closed credential gate (ADR-0015). `withFailureLogging` is the seam
+ * that resolves `tokenSource.headers()` *before* delegating to the real
+ * exporter, so a missing credential never reaches the network at all.
+ */
+describe("withFailureLogging — credential gate", () => {
+  it("never calls the underlying exporter when the credential is unavailable", async () => {
+    const { exporter, exportSpy } = spyExporter();
+    const tokenSource = fakeTokenSource([undefined]);
+    const wrapped = withFailureLogging(exporter, "traces", silentLogger(), { tokenSource });
+
+    const result = await new Promise((resolve) => wrapped.export([] as never, resolve));
+
+    expect(exportSpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ code: ExportResultCode.FAILED });
+  });
+
+  it("logs the skip at debug, not warn, and does not invoke onFailure", async () => {
+    const logger = silentLogger();
+    const onFailure = vi.fn();
+    const { exporter } = spyExporter();
+    const tokenSource = fakeTokenSource([undefined]);
+    const wrapped = withFailureLogging(exporter, "traces", logger, { tokenSource, onFailure });
+
+    await exportOnce(wrapped);
+
+    expect(logger.events).toEqual([
+      ["debug:otel_export_skipped_no_credential", { signal: "traces" }]
+    ]);
+    expect(onFailure).not.toHaveBeenCalled();
+  });
+
+  it("calls the underlying exporter once the credential is available", async () => {
+    const { exporter, exportSpy } = spyExporter();
+    const tokenSource = fakeTokenSource([{ Authorization: "Bearer good-token" }]);
+    const wrapped = withFailureLogging(exporter, "traces", silentLogger(), { tokenSource });
+
+    const result = await new Promise((resolve) => wrapped.export([] as never, resolve));
+
+    expect(exportSpy).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ code: ExportResultCode.SUCCESS });
+  });
+
+  it("still logs and reports a real export failure normally once past the gate", async () => {
+    const logger = silentLogger();
+    const exporter = fakeExporter([
+      { code: ExportResultCode.FAILED, error: new Error("401 rejected") }
+    ]);
+    const tokenSource = fakeTokenSource([{ Authorization: "Bearer stale-token" }]);
+    const wrapped = withFailureLogging(exporter, "traces", logger, { tokenSource });
+
+    await exportOnce(wrapped);
+
+    expect(logger.events).toEqual([
+      [
+        "warn:otel_export_failed",
+        { signal: "traces", consecutiveFailures: 1, error: "401 rejected", status: undefined }
+      ]
+    ]);
+  });
+
+  it("resumes exporting on the next attempt once a later credential becomes available", async () => {
+    const { exporter, exportSpy } = spyExporter();
+    // First attempt: logged out. Second attempt: a login happened in between —
+    // no restart, no re-registration, just the next scheduled export.
+    const tokenSource = fakeTokenSource([undefined, { Authorization: "Bearer fresh-token" }]);
+    const wrapped = withFailureLogging(exporter, "traces", silentLogger(), { tokenSource });
+
+    const first = await new Promise((resolve) => wrapped.export([] as never, resolve));
+    expect(exportSpy).not.toHaveBeenCalled();
+    expect(first).toMatchObject({ code: ExportResultCode.FAILED });
+
+    const second = await new Promise((resolve) => wrapped.export([] as never, resolve));
+    expect(exportSpy).toHaveBeenCalledTimes(1);
+    expect(second).toEqual({ code: ExportResultCode.SUCCESS });
+  });
+
+  it("does not gate an exporter with no tokenSource — the standalone unauthenticated case", async () => {
+    // Regression guard: `@vymalo/opencode-otel` with no `tokenCommand` must
+    // keep exporting to an unauthenticated collector exactly as before.
+    const { exporter, exportSpy } = spyExporter();
+    const wrapped = withFailureLogging(exporter, "traces", silentLogger());
+
+    await exportOnce(wrapped);
+    await exportOnce(wrapped);
+
+    expect(exportSpy).toHaveBeenCalledTimes(2);
   });
 });

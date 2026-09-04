@@ -39,3 +39,4 @@ Each record is `NNNN-kebab-title.md`, numbered in order, and follows a light
 | [0012](0012-single-auth-across-gateway-and-otel.md) | One credential across gateway + OTEL: `@vymalo/opencode-lightbridge` umbrella over one `TokenRuntime` (login via authz `/authorize`; MCP out of scope) | Accepted |
 | [0013](0013-otel-no-terminal-mirror.md) | The otel plugin's own diagnostics never reach the terminal — a plugin-scoped exception to ADR-0008's console-mirror rule | Superseded by [ADR-0014](0014-suite-wide-no-terminal-mirror.md) |
 | [0014](0014-suite-wide-no-terminal-mirror.md) | No plugin in the suite writes to the terminal (device-code login excepted) | Accepted |
+| [0015](0015-otel-fail-closed-credential-gate.md) | OTEL export fails closed on the credential, not just the header: `TokenSource.headers()` returning `undefined` skips the export before it reaches the network | Accepted |

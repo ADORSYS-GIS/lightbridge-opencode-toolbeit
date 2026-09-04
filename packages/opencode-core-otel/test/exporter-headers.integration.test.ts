@@ -4,6 +4,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 import { describe, expect, it } from "vitest";
 
+import { withFailureLogging } from "../src/export-logging.js";
 import { createTokenSource } from "../src/token-source.js";
 import { silentLogger } from "./helpers.js";
 
@@ -122,6 +123,98 @@ describe("OTLPTraceExporter async headers factory, against a real HTTP server", 
     try {
       await exportOneSpan(provider);
       expect(recording.authorizations).toEqual(["Bearer helper-issued-token"]);
+    } finally {
+      await provider.shutdown();
+      await stopRecordingServer(recording.server);
+    }
+  });
+});
+
+/**
+ * The fail-closed gate (ADR-0015) lives in `withFailureLogging`, one level above
+ * the exporter these tests use directly above — so these exercise the real
+ * production wiring (`withFailureLogging(new OTLPTraceExporter(...), ...)`)
+ * against a real HTTP server to prove no request reaches the wire at all when
+ * the credential is unavailable, not merely that the header is missing.
+ */
+describe("withFailureLogging's credential gate, against a real HTTP server", () => {
+  it("sends zero requests when the token source cannot produce a credential", async () => {
+    const recording = await startRecordingServer();
+    const tokenSource = createTokenSource({
+      command: ["fake-helper"],
+      logger: silentLogger(),
+      run: async () => ({ stdout: "", stderr: "no session", code: 1 })
+    });
+    const exporter = withFailureLogging(
+      new OTLPTraceExporter({
+        url: `${recording.url}/v1/traces`,
+        // Real exporters need `Record<string, string>`; by the time this runs
+        // the gate has already confirmed a credential exists, so `?? {}` only
+        // ever matters for the type checker, not at runtime.
+        headers: async () => (await tokenSource.headers()) ?? {}
+      }),
+      "traces",
+      silentLogger(),
+      { tokenSource }
+    );
+    const provider = new TracerProvider({
+      spanProcessors: [new SimpleSpanProcessor({ exporter })]
+    });
+
+    try {
+      // `SimpleSpanProcessor.forceFlush()` rejects on a non-SUCCESS export
+      // result — exactly as it would for a genuine network failure, since our
+      // skip reports `ExportResultCode.FAILED` too (see ADR-0015's
+      // Consequences). Production code never observes this: `createProviders`'s
+      // public `forceFlush()` wraps every signal in `Promise.allSettled` (see
+      // `providers.ts`), so this rejection never escapes there. Here we only
+      // care about what reached the wire, so swallow it.
+      await exportOneSpan(provider).catch(() => {});
+      // Give a wrongly-not-skipped request time to land before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(recording.authorizations).toEqual([]);
+    } finally {
+      await provider.shutdown();
+      await stopRecordingServer(recording.server);
+    }
+  });
+
+  it("sends exactly one authenticated request once the token source recovers", async () => {
+    const recording = await startRecordingServer();
+    let fail = true;
+    const tokenSource = createTokenSource({
+      command: ["fake-helper"],
+      logger: silentLogger(),
+      run: async () =>
+        fail
+          ? { stdout: "", stderr: "no session", code: 1 }
+          : { stdout: "recovered-token", stderr: "", code: 0 }
+    });
+    const exporter = withFailureLogging(
+      new OTLPTraceExporter({
+        url: `${recording.url}/v1/traces`,
+        // Real exporters need `Record<string, string>`; by the time this runs
+        // the gate has already confirmed a credential exists, so `?? {}` only
+        // ever matters for the type checker, not at runtime.
+        headers: async () => (await tokenSource.headers()) ?? {}
+      }),
+      "traces",
+      silentLogger(),
+      { tokenSource }
+    );
+    const provider = new TracerProvider({
+      spanProcessors: [new SimpleSpanProcessor({ exporter })]
+    });
+
+    try {
+      // See the previous test for why this rejection is expected and harmless.
+      await exportOneSpan(provider).catch(() => {});
+      expect(recording.authorizations).toEqual([]);
+
+      // The user logs in / the helper starts succeeding — no restart involved.
+      fail = false;
+      await exportOneSpan(provider);
+      expect(recording.authorizations).toEqual(["Bearer recovered-token"]);
     } finally {
       await provider.shutdown();
       await stopRecordingServer(recording.server);
