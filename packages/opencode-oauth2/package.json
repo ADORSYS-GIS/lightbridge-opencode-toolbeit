@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-oauth2",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "OpenCode plugin for OAuth2/OIDC-secured, OpenAI-compatible model providers with periodic model sync.",
   "license": "MIT",
   "author": "vymalo contributors",

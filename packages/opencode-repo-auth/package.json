@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-repo-auth",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "OpenCode plugin that gives local-dev requests repo-as-project attribution: a developer logs in once as themselves and every gateway request from an enrolled repo carries a project-scoped bearer.",
   "license": "MIT",
   "author": "vymalo contributors",

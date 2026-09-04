@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-lightbridge",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "Umbrella OpenCode plugin for ADR-0012: one shared credential (TokenRuntime) drives both the LLM gateway bearer and OTEL export, so a developer authenticates once and every egress rides the same project-scoped token.",
   "license": "MIT",
   "author": "vymalo contributors",

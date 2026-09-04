@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-auth-core",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "Shared OAuth2/OIDC auth core (token flows, cache, logging, security primitives) for the @vymalo OpenCode plugin suite.",
   "license": "MIT",
   "author": "vymalo contributors",
