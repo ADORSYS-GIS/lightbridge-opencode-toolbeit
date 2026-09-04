@@ -6,11 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
-## [Unreleased]
+## [0.17.0] — 2026-09-04
 
-A single-purpose release: the ADR-0013 no-terminal-mirror fix that shipped for `opencode-otel` alone
-in 0.16.1 now covers every plugin in the suite. No plugin writes its own diagnostics to the terminal
-any more, with one deliberate exception: the device-code login prompt.
+The release that makes `@vymalo/opencode-lightbridge` the all-in-one plugin, with `oauth2` and
+`otel` remaining as the decoupled standalone versions. Four changes, in the order they landed:
+
+1. **No plugin writes to the terminal any more** (ADR-0014). The ADR-0013 fix that covered
+   `opencode-otel` alone now covers all nine, with one deliberate exception — the device-code login
+   prompt, which is UX rather than diagnostics.
+2. **OTel fails closed on the credential, not just the header** (ADR-0015). A logged-out session
+   used to fire a real, unauthenticated OTLP request on every batch flush; now no network call is
+   made at all while the credential is unusable.
+3. **The model-sync engine is a shared package** (ADR-0016), `@vymalo/opencode-provider-sync`,
+   extracted from `opencode-oauth2` with no behaviour change — **new on npm with this release**.
+4. **lightbridge registers providers, discovers models, and shares one login with oauth2**
+   (ADR-0017), and its RFC 8693 token exchange becomes opt-in. See the BREAKING note below.
+
+⚠️ **Breaking**, and the reason to read before upgrading: `gateway.exchange` now defaults to
+`false`, so a lightbridge gateway receives the IdP token directly instead of an exchanged
+project-scoped one — set `exchange: true` to keep the old behaviour. The token cache also moves to
+oauth2's location; an existing cache is migrated in place on first use, so no re-login is expected.
 
 ### Added
 

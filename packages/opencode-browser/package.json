@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-browser",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "OpenCode plugin that gives the model hands in a real browser: it registers browser_* tools (open, click, type, scroll, screenshot, snapshot, \u2026) and hosts a localhost WebSocket bridge that a companion Chromium/Firefox extension connects to. Tabs are organized into named groups so each task stays isolated and inspectable.",
   "license": "MIT",
   "author": "vymalo contributors",

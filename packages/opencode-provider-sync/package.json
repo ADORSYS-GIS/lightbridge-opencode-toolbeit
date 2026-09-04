@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-provider-sync",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "description": "Shared provider-registration + model-discovery engine (config parsing, cached sync, scheduler) for the @vymalo OpenCode plugin suite.",
   "license": "MIT",
   "author": "vymalo contributors",
