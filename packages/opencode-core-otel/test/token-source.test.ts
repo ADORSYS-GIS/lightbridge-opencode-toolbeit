@@ -112,7 +112,7 @@ describe("createTokenSource", () => {
     const { run } = runner([{ code: 1, stderr: "no session" }]);
     const source = createTokenSource({ command: ["helper"], logger, run });
 
-    expect(await source.headers()).toEqual({});
+    expect(await source.headers()).toBeUndefined();
     const failure = logger.events.find(([name]) => name === "warn:otel_token_command_failed");
     expect(failure?.[1]).toMatchObject({ command: "helper", exitCode: 1, emptyStdout: true });
   });
@@ -120,7 +120,7 @@ describe("createTokenSource", () => {
   it("treats empty stdout as a failure even on exit 0", async () => {
     const { run } = runner([{ stdout: "   \n", code: 0 }]);
     const source = createTokenSource({ command: ["helper"], logger: silentLogger(), run });
-    expect(await source.headers()).toEqual({});
+    expect(await source.headers()).toBeUndefined();
   });
 
   it("never logs the token or the helper's stderr contents", async () => {
@@ -148,7 +148,7 @@ describe("createTokenSource", () => {
     expect(await source.headers()).toEqual({ Authorization: "Bearer good-token" });
     source.invalidate();
     // The refresh fails, and there is no cached token left to fall back to.
-    expect(await source.headers()).toEqual({});
+    expect(await source.headers()).toBeUndefined();
   });
 
   it("fails closed once the cached token has aged out and refresh cannot replace it", async () => {
@@ -165,7 +165,7 @@ describe("createTokenSource", () => {
 
     await source.headers();
     now += 11_000;
-    expect(await source.headers()).toEqual({});
+    expect(await source.headers()).toBeUndefined();
     expect(logger.events.some(([name]) => name === "warn:otel_token_expired")).toBe(true);
   });
 
@@ -176,7 +176,7 @@ describe("createTokenSource", () => {
     };
     const source = createTokenSource({ command: ["missing-binary"], logger, run });
 
-    await expect(source.headers()).resolves.toEqual({});
+    await expect(source.headers()).resolves.toBeUndefined();
     expect(
       logger.events.some(
         ([name, fields]) =>
@@ -200,7 +200,7 @@ describe("createTokenSource", () => {
       command: [process.execPath, "-e", "process.stderr.write('nope'); process.exit(3)"],
       logger
     });
-    expect(await source.headers()).toEqual({});
+    expect(await source.headers()).toBeUndefined();
     expect(logger.events.some(([name]) => name === "warn:otel_token_command_failed")).toBe(true);
   });
 

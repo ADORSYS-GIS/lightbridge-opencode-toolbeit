@@ -83,6 +83,11 @@ function otlpArgs(config: ResolvedOtelConfig, signal: SignalName, tokenSource?: 
   }
   return {
     url,
+    // By the time this runs, `withFailureLogging`'s credential gate has already
+    // resolved `tokenSource.headers()` once for this export and only proceeded
+    // because it got a value back — so this call is normally an instant cache
+    // hit, not a second real resolution attempt. Spreading `undefined` (the
+    // rare race where the token expires in between) is a no-op, not an error.
     headers: async () => ({ ...config.headers, ...(await tokenSource.headers()) })
   };
 }
@@ -207,6 +212,27 @@ export function buildResource(
  * Construct the enabled providers. Each signal is independent: a failure to
  * build one leaves the others running, because partial telemetry is strictly
  * better than an exception escaping into the host's plugin loader.
+ *
+ * **Three `tokenSource` cases, each with a different, deliberate outcome**
+ * (see ADR-0015):
+ *
+ * 1. **No token source at all** — no `injectedTokenSource` and no
+ *    `config.tokenCommand`. `tokenSource` stays `undefined`, `observe()`'s
+ *    `gate` argument stays `undefined`, and exports proceed exactly as they
+ *    always have. This is the standalone `@vymalo/opencode-otel` plugin
+ *    pointed at an unauthenticated collector — a legitimate configuration
+ *    that must not be gated.
+ * 2. **Token source configured, credential obtained** — `tokenSource.headers()`
+ *    resolves to a header map, `withFailureLogging`'s gate lets the export
+ *    through, and it carries the resolved `Authorization` header as before.
+ * 3. **Token source configured, credential unavailable** — `headers()`
+ *    resolves to `undefined` (expired/failed helper, rejected exchange,
+ *    logged-out user). The gate skips the export before it reaches the
+ *    network, logs at `debug`, and leaves the batch processor's own interval
+ *    as the only retry — no extra spinning. Because the check is lazy (run on
+ *    every export attempt, not once at startup), a credential that becomes
+ *    available later — e.g. the user logs in mid-session — resumes exporting
+ *    on the very next flush with no restart needed.
  */
 export function createProviders(
   config: ResolvedOtelConfig,
@@ -241,8 +267,16 @@ export function createProviders(
   // something the collector has already refused.
   const onFailure = tokenSource ? () => tokenSource.invalidate() : undefined;
 
-  const observe = <T extends ExporterLike>(exporter: T, signal: SignalName): T =>
-    withFailureLogging(exporter, signal, logger, { onFailure });
+  // The credential gate only makes sense for a `console` exporter's sibling
+  // OTLP path — a `console` exporter never leaves the process, so gating it on
+  // `tokenSource` would silently blank local debug output whenever auth is
+  // unusable, for no security benefit. Pass `tokenSource` through only for the
+  // kinds that actually hit the network.
+  const observe = <T extends ExporterLike>(
+    exporter: T,
+    signal: SignalName,
+    gate: TokenSource | undefined
+  ): T => withFailureLogging(exporter, signal, logger, { onFailure, tokenSource: gate });
 
   let tracer: Tracer | undefined;
   let meter: Meter | undefined;
@@ -252,7 +286,8 @@ export function createProviders(
     try {
       const built = make.trace(config, tokenSource);
       if (built) {
-        const exporter = observe(built, "traces");
+        const gate = config.exporters.traces === "console" ? undefined : tokenSource;
+        const exporter = observe(built, "traces", gate);
         const provider = new TracerProvider({
           resource,
           spanProcessors: [
@@ -275,7 +310,8 @@ export function createProviders(
     try {
       const built = make.metric(config, tokenSource);
       if (built) {
-        const exporter = observe(built, "metrics");
+        const gate = config.exporters.metrics === "console" ? undefined : tokenSource;
+        const exporter = observe(built, "metrics", gate);
         const provider = new MeterProvider({
           resource,
           readers: [
@@ -298,7 +334,8 @@ export function createProviders(
     try {
       const built = make.log(config, tokenSource);
       if (built) {
-        const exporter = observe(built, "logs");
+        const gate = config.exporters.logs === "console" ? undefined : tokenSource;
+        const exporter = observe(built, "logs", gate);
         const provider = new LoggerProvider({
           resource,
           processors: [

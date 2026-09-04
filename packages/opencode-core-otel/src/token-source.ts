@@ -39,10 +39,23 @@ export interface TokenSourceOptions {
 
 export interface TokenSource {
   /**
-   * A `HeadersFactory` for the OTLP exporters — called before every export.
-   * Never throws: the exporters explicitly require that.
+   * Resolve the auth header(s) for the next export attempt. Never throws: the
+   * exporters explicitly require that, and so does the fail-closed gate in
+   * `withFailureLogging` that calls this *before* delegating to the real
+   * exporter (see `export-logging.ts`).
+   *
+   * The return value distinguishes two cases that a bare `{}` cannot:
+   *
+   * - `undefined` — **no credential is available right now** (helper failed,
+   *   cached token aged out, exchange rejected). The caller must not perform
+   *   the export at all; sending it anyway just trades a silent drop for a
+   *   401/403 the collector logs. This is the "fail closed" signal.
+   * - `Record<string, string>` (possibly `{}`) — a credential *was* resolved
+   *   (or none was ever required) and the export may proceed. An empty object
+   *   here means "no extra headers to add," which is a legitimate answer, not
+   *   a failure — this is exactly the ambiguity `undefined` exists to remove.
    */
-  headers(): Promise<Record<string, string>>;
+  headers(): Promise<Record<string, string> | undefined>;
   /** Drop the cached token so the next call re-runs the helper. */
   invalidate(): void;
 }
@@ -101,9 +114,11 @@ export function readJwtExpiry(token: string): number | undefined {
  * Failure behaviour is deliberately asymmetric. A helper that fails while the
  * cached token is *still valid* changes nothing — the cached token is current,
  * not stale, and dropping it would lose data for no reason. A helper that fails
- * with no valid token left emits **no auth header at all**, so the export fails
- * closed at the collector rather than being retried forever with a dead
- * credential. Either way the failure is logged; the token never is.
+ * with no valid token left resolves `headers()` to `undefined`, which tells the
+ * caller (the export gate in `export-logging.ts`) to skip the export entirely —
+ * fail closed *before* the network call, not by sending it unauthenticated and
+ * letting the collector reject it. Either way the failure is logged; the token
+ * never is.
  */
 export function createTokenSource(options: TokenSourceOptions): TokenSource {
   const {
@@ -172,14 +187,15 @@ export function createTokenSource(options: TokenSourceOptions): TokenSource {
       }
 
       if (!token) {
-        return {};
+        return undefined;
       }
       if (now() >= validUntil) {
         // Refresh failed and what we hold has aged out. Fail closed rather than
-        // present a credential the collector will reject anyway.
+        // present a credential the collector will reject anyway — the caller
+        // must skip the export, not send it headerless.
         logger.warn("otel_token_expired", { command: executable });
         token = undefined;
-        return {};
+        return undefined;
       }
       return { [header]: `${prefix}${token}` };
     },

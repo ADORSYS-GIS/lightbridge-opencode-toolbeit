@@ -25,6 +25,7 @@ import {
   type DeferredAttribute,
   type EnvSource,
   type ExporterFactories,
+  type OtelPluginOptions,
   type PropagationConfigInput,
   type ResolvedOtelConfig,
   type TelemetryProviders,
@@ -163,17 +164,24 @@ function registerExitHandlers(
  * async factory over the SHARED runtime, superseding otel's standalone
  * `tokenCommand` path entirely (ADR-0012 — one credential, not two seams).
  * Never throws — the OTLP exporters require that of every `headers()` call —
- * so an exchange failure degrades to an unauthenticated export, which the
- * collector then rejects (fail closed, same posture as the gateway header).
+ * so an exchange failure resolves `headers()` to `undefined` rather than `{}`.
+ * That distinction is load-bearing (ADR-0015): `{}` would still let the export
+ * fire with no `Authorization` header, which the collector then rejects at the
+ * network — the exact bug this fixes. `undefined` tells the shared gate in
+ * `@vymalo/opencode-core-otel` (`withFailureLogging`) to skip the export
+ * before any request goes out, so a logged-out session goes quiet instead of
+ * hammering the collector with 401s. Because `headers()` is called fresh on
+ * every export attempt, a later successful login resumes exporting on the
+ * next flush with nothing to restart.
  */
 function createRuntimeTokenSource(runtime: LightbridgeRuntimeLike): TokenSource {
   return {
-    headers: async (): Promise<Record<string, string>> => {
+    headers: async (): Promise<Record<string, string> | undefined> => {
       try {
         const token = await runtime.getProjectToken({ interactive: false });
         return { Authorization: `${token.tokenType || "Bearer"} ${token.accessToken}` };
       } catch {
-        return {};
+        return undefined;
       }
     },
     // v1: no-op. The project token is short-lived and `getProjectToken`
@@ -213,6 +221,38 @@ function createGatewayChatHeaders(
 interface OtelModule {
   config: ResolvedOtelConfig;
   recorder: TelemetryRecorder;
+}
+
+/**
+ * `otel.tokenCommand`/`tokenHeader`/`tokenPrefix` are accepted by
+ * `parseLightbridgeOptions` (they are just `OtelPluginOptions` fields) but
+ * never take effect here: `buildOtelModule` always injects the shared
+ * runtime-backed `TokenSource` whenever a runtime exists, and that injected
+ * source unconditionally wins over `config.tokenCommand` in
+ * `createProviders` (see `providers.ts`). Silently accepting and ignoring a
+ * credential-helper config is exactly the kind of no-op ADR-0015 calls out, so
+ * this logs once at `debug` rather than staying quiet — `debug` because it's
+ * an informational no-op, not a warning-worthy misconfiguration, and no
+ * plugin in this suite prints to the terminal by default anyway (ADR-0014).
+ */
+function warnIfTokenCommandConfigIgnored(
+  otel: OtelPluginOptions,
+  env: EnvSource,
+  logger: Logger
+): void {
+  const explicit =
+    otel.tokenCommand !== undefined ||
+    otel.tokenHeader !== undefined ||
+    otel.tokenPrefix !== undefined ||
+    Boolean(env.OPENCODE_OTEL_TOKEN_COMMAND) ||
+    Boolean(env.OPENCODE_OTEL_TOKEN_HEADER) ||
+    Boolean(env.OPENCODE_OTEL_TOKEN_PREFIX);
+  if (explicit) {
+    logger.debug("lightbridge_otel_token_command_ignored", {
+      reason:
+        "otel.tokenCommand/tokenHeader/tokenPrefix are ignored — the shared lightbridge auth token always supersedes them"
+    });
+  }
 }
 
 /**
@@ -390,6 +430,7 @@ export function createLightbridgePlugin(
     if (parsed.otel) {
       const otelConfig = resolveOtelConfig(parsed.otel, factoryOptions.env ?? process.env);
       if (otelConfig.active) {
+        warnIfTokenCommandConfigIgnored(parsed.otel, factoryOptions.env ?? process.env, logger);
         otel = await buildOtelModule(input, otelConfig, logger, factoryOptions, sharedRuntime);
         registerOtelHooks(hooks, otel);
       } else {
