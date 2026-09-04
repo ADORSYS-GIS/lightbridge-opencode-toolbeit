@@ -14,6 +14,12 @@ install; come here when you need depth on a specific topic.
 | [kubernetes.md](kubernetes.md) | `CronJob` / `Job` / `Deployment` with projected SA tokens, multi-provider pods, RBAC |
 | [local-development.md](local-development.md) | Sandbox setup, re-export trick, forcing re-auth, dev-only subject token |
 
+### `@vymalo/opencode-provider-sync` — shared provider-registration + model-sync engine
+| Page | When you need it |
+| --- | --- |
+| [provider-sync.md](provider-sync.md) | What the engine provides, what it deliberately doesn't own (config-key literals, auth-subset validation, the Responses-API repair hook), cross-process token safety, usage |
+| [adr/0016-provider-sync-extraction.md](adr/0016-provider-sync-extraction.md) | Why it was extracted from `opencode-oauth2` and what stays behind |
+
 ### `@vymalo/opencode-models-info` — metadata enrichment
 | Page | When you need it |
 | --- | --- |

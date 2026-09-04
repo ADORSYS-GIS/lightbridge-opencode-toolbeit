@@ -24,6 +24,7 @@
   <a href="https://www.npmjs.com/package/@vymalo/opencode-lightbridge"><img alt="@vymalo/opencode-lightbridge" src="https://img.shields.io/npm/v/@vymalo/opencode-lightbridge?label=lightbridge&color=CB3837&logo=npm"></a>
   <a href="https://www.npmjs.com/package/@vymalo/opencode-auth-core"><img alt="@vymalo/opencode-auth-core" src="https://img.shields.io/npm/v/@vymalo/opencode-auth-core?label=auth-core&color=CB3837&logo=npm"></a>
   <a href="https://www.npmjs.com/package/@vymalo/opencode-core-otel"><img alt="@vymalo/opencode-core-otel" src="https://img.shields.io/npm/v/@vymalo/opencode-core-otel?label=core-otel&color=CB3837&logo=npm"></a>
+  <a href="https://www.npmjs.com/package/@vymalo/opencode-provider-sync"><img alt="@vymalo/opencode-provider-sync" src="https://img.shields.io/npm/v/@vymalo/opencode-provider-sync?label=provider-sync&color=CB3837&logo=npm"></a>
 </p>
 
 ---
@@ -309,7 +310,7 @@ Full index: [`docs/README.md`](docs/README.md). The highlights:
 
 ## 🗂️ Workspace layout
 
-This is a [pnpm](https://pnpm.io) monorepo. Twelve packages publish to npm under `@vymalo`; four are private.
+This is a [pnpm](https://pnpm.io) monorepo. Thirteen packages publish to npm under `@vymalo`; four are private.
 
 | Package | Published as | |
 | --- | --- | --- |
@@ -325,6 +326,7 @@ This is a [pnpm](https://pnpm.io) monorepo. Twelve packages publish to npm under
 | [`packages/opencode-lightbridge`](packages/opencode-lightbridge) | `@vymalo/opencode-lightbridge` | Umbrella — one credential across the gateway + OTEL |
 | [`packages/opencode-auth-core`](packages/opencode-auth-core) | `@vymalo/opencode-auth-core` | Shared OAuth2/OIDC token core (oauth2, repo-auth, lightbridge) |
 | [`packages/opencode-core-otel`](packages/opencode-core-otel) | `@vymalo/opencode-core-otel` | Shared OpenTelemetry engine (otel, lightbridge) |
+| [`packages/opencode-provider-sync`](packages/opencode-provider-sync) | `@vymalo/opencode-provider-sync` | Shared provider-registration + model-sync engine (oauth2 today; lightbridge next) |
 | [`apps/browser-extension`](apps/browser-extension) | _private_ | Companion Chromium/Firefox extension |
 | [`packages/opencode-code-index`](packages/opencode-code-index) | _private_ | Experimental DuckDB + tree-sitter code index |
 | [`packages/plugin-bundle`](packages/plugin-bundle) | _private_ | Rolldown single-file distribution of oauth2 |
@@ -363,7 +365,7 @@ For end-to-end usage against a local OpenCode install, see [GETTING_STARTED.md](
 
 ## 🌟 Status
 
-Early but functional, and used in anger. All twelve packages are published and on the same version line; the browser extension ships alongside as a Release asset and on the Chrome Web Store / Firefox AMO. Public API may still shift before `1.0` — roadmap in [`plans/prd.md`](plans/prd.md).
+Early but functional, and used in anger. All thirteen packages are published and on the same version line; the browser extension ships alongside as a Release asset and on the Chrome Web Store / Firefox AMO. Public API may still shift before `1.0` — roadmap in [`plans/prd.md`](plans/prd.md).
 
 ## 🤝 Contributing
 

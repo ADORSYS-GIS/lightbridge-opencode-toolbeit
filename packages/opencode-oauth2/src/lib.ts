@@ -16,9 +16,16 @@ export {
   type TokenSet
 } from "@vymalo/opencode-auth-core/lib";
 
-export { buildModelsUrl, fetchModels } from "./model-discovery.js";
+export {
+  buildModelsUrl,
+  fetchModels
+} from "@vymalo/opencode-provider-sync/lib";
 
-export { diffModels, normalizeModelId, normalizeModelList } from "./model-normalization.js";
+export {
+  diffModels,
+  normalizeModelId,
+  normalizeModelList
+} from "@vymalo/opencode-provider-sync/lib";
 
 export { OAuth2ModelSyncPlugin, type PluginOptions } from "./plugin.js";
 
@@ -33,4 +40,4 @@ export type {
   NormalizedModel,
   RawModel,
   ServerSnapshot
-} from "./types.js";
+} from "@vymalo/opencode-provider-sync/lib";

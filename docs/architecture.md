@@ -14,6 +14,15 @@ If you just want to copy YAML, jump to the [GitHub Actions](./github-actions.md)
 > [its section below](#vymaloopencode-otel--the-only-observer), since it is
 > the one plugin in the suite whose hook surface rivals oauth2's in breadth.
 
+> **[ADR-0016](adr/0016-provider-sync-extraction.md) (2026-09-04):** the model-sync engine this
+> page describes — `OAuth2ModelSyncPlugin`, its cache, model discovery/normalization, and the
+> sync scheduler — now lives in `@vymalo/opencode-provider-sync` (`ProviderModelSyncEngine`
+> underneath; `opencode-oauth2`'s `OAuth2ModelSyncPlugin` is a thin subclass), extracted so
+> `@vymalo/opencode-lightbridge` can compose it in a follow-up PR instead of forking it. This is a
+> pure code-motion with **no behaviour change** — everything below still describes oauth2's actual
+> runtime behavior accurately; only the file paths cited for `cache.ts` and `scheduler.ts` moved.
+> See [`docs/provider-sync.md`](provider-sync.md) for the extracted package itself.
+
 ## The two hooks
 
 The plugin registers exactly two OpenCode hooks: `config` (plugin load) and `chat.headers` (per request).
@@ -158,7 +167,7 @@ Override when you know better:
 
 ## Cache layout
 
-Source: [`src/cache.ts`](../packages/opencode-oauth2/src/cache.ts).
+Source: [`src/cache.ts`](../packages/opencode-provider-sync/src/cache.ts) (the `FileCacheStore` implementation and `resolveCacheDir`, `@vymalo/opencode-provider-sync` since ADR-0016) — oauth2's own [`src/cache.ts`](../packages/opencode-oauth2/src/cache.ts) is now a thin wrapper binding the `"opencode-oauth2"` on-disk segment shown in the table below.
 
 ### Directory
 
@@ -223,7 +232,7 @@ After deletion, the next `chat.headers` call (or warmup) triggers a fresh acquir
 
 ## Sync scheduler
 
-Source: [`src/scheduler.ts`](../packages/opencode-oauth2/src/scheduler.ts), driven from `OAuth2ModelSyncPlugin.start`.
+Source: [`src/scheduler.ts`](../packages/opencode-provider-sync/src/scheduler.ts) (moved to `@vymalo/opencode-provider-sync` unchanged, ADR-0016), driven from `ProviderModelSyncEngine.start` (`OAuth2ModelSyncPlugin`'s superclass — oauth2's own class is now a thin subclass over it).
 
 - One scheduler per server. Interval is `server.syncIntervalMinutes * 60_000` ms; default 60 minutes.
 - Each tick calls `syncServer(serverId)` — same path warmup uses, but with no `interactive` override (so it inherits the default behavior of `ensureToken`).

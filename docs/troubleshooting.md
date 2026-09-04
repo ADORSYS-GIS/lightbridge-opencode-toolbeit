@@ -168,7 +168,7 @@ Once both `context` and `output` are known, the plugin emits a real `limit`, and
 
 ## Model name shows the normalized id, not what the metadata endpoint returns
 
-**What's happening.** With `@vymalo/opencode-oauth2` + `@vymalo/opencode-models-info` stacked, the UI shows e.g. `Kimi K2.6` even though your `models/info` endpoint returns `"name": "kimi-k2.6"`. oauth2's model discovery stamps a **normalized** display name onto every model entry *before* models-info runs ([`mergeDiscoveredModels`](../packages/opencode-oauth2/src/opencode.ts) → [`normalizeModelId`](../packages/opencode-oauth2/src/model-normalization.ts)). models-info's merge is **upstream-wins**, so it sees `name` already set and won't overwrite it — the endpoint's name never lands.
+**What's happening.** With `@vymalo/opencode-oauth2` + `@vymalo/opencode-models-info` stacked, the UI shows e.g. `Kimi K2.6` even though your `models/info` endpoint returns `"name": "kimi-k2.6"`. oauth2's model discovery stamps a **normalized** display name onto every model entry *before* models-info runs ([`mergeDiscoveredModels`](../packages/opencode-provider-sync/src/opencode-helpers.ts) → [`normalizeModelId`](../packages/opencode-provider-sync/src/model-normalization.ts), both `@vymalo/opencode-provider-sync` since [ADR-0016](adr/0016-provider-sync-extraction.md)). models-info's merge is **upstream-wins**, so it sees `name` already set and won't overwrite it — the endpoint's name never lands.
 
 **Fix.** Opt `name` out of upstream-wins for that provider:
 

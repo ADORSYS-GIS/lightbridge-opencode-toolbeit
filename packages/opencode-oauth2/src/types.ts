@@ -1,36 +1,11 @@
-import type { TokenSet } from "@vymalo/opencode-auth-core/lib";
-
-export interface RawModel {
-  id: string;
-  [key: string]: unknown;
-}
-
-export interface NormalizedModel {
-  id: string;
-  displayName: string;
-}
-
-export interface ModelDiff {
-  added: string[];
-  removed: string[];
-  renamed: Array<{
-    id: string;
-    before: string;
-    after: string;
-  }>;
-}
-
-export interface CachedServerState {
-  serverId: string;
-  updatedAt: number;
-  lastSyncAt?: number;
-  models: NormalizedModel[];
-  rawModels: RawModel[];
-  token?: TokenSet;
-}
-
-export interface ServerSnapshot {
-  serverId: string;
-  models: NormalizedModel[];
-  lastSyncAt?: number;
-}
+// oauth2's model-sync state types now live in the shared
+// `@vymalo/opencode-provider-sync` engine (ADR-0016). Re-exported here
+// unchanged so `../src/types.js` keeps resolving for anything that imported
+// it directly (in-repo tests included) — no behaviour or shape change.
+export type {
+  CachedServerState,
+  ModelDiff,
+  NormalizedModel,
+  RawModel,
+  ServerSnapshot
+} from "@vymalo/opencode-provider-sync/lib";
