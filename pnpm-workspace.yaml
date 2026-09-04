@@ -62,8 +62,18 @@ minimumReleaseAgeExclude:
 # nanoid: non-integer input silently produces predictable ids
 # (GHSA-28wg-ghj8-5hjv, fixed in 3.3.16) and a pool-reuse collision
 # (GHSA-2v37-7h3g-55p8, fixed in 3.3.18).
+#
+# toml (via `@opencode-ai/plugin` → `effect`, 11 paths): TWO advisories with
+# DIFFERENT floors — prototype pollution (GHSA-v5mp-jgw5-2x6j, fixed in 4.1.2)
+# and uncontrolled recursion (GHSA-82x6-q7mm-w9cf, fixed in 4.2.0). The floor is
+# the HIGHER of the two: `^4.1.2` would clear the first, still resolve below the
+# second, and fail this same gate on the next release — exactly how `fast-uri`'s
+# `^3.1.4` pin failed above. Hence `^4.2.0`. Unlike fast-uri's ajv path, this one
+# cannot be dropped: `@opencode-ai/plugin` is the plugin API every package here
+# is built on, so a future recurrence has to be chased, not designed away.
 overrides:
   fast-uri: ^3.1.6
+  toml: ^4.2.0
   ip-address: ^10.3.1
   postcss@<8.5.18: ^8.5.18
   nanoid@<3.3.18: ^3.3.18
