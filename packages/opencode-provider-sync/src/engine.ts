@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   createJsonConsoleLogger,
   DEFAULT_HTTP_TIMEOUT_MS,
@@ -71,6 +73,8 @@ interface ServerRuntime {
   state: CachedServerState;
   scheduler?: SchedulerHandle;
   tokenRuntime?: TokenRuntime;
+  /** Whether THIS engine instance holds the scheduler-ownership claim for this server id. */
+  ownsScheduler?: boolean;
 }
 
 interface StartOptions {
@@ -108,6 +112,54 @@ export interface ProviderModelSyncEngineOptions {
 const DEFAULT_CACHE_NAMESPACE = "provider-sync";
 const DEFAULT_CACHE_SEGMENT = "opencode-provider-sync";
 const DEFAULT_SERVICE_LABEL = "opencode-provider-sync";
+
+/**
+ * Process-wide scheduler-ownership registry, keyed by `<cacheDir>::<serverId>`.
+ *
+ * Two `ProviderModelSyncEngine` instances in ONE process can legitimately
+ * target the same on-disk cache file — that's the whole point of the shared
+ * segment/namespace convention (`@vymalo/opencode-lightbridge`'s register
+ * module deliberately points at oauth2's cache location so one login serves
+ * both plugins). But if BOTH instances also start a scheduler for that same
+ * server id, they independently poll the same model-discovery endpoint and
+ * write the same cache file on staggered ticks — wasted network traffic and
+ * log noise, a failure mode the existing cross-process reconciliation logic
+ * (`readCachedToken`) was never designed for (that logic assumes the *other*
+ * writer is a different OS process, not a sibling engine instance sharing this
+ * process's event loop).
+ *
+ * `start()` claims ownership of each server id it is about to schedule;
+ * `stop()` releases whatever this instance holds. A losing instance simply
+ * skips its own warmup sync + scheduler for that id (never throws) — it still
+ * serves cached reads and on-demand `ensureAccessToken`/`syncServer` calls,
+ * which are already safe to run concurrently (file-lock-coordinated refresh,
+ * idempotent GETs), so its owner is not left without a token. Keyed by
+ * `cacheDir` (not just `serverId`) so two engines in different cache
+ * directories for the *same* server id — a deliberately non-shared
+ * setup — never contend.
+ */
+const schedulerOwnersByKey = new Map<string, string>();
+
+function schedulerOwnershipKey(cacheDir: string, serverId: string): string {
+  return `${cacheDir}::${serverId}`;
+}
+
+function claimSchedulerOwnership(cacheDir: string, serverId: string, ownerId: string): boolean {
+  const key = schedulerOwnershipKey(cacheDir, serverId);
+  const existing = schedulerOwnersByKey.get(key);
+  if (existing && existing !== ownerId) {
+    return false;
+  }
+  schedulerOwnersByKey.set(key, ownerId);
+  return true;
+}
+
+function releaseSchedulerOwnership(cacheDir: string, serverId: string, ownerId: string): void {
+  const key = schedulerOwnershipKey(cacheDir, serverId);
+  if (schedulerOwnersByKey.get(key) === ownerId) {
+    schedulerOwnersByKey.delete(key);
+  }
+}
 
 function resolveConfig(input: ProviderSyncEngineConfigInput): ResolvedEngineConfig {
   if (!input || !Array.isArray(input.servers) || input.servers.length === 0) {
@@ -158,6 +210,9 @@ export class ProviderModelSyncEngine {
   private readonly config: ResolvedEngineConfig;
   private readonly cacheStore: FileCacheStore;
   private readonly runtimeByServer = new Map<string, ServerRuntime>();
+  private readonly cacheDirPath: string;
+  /** Unique per-instance id for the scheduler-ownership registry (see above). */
+  private readonly instanceId = randomUUID();
   private initialized = false;
   private started = false;
 
@@ -167,14 +222,13 @@ export class ProviderModelSyncEngine {
   ) {
     this.config = resolveConfig(configInput);
     this.logger = options.logger ?? createJsonConsoleLogger(this.config.logLevel);
-    this.cacheStore = new FileCacheStore(
+    this.cacheDirPath =
       options.cacheDir ??
-        resolveCacheDir(
-          options.cacheNamespaceSegment ?? DEFAULT_CACHE_SEGMENT,
-          this.config.cacheNamespace
-        ),
-      this.logger
-    );
+      resolveCacheDir(
+        options.cacheNamespaceSegment ?? DEFAULT_CACHE_SEGMENT,
+        this.config.cacheNamespace
+      );
+    this.cacheStore = new FileCacheStore(this.cacheDirPath, this.logger);
   }
 
   /**
@@ -379,6 +433,24 @@ export class ProviderModelSyncEngine {
     });
 
     for (const server of this.config.servers) {
+      const claimed = claimSchedulerOwnership(this.cacheDirPath, server.id, this.instanceId);
+      if (!claimed) {
+        // Another engine instance in THIS process already owns warmup+polling
+        // for this exact cache file — see the scheduler-ownership registry
+        // doc above. Never throws: this instance still serves cached reads
+        // and on-demand ensureAccessToken/syncServer calls just fine.
+        this.logger.debug("sync_scheduler_ownership_skipped", {
+          serverId: server.id,
+          reason: "already_owned_by_another_engine_instance_in_process"
+        });
+        continue;
+      }
+
+      const runtime = this.runtimeByServer.get(server.id);
+      if (runtime) {
+        runtime.ownsScheduler = true;
+      }
+
       if (warmup) {
         try {
           await this.syncServer(server.id, { interactive: interactiveWarmup });
@@ -403,7 +475,6 @@ export class ProviderModelSyncEngine {
         }
       });
 
-      const runtime = this.runtimeByServer.get(server.id);
       if (runtime) {
         runtime.scheduler = handle;
       }
@@ -413,8 +484,12 @@ export class ProviderModelSyncEngine {
   }
 
   stop(): void {
-    for (const runtime of this.runtimeByServer.values()) {
+    for (const [serverId, runtime] of this.runtimeByServer.entries()) {
       runtime.scheduler?.stop();
+      if (runtime.ownsScheduler) {
+        releaseSchedulerOwnership(this.cacheDirPath, serverId, this.instanceId);
+        runtime.ownsScheduler = false;
+      }
     }
 
     this.started = false;

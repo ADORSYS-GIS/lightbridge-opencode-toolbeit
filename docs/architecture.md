@@ -216,6 +216,18 @@ Re-reading is all this plugin does. Coordinating the refresh itself — single-f
 
 Two `trace`/`debug` events make this visible in the log stream (never the token itself): `oauth2_token_adopted_from_cache` when a re-read yields a token different from memory, plus `oauth2_cache_reread_stale` / `oauth2_cache_reread_no_persisted_token` / `oauth2_cache_reread_failed` for the memory-wins branches.
 
+> **[ADR-0017](adr/0017-lightbridge-all-in-one.md) (2026-09-04):** `@vymalo/opencode-lightbridge`'s
+> human root token now lives in **this exact file** (`<serverId>.json`, keyed by `auth.id`) instead
+> of its own bespoke store — so a developer who configures the same IdP (matching `id`/`issuer`/
+> `clientId`) in both `opencode-oauth2` and lightbridge's `auth`/`register` blocks logs in **once**.
+> lightbridge participates as a read/refresh-only client of the same `FileCacheStore` (via
+> `LightbridgeRuntime`'s own lightweight `TokenRuntime`, not a second `ProviderModelSyncEngine`
+> instance for that purpose) unless its `register` block is configured, in which case it runs a real
+> `ProviderModelSyncEngine` of its own — guarded against colliding with an oauth2-managed id by the
+> scheduler-ownership registry described in [Sync scheduler](#sync-scheduler) below. See
+> [`docs/lightbridge.md`](lightbridge.md#register-provider-registration--model-discovery-adr-0017)
+> for the consumer-facing contract and the mandatory old-cache migration.
+
 ### Eviction
 
 The plugin never rotates the cache file itself — it overwrites in place. To force re-auth:
@@ -240,6 +252,17 @@ Source: [`src/scheduler.ts`](../packages/opencode-provider-sync/src/scheduler.ts
 - If a sync succeeds with a different model set, the cache is updated and OpenCode sees the new models on the next `config` re-run (or immediate if the difference is in display names — those propagate through the merge in `chat.headers`'s opportunistic trigger and the next request).
 
 You don't normally want to disable the scheduler (there's no setting for it). If the upstream catalog is static, the scheduler is cheap — a `/models` GET every hour.
+
+> **[ADR-0017](adr/0017-lightbridge-all-in-one.md):** since `@vymalo/opencode-lightbridge` can now
+> also run a `ProviderModelSyncEngine` of its own (its `register` block), TWO engine instances in
+> **one process** targeting the same cache directory + server id is a real (if narrow) possibility —
+> a failure mode the cross-process re-read logic above was never designed for (it assumes the other
+> writer is a different OS process). `ProviderModelSyncEngine.start()` now claims a process-wide,
+> in-memory ownership token keyed by `<cacheDir, serverId>` before running its warmup sync +
+> scheduler; a second instance that loses the claim skips both (logged once at `debug`,
+> `sync_scheduler_ownership_skipped`) and falls back to serving cached reads +
+> on-demand `ensureAccessToken`/`syncServer` calls, which were already safe to run concurrently.
+> `stop()` releases whatever this instance holds.
 
 ## Logging
 

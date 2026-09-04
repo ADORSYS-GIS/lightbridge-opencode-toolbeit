@@ -2,14 +2,16 @@
 
 Shared provider-registration + model-discovery engine for the @vymalo OpenCode
 plugin suite. Holds the OAuth-backed **model sync** machinery in **one place**
-so plugins like [`@vymalo/opencode-oauth2`](../opencode-oauth2) and the
-upcoming gateway module of `@vymalo/opencode-lightbridge` can share it instead
-of forking it.
+so plugins like [`@vymalo/opencode-oauth2`](../opencode-oauth2) and
+[`@vymalo/opencode-lightbridge`](../opencode-lightbridge)'s `register` module
+share it instead of forking it.
 
-> Extracted from `@vymalo/opencode-oauth2` (step 1 of 2 — lightbridge wiring is
-> a follow-up change), the same way `@vymalo/opencode-auth-core` and
-> `@vymalo/opencode-core-otel` were previously extracted from `oauth2` and
-> `otel` respectively.
+> Extracted from `@vymalo/opencode-oauth2` ([ADR-0016](../../docs/adr/0016-provider-sync-extraction.md)),
+> the same way `@vymalo/opencode-auth-core` and `@vymalo/opencode-core-otel`
+> were previously extracted from `oauth2` and `otel` respectively.
+> `@vymalo/opencode-lightbridge` composes it too, since
+> [ADR-0017](../../docs/adr/0017-lightbridge-all-in-one.md) — the second
+> consumer that motivated the scheduler-ownership guard below.
 
 ## What it provides
 
@@ -81,6 +83,18 @@ const managed = collectManagedProviders(config, logger, {
   createResponsesRepairFetch: myOwnRepairFetch // optional
 });
 ```
+
+## Scheduler ownership (ADR-0017)
+
+Since a second consumer can build its own `ProviderModelSyncEngine` instance in
+the SAME process against the SAME cache directory (e.g. lightbridge's
+`register` engine alongside oauth2's, for a shared server id), `start()`
+claims a process-wide, in-memory ownership slot per `<cacheDir, serverId>`
+before running warmup + starting the scheduler. An instance that loses the
+claim skips both for that server (logged once at `debug`,
+`sync_scheduler_ownership_skipped`; never throws) and still serves cached
+reads and on-demand `ensureAccessToken`/`syncServer` calls, which were already
+safe to run concurrently. `stop()` releases whatever the instance holds.
 
 ## Cross-process token safety
 

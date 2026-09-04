@@ -17,8 +17,9 @@ install; come here when you need depth on a specific topic.
 ### `@vymalo/opencode-provider-sync` — shared provider-registration + model-sync engine
 | Page | When you need it |
 | --- | --- |
-| [provider-sync.md](provider-sync.md) | What the engine provides, what it deliberately doesn't own (config-key literals, auth-subset validation, the Responses-API repair hook), cross-process token safety, usage |
+| [provider-sync.md](provider-sync.md) | What the engine provides, what it deliberately doesn't own (config-key literals, auth-subset validation, the Responses-API repair hook), cross-process token safety, the scheduler-ownership guard, usage, consumers (oauth2 + lightbridge's `register`) |
 | [adr/0016-provider-sync-extraction.md](adr/0016-provider-sync-extraction.md) | Why it was extracted from `opencode-oauth2` and what stays behind |
+| [adr/0017-lightbridge-all-in-one.md](adr/0017-lightbridge-all-in-one.md) | The second consumer (lightbridge's `register`) and the scheduler-ownership guard it motivated |
 
 ### `@vymalo/opencode-models-info` — metadata enrichment
 | Page | When you need it |
@@ -48,11 +49,12 @@ install; come here when you need depth on a specific topic.
 | [repo-auth.md](repo-auth.md) | Enrolling a repo, the RFC 8693 `project_id` exchange flow, the human-root cache, the model-b renewal policy, the auth-core gap |
 | [adr/0011-repo-auth-project-id-token-exchange.md](adr/0011-repo-auth-project-id-token-exchange.md) | Why a single exchange presenting `project_id` (no `audience`, no mint step) and the fail-closed posture |
 
-### `@vymalo/opencode-lightbridge` — one credential, every egress
+### `@vymalo/opencode-lightbridge` — the all-in-one plugin
 | Page | When you need it |
 | --- | --- |
-| [lightbridge.md](lightbridge.md) | The umbrella plugin: one shared `TokenRuntime` driving both the gateway bearer and the OTEL export credential, config reference, relationship to the two standalone plugins it composes |
+| [lightbridge.md](lightbridge.md) | The umbrella plugin: `register` (provider registration + model discovery), the shared gateway bearer + OTEL export credential, the shared root-token cache with oauth2, the opt-in RFC 8693 exchange, config reference, migration notes |
 | [adr/0012-single-auth-across-gateway-and-otel.md](adr/0012-single-auth-across-gateway-and-otel.md) | Why one runtime, why MCP is out of scope, the alternatives considered |
+| [adr/0017-lightbridge-all-in-one.md](adr/0017-lightbridge-all-in-one.md) | `register`, the shared cache with oauth2, and the exchange becoming opt-in — amends ADR-0012 |
 
 ## Cross-cutting
 

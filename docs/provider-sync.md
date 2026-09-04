@@ -4,14 +4,15 @@ Status: **implemented** — see [ADR-0016](adr/0016-provider-sync-extraction.md)
 `packages/opencode-provider-sync/`.
 
 Goal, in one line: **one shared engine for "keep a set of OpenAI-compatible providers' model lists
-in sync, behind a cached OAuth token, safely across multiple OpenCode processes sharing one cache
-directory"** — extracted from `@vymalo/opencode-oauth2` so a second plugin
-(`@vymalo/opencode-lightbridge`, a follow-up PR) can compose it instead of forking it.
+in sync, behind a cached OAuth token, safely across multiple OpenCode processes (and, since
+ADR-0017, multiple engine instances in one process) sharing one cache directory"** — extracted from
+`@vymalo/opencode-oauth2` so a second plugin (`@vymalo/opencode-lightbridge`) could compose it
+instead of forking it. See [ADR-0017](adr/0017-lightbridge-all-in-one.md) for that second consumer.
 
 This is not itself an OpenCode plugin — it registers no `Plugin`, hosts no server, and is never
-loaded directly by the OpenCode host. It is a library two plugins compose: today
-`@vymalo/opencode-oauth2` (`OAuth2ModelSyncPlugin extends ProviderModelSyncEngine`); in a follow-up
-PR, a gateway module of `@vymalo/opencode-lightbridge`.
+loaded directly by the OpenCode host. It is a library two plugins compose: `@vymalo/opencode-oauth2`
+(`OAuth2ModelSyncPlugin extends ProviderModelSyncEngine`) and, since ADR-0017,
+`@vymalo/opencode-lightbridge`'s optional `register` module.
 
 ## What it provides
 
@@ -48,8 +49,14 @@ Three things stay with each consumer rather than being baked into the engine —
 
 1. **Config-key literals.** Which `pluginConfig.<key>` / `provider.options.<key>` a consumer reads
    is passed in as `pluginConfigKey` / `optionKeys` options, never hardcoded. `opencode-oauth2`'s
-   are `"oauth2ModelSync"` and `["oauth2", "oauth2ModelSync"]`; a future lightbridge gateway module
-   will pass its own.
+   are `"oauth2ModelSync"` and `["oauth2", "oauth2ModelSync"]`. `opencode-lightbridge`'s `register`
+   module takes a different shape entirely — it manages exactly ONE server per plugin instance,
+   built directly from its own `auth`+`register` options rather than the host-config
+   `pluginConfig`/`provider.options` channels `collectManagedProviders` reads — so it calls the
+   engine and the per-provider merge helpers (`resolveProviderNpm`, `applyResponsesApiOptions`,
+   `mergeDiscoveredModels`) directly rather than going through `collectManagedProviders`/
+   `parsePluginConfigServers`/`parseOAuthExtension`, which remain oauth2-only. See
+   [ADR-0017](adr/0017-lightbridge-all-in-one.md).
 2. **Auth-subset validation.** A consumer's own config module (layered on
    `@vymalo/opencode-auth-core`'s `validateAuthConfig`) normalizes and validates servers before
    constructing the engine. The engine accepts only already-validated `ProviderServerConfig`
@@ -127,6 +134,29 @@ the full development/testing commands.
   `"opencode-oauth2"` cache segment and service label. Every symbol `opencode-oauth2`'s `lib.ts`
   exported before this extraction still exports the same name from the same subpath — no consumer
   of `@vymalo/opencode-oauth2` needs to change anything.
-- **`@vymalo/opencode-lightbridge`** (planned, follow-up PR) — a gateway module composing this
-  engine the same way, with lightbridge's own config-key literals and no Responses-repair hook
-  unless one turns out to be needed for the gateways lightbridge targets.
+- **`@vymalo/opencode-lightbridge`** (live, ADR-0017) — the optional `register` block builds ONE
+  `ProviderModelSyncEngine` from `auth`+`register.baseURL`, pointed at the SAME cache
+  segment/namespace `opencode-oauth2` uses (`"opencode-oauth2"` /
+  `"opencode-oauth2-model-sync"`) so a matching `id`/`issuer`/`clientId` shares its cache file (and
+  therefore its login) with an oauth2-managed server of the same id — see
+  [`docs/lightbridge.md`](lightbridge.md#register--provider-registration--model-discovery-adr-0017).
+  No Responses-repair hook is injected (not needed for the gateways lightbridge currently targets).
+  lightbridge's `LightbridgeRuntime` (the human-root/gateway-bearer wrapper, used whether or not
+  `register` is configured) also participates in that same cache file as a lightweight, engine-free
+  read/refresh-only `TokenRuntime` — see ADR-0017 for why a full second engine isn't needed for that
+  half.
+
+## Scheduler ownership (ADR-0017)
+
+Since a second consumer can now run its own `ProviderModelSyncEngine` instance in the SAME process
+against the SAME cache directory as the first (lightbridge's `register` engine alongside oauth2's,
+or two of one plugin's own engines across a config hot-reload), `start()` claims a process-wide,
+in-memory ownership slot keyed by `<cacheDir, serverId>` before running warmup + starting the
+scheduler for each server. An instance that loses the claim skips both entirely for that server —
+logged once at `debug` (`sync_scheduler_ownership_skipped`), never throws — and still serves cached
+reads and on-demand `ensureAccessToken`/`syncServer` calls normally (those were already safe to run
+concurrently: file-lock-coordinated refresh, idempotent GETs). `stop()` releases whatever the
+instance holds. This is a generic improvement to the engine, not lightbridge-specific — it protects
+any future third consumer the same way. See
+[`docs/architecture.md` → Sync scheduler](architecture.md#sync-scheduler) for the fuller writeup and
+[ADR-0017](adr/0017-lightbridge-all-in-one.md) for the motivating scenario.

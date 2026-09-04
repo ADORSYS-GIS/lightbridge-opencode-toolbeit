@@ -208,6 +208,30 @@ Coordinating the refresh itself — single-flight, the cross-process lock, and t
 
 See [architecture.md](../../docs/architecture.md#the-two-hooks) for the full hook semantics.
 
+## Relationship to `@vymalo/opencode-lightbridge`
+
+Since [ADR-0017](../../docs/adr/0017-lightbridge-all-in-one.md), `@vymalo/opencode-lightbridge`'s
+optional `register` block does everything this plugin does — provider registration + model
+discovery via the same shared `@vymalo/opencode-provider-sync` engine — plus an optional gateway
+bearer and OTEL export credential off the same login. Run this plugin standalone when you only need
+provider registration, or when it needs to manage several unrelated IdPs via
+`pluginConfig.oauth2ModelSync.servers`; run lightbridge instead when you want the shared credential
+too.
+
+**If both are configured, configure them for DIFFERENT provider ids** — lightbridge's `register`
+module deliberately skips (never registers, never runs its own scheduler) any provider id it detects
+this plugin already manages (via `pluginConfig.oauth2ModelSync.servers[].id` or a provider's own
+`options.oauth2`/`options.oauth2ModelSync` block), logged at `debug`. See
+[`docs/lightbridge.md` → `register`](../../docs/lightbridge.md#register--provider-registration--model-discovery-adr-0017).
+
+**Shared login, not just a shared engine.** If a developer configures the SAME `id`/`issuer`/
+`clientId` in an `oauth2ModelSync` server entry AND in lightbridge's `auth`/`register` block (for
+DIFFERENT purposes — e.g. this plugin owns one provider, lightbridge's `gateway`/`otel` ride the
+same IdP for a different provider), logging in through either one makes the human root token
+available to the other: lightbridge's root token lives in the exact same
+`<cacheNamespace>/<serverId>.json` file this plugin writes. See
+[`docs/lightbridge.md` → One login, shared cache with oauth2](../../docs/lightbridge.md#one-login-shared-cache-with-oauth2-adr-0017).
+
 ## Development
 
 ```sh

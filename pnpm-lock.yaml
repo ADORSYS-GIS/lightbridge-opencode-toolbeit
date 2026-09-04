@@ -270,6 +270,9 @@ importers:
       '@vymalo/opencode-core-otel':
         specifier: workspace:*
         version: link:../opencode-core-otel
+      '@vymalo/opencode-provider-sync':
+        specifier: workspace:*
+        version: link:../opencode-provider-sync
     devDependencies:
       '@opentelemetry/sdk-logs':
         specifier: ^0.221.0
