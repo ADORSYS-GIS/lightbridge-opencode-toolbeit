@@ -4,13 +4,38 @@ All notable changes to the **OpenCode Toolbelt** — the `@vymalo/*` plugin suit
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `repo-auth`, `lightbridge`). PR references link to the change.
+All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
 ## [Unreleased]
 
 A single-purpose release: the ADR-0013 no-terminal-mirror fix that shipped for `opencode-otel` alone
 in 0.16.1 now covers every plugin in the suite. No plugin writes its own diagnostics to the terminal
 any more, with one deliberate exception: the device-code login prompt.
+
+### Added
+
+- **provider-sync:** A new published package, `@vymalo/opencode-provider-sync` — the provider-
+  registration + OAuth-backed model-sync engine extracted verbatim (step 1 of 2) from
+  `@vymalo/opencode-oauth2`: `ProviderModelSyncEngine` (renamed from `OAuth2ModelSyncPlugin`) with
+  its cross-process-safe `ensureAccessToken`/`syncServer`/`getServerModels` surface built on
+  `@vymalo/opencode-auth-core`'s `TokenRuntime`, `model-discovery.ts`/`model-normalization.ts`/
+  `scheduler.ts` moved unchanged, a generalized `cache.ts` (`resolveCacheDir(segment, namespace)`
+  now takes the on-disk segment as a parameter instead of hardcoding `"opencode-oauth2"`), and
+  `opencode-helpers.ts` — the `Hooks.config` wiring (`collectManagedProviders`,
+  `parsePluginConfigServers`, `parseOAuthExtension`, `mergeDiscoveredModels`,
+  `propagateCachedBearer`, `resolveProviderNpm`, `applyResponsesApiOptions`, `runtimeSignature`),
+  previously private to oauth2's `opencode.ts`, now public so a second consumer can compose it with
+  its own config-key literals and (optional) Responses-API repair hook instead of forking it. This
+  mirrors the `auth-core`/`core-otel` precedent (0.15.0): oauth2's own config-key literals
+  (`"oauth2"`/`"oauth2ModelSync"`), auth-subset validation (`config.ts`'s `validateConfig`, layered
+  on auth-core's `validateAuthConfig`), and the Envoy-AI-Gateway-specific Responses SSE repair
+  (`createResponsesRepairFetch`) stay behind in `opencode-oauth2`, injected into the shared engine
+  rather than folded into it. `opencode-oauth2` is **behaviourally unchanged** — `OAuth2ModelSyncPlugin`
+  is now a thin subclass of `ProviderModelSyncEngine`, and every symbol its `lib.ts` exported before
+  this extraction still exports the same name from the same subpath. See
+  [ADR-0016](docs/adr/0016-provider-sync-extraction.md) and
+  [`docs/provider-sync.md`](docs/provider-sync.md). A follow-up PR wires a gateway module of
+  `@vymalo/opencode-lightbridge` onto this engine.
 
 ### Fixed
 

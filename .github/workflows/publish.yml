@@ -170,6 +170,13 @@ jobs:
             --pack-destination "$PWD/dist-tarball/core-otel"
           ls -la dist-tarball/core-otel/
 
+      - name: Pack provider-sync tarball
+        run: |
+          mkdir -p dist-tarball/provider-sync
+          pnpm --filter @vymalo/opencode-provider-sync pack \
+            --pack-destination "$PWD/dist-tarball/provider-sync"
+          ls -la dist-tarball/provider-sync/
+
       - name: Pack lightbridge tarball
         run: |
           mkdir -p dist-tarball/lightbridge
@@ -214,7 +221,7 @@ jobs:
             echo "OK: $tarball"
           }
 
-          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/auth-core/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz dist-tarball/otel/*.tgz dist-tarball/repo-auth/*.tgz dist-tarball/core-otel/*.tgz dist-tarball/lightbridge/*.tgz; do
+          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/auth-core/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz dist-tarball/otel/*.tgz dist-tarball/repo-auth/*.tgz dist-tarball/core-otel/*.tgz dist-tarball/provider-sync/*.tgz dist-tarball/lightbridge/*.tgz; do
             verify_tarball "$tarball"
           done
 
@@ -261,6 +268,27 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
+      - name: Publish provider-sync to npm (with provenance)
+        if: ${{ inputs.dry_run != true }}
+        # Alongside auth-core/core-otel: the third foundational shared
+        # package. oauth2 depends on @vymalo/opencode-provider-sync
+        # (rewritten from workspace:* to the real version on publish), so it
+        # must exist on the registry before oauth2's tarball is pushed.
+        run: |
+          set -e
+          version=$(node -p "require('./packages/opencode-provider-sync/package.json').version")
+          if npm view "@vymalo/opencode-provider-sync@${version}" version >/dev/null 2>&1; then
+            echo "::notice::@vymalo/opencode-provider-sync@${version} already on npm — skipping."
+            exit 0
+          fi
+          pnpm --filter @vymalo/opencode-provider-sync publish \
+            --access public \
+            --no-git-checks \
+            --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
       - name: Publish repo-auth to npm (with provenance)
         if: ${{ inputs.dry_run != true }}
         # After auth-core: repo-auth depends on @vymalo/opencode-auth-core
@@ -283,6 +311,9 @@ jobs:
 
       - name: Publish oauth2 to npm (with provenance)
         if: ${{ inputs.dry_run != true }}
+        # Depends on BOTH @vymalo/opencode-auth-core and
+        # @vymalo/opencode-provider-sync (each rewritten from workspace:* to
+        # the real version on publish) — both must already be on the registry.
         # --provenance:    generates a signed SLSA L2 attestation linking the
         #                  tarball to this workflow run + commit SHA. npm
         #                  verifies it server-side; consumers can verify
