@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [0.17.1] — 2026-09-18
+
+A dependency-only patch. No package's code changes in this release — it exists to carry a
+transitive-dependency pin that the 0.17.0 publish gate rejected, so the suite has a version on npm
+whose `pnpm audit --audit-level=high --prod` is clean.
+
+### Fixed
+
+- **all packages:** Pinned the `toml` override to `^4.2.0`, clearing two high-severity advisories reached through `@opencode-ai/plugin` → `effect` → `toml` across 11 paths: prototype pollution ([GHSA-v5mp-jgw5-2x6j](https://github.com/advisories/GHSA-v5mp-jgw5-2x6j), fixed in 4.1.2) and uncontrolled recursion ([GHSA-82x6-q7mm-w9cf](https://github.com/advisories/GHSA-82x6-q7mm-w9cf), fixed in 4.2.0). The tree resolved `toml` 4.1.1, below both. **The floor is the higher of the two** — `^4.1.2` would clear the first advisory, still resolve below the second, and fail the identical gate on the very next release, which is precisely how the earlier `fast-uri` `^3.1.4` pin failed. The lockfile now resolves `toml` 4.3.0. Unlike `fast-uri`'s `ajv` path, this one **cannot be designed away**: `@opencode-ai/plugin` is the plugin API every package in the suite is built on, so a future recurrence has to be chased rather than dropped — the override block says so in a comment, so the next reader inherits the reasoning instead of rediscovering it. These are newly-published advisories against a version already in the tree, unrelated to any code shipped in 0.17.0. ([#115](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/115))
+
 ## [0.17.0] — 2026-09-04
 
 The release that makes `@vymalo/opencode-lightbridge` the all-in-one plugin, with `oauth2` and
