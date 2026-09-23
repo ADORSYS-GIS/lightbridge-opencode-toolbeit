@@ -18,10 +18,10 @@
     "format:check": "biome format packages apps test-env *.json"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.15",
+    "@biomejs/biome": "2.5.14",
     "@types/node": "^25.9.1",
     "@vitest/coverage-v8": "4.1.7",
-    "oxc-transform": "^0.144.0",
+    "oxc-transform": "^0.151.0",
     "typescript": "^6.0.3"
   }
 }
