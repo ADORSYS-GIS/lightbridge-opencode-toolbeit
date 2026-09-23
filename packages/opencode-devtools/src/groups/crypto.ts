@@ -202,7 +202,7 @@ export const CRYPTO_TOOLS: readonly ToolSpec[] = [
     },
     handler: (args) => {
       const type = typeof args.type === "string" ? args.type : "ed25519";
-      const enc = {
+      const pem = {
         publicKeyEncoding: { type: "spki" as const, format: "pem" as const },
         privateKeyEncoding: { type: "pkcs8" as const, format: "pem" as const }
       };
@@ -214,11 +214,22 @@ export const CRYPTO_TOOLS: readonly ToolSpec[] = [
         if (modulusLength < 1024 || modulusLength > 4096) {
           throw new Error('"modulusLength" must be between 1024 and 4096');
         }
-        pair = generateKeyPairSync("rsa", { modulusLength, ...enc });
+        pair = generateKeyPairSync("rsa", {
+          modulusLength,
+          publicKeyEncoding: pem.publicKeyEncoding,
+          privateKeyEncoding: pem.privateKeyEncoding
+        });
       } else if (type === "ec") {
-        pair = generateKeyPairSync("ec", { namedCurve: "P-256", ...enc });
+        pair = generateKeyPairSync("ec", {
+          namedCurve: "P-256",
+          publicKeyEncoding: pem.publicKeyEncoding,
+          privateKeyEncoding: pem.privateKeyEncoding
+        });
       } else {
-        pair = generateKeyPairSync("ed25519", enc);
+        pair = generateKeyPairSync("ed25519", {
+          publicKeyEncoding: pem.publicKeyEncoding,
+          privateKeyEncoding: pem.privateKeyEncoding
+        });
       }
       return json(
         { type, publicKey: pair.publicKey, privateKey: pair.privateKey },
