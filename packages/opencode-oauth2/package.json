@@ -62,8 +62,8 @@
     "@vymalo/opencode-provider-sync": "workspace:*"
   },
   "devDependencies": {
-    "@ai-sdk/openai": "^2.0.106",
-    "ai": "^5.0.199",
+    "@ai-sdk/openai": "^4.0.73",
+    "ai": "^7.0.112",
     "vite": "^8.2.1",
     "vitest": "^4.1.7"
   }
