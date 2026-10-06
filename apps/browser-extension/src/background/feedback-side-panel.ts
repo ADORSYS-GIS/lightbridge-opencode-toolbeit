@@ -11,6 +11,7 @@
  * background's per-request listener correlates both surfaces identically.
  */
 import type { FeedbackSession } from "../shared/messages";
+import { tabsApi } from "../lib/browser-apis";
 
 /** The single in-flight side-panel request (one at a time keeps the UX simple). */
 let activeSession: FeedbackSession | null = null;
@@ -56,9 +57,9 @@ export async function openSidePanelFallback(
   }
   let screenshot: string;
   try {
-    const tab = await chrome.tabs.get(tabId);
-    await chrome.tabs.update(tabId, { active: true });
-    screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const tab = await tabsApi().get(tabId);
+    await tabsApi().update(tabId, { active: true });
+    screenshot = await tabsApi().captureVisibleTab(tab.windowId, { format: "png" });
   } catch {
     return false; // can't even screenshot (e.g. a blocked page) — let caller error out
   }

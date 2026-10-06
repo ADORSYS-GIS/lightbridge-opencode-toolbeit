@@ -1,6 +1,6 @@
 /**
  * In-page feedback overlay for `interactive` requests. Like `page-actions`, the
- * overlay function is injected via `chrome.scripting.executeScript({ func })`,
+ * overlay function is injected via `scriptingApi().executeScript({ func })`,
  * so it is serialized and re-evaluated in the page with **no module scope** —
  * everything it needs lives inside the single self-contained `feedbackOverlay`.
  *
@@ -10,6 +10,8 @@
  * Teardown is a second tiny injection that removes the overlay element, so the
  * background can cancel a request without a page-side message channel.
  */
+
+import { scriptingApi } from "../lib/browser-apis";
 
 export type FeedbackMode = "confirm" | "choose" | "point" | "element" | "region" | "comment";
 
@@ -49,7 +51,7 @@ export async function showFeedbackOverlay(
   id: string,
   req: FeedbackRequest
 ): Promise<void> {
-  await chrome.scripting.executeScript({
+  await scriptingApi().executeScript({
     target: { tabId },
     func: feedbackOverlay,
     args: [id, req.mode, req.prompt ?? "", req.options ?? []]
@@ -59,7 +61,7 @@ export async function showFeedbackOverlay(
 /** Remove the overlay for `id` from the page (best-effort). */
 export async function hideFeedbackOverlay(tabId: number, id: string): Promise<void> {
   try {
-    await chrome.scripting.executeScript({
+    await scriptingApi().executeScript({
       target: { tabId },
       func: (overlayId: string) => {
         document.getElementById(`ocb-feedback-${overlayId}`)?.remove();

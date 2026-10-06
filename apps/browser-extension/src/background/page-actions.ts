@@ -1,5 +1,5 @@
 /**
- * Page-side logic, injected via `chrome.scripting.executeScript({ func })`.
+ * Page-side logic, injected via `scriptingApi().executeScript({ func })`.
  *
  * IMPORTANT: an injected function is serialized with `Function.prototype.toString`
  * and re-evaluated in the page — it has **no access to module scope**. So all the
@@ -10,6 +10,8 @@
  * uses trusted CDP input for click/type/key/hover/drag; the content executor
  * routes those to the synthetic-event branches here.
  */
+
+import { scriptingApi } from "../lib/browser-apis";
 
 export interface Target {
   ref?: string;
@@ -35,7 +37,7 @@ export async function runInPage<Args extends unknown[], Result>(
   func: (...args: Args) => Result,
   args: Args
 ): Promise<Result> {
-  const [injection] = await chrome.scripting.executeScript({
+  const [injection] = await scriptingApi().executeScript({
     target: { tabId },
     func: func as (...a: unknown[]) => unknown,
     args

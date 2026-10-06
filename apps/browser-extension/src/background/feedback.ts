@@ -15,6 +15,7 @@ import {
   showFeedbackOverlay
 } from "./feedback-overlay";
 import { clearFeedbackSession, openSidePanelFallback } from "./feedback-side-panel";
+import { tabsApi, windowsApi } from "../lib/browser-apis";
 
 export interface FeedbackResult {
   responded: boolean;
@@ -52,10 +53,10 @@ async function flagAttention(tabId: number): Promise<void> {
     /* action API unavailable */
   }
   try {
-    const tab = await chrome.tabs.get(tabId);
-    await chrome.tabs.update(tabId, { active: true });
+    const tab = await tabsApi().get(tabId);
+    await tabsApi().update(tabId, { active: true });
     if (tab.windowId !== undefined) {
-      await chrome.windows.update(tab.windowId, { focused: true });
+      await windowsApi().update(tab.windowId, { focused: true });
     }
   } catch {
     /* tab/window gone */

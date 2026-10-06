@@ -1,6 +1,7 @@
 import type { ConsoleEntry, Executor, NetworkEntry, ScreenshotData } from "./executor";
 import { captureFullPage } from "./full-page";
 import { runInPage, runPageAction, type Target } from "./page-actions";
+import { tabsApi } from "../lib/browser-apis";
 
 const CDP_ONLY = (feature: string) =>
   new Error(
@@ -72,20 +73,20 @@ export class ContentExecutor implements Executor {
   }
 
   async screenshot(tabId: number, fullPage: boolean): Promise<ScreenshotData> {
-    const tab = await chrome.tabs.get(tabId);
+    const tab = await tabsApi().get(tabId);
     if (tab.windowId === undefined) {
       throw new Error("tab has no window");
     }
     // captureVisibleTab grabs the active tab of the window — make sure it's ours.
     // Activation + paint is async, so wait briefly or we'd capture the prior tab.
     if (!tab.active) {
-      await chrome.tabs.update(tabId, { active: true });
+      await tabsApi().update(tabId, { active: true });
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
     if (fullPage) {
       return captureFullPage(tabId, tab.windowId);
     }
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const dataUrl = await tabsApi().captureVisibleTab(tab.windowId, { format: "png" });
     const base64 = dataUrl.replace(/^data:image\/png;base64,/, "");
     const size = await runInPage(
       tabId,
