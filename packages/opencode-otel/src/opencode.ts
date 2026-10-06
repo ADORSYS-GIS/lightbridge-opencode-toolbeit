@@ -93,9 +93,12 @@ function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => 
 }
 
 /**
- * Drain buffered telemetry on process exit. The plugin API has no dispose hook,
- * so without this a short CLI invocation loses everything still in a batch
- * processor. Handlers are registered once and never keep the loop alive.
+ * Drain buffered telemetry on process exit. The plugin API gained a `dispose`
+ * hook in @opencode-ai/plugin 1.18.32, but this plugin does not register it —
+ * these handlers plus `session.idle` already cover both exit paths, so a
+ * dispose flush would be a redundant third drain (tracked follow-up). Without
+ * them a short CLI invocation loses everything still in a batch processor.
+ * Handlers are registered once and never keep the loop alive.
  */
 function registerExitHandlers(
   providers: TelemetryProviders,

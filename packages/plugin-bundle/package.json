@@ -14,7 +14,7 @@
   },
   "devDependencies": {
     "@vymalo/opencode-oauth2": "workspace:*",
-    "builtin-modules": "^5.0.0",
-    "rolldown": "^1.0.2"
+    "builtin-modules": "^5.4.0",
+    "rolldown": "^1.2.9"
   }
 }
