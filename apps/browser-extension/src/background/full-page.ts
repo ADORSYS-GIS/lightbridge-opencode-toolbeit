@@ -1,5 +1,6 @@
 import type { ScreenshotData } from "./executor";
 import { runInPage } from "./page-actions";
+import { tabsApi } from "../lib/browser-apis";
 
 /**
  * Full-page screenshot for the content-script executor (Firefox / forced
@@ -86,7 +87,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 async function captureThrottled(windowId: number): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
-      return await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+      return await tabsApi().captureVisibleTab(windowId, { format: "png" });
     } catch (err) {
       if (/max_?capture|too many|rate/i.test(String(err))) {
         await sleep(500 * (attempt + 1));
