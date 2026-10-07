@@ -409,10 +409,26 @@ nothing.
 
 ## Flushing
 
-The OpenCode plugin API has no dispose hook, so buffered telemetry would be lost when a short CLI
-invocation exits. The plugin flushes on **`session.idle`** — the natural turn boundary — and
-registers `beforeExit` / `SIGINT` / `SIGTERM` handlers for hard exits. Metrics still export on their
-own interval (60s by default) for long-running sessions.
+The OpenCode plugin API has no dispose hook that runs when the process is signalled, so buffered
+telemetry would be lost when a short CLI invocation exits. The plugin flushes on **`session.idle`**
+— the natural turn boundary — and registers `beforeExit` / `SIGINT` / `SIGTERM` handlers for hard
+exits. Metrics still export on their own interval (60s by default) for long-running sessions.
+
+What the signal handlers do depends on who else listens for the signal
+([ADR-0018](adr/0018-exit-handlers-reraise-the-signal.md)):
+
+- **Nothing else listens** (e.g. `opencode serve`): shut the exporters down — waiting at most 2 s,
+  so an unreachable collector cannot stall the exit — then **re-raise the same signal**, so the
+  process ends with the usual status (143 for SIGTERM, 130 for SIGINT). A bare listener would
+  replace the runtime's default "terminate" action and leave the process running; re-raising hands
+  it back.
+- **The host listens too** (e.g. `opencode run` handling Ctrl-C): the host decides whether the
+  process ends, so the plugin only **flushes** (same 2 s bound), keeps its exporters running, and
+  never terminates anything.
+
+`beforeExit` shuts the exporters down and never terminates anything. Outcomes are logged at `debug`
+(`otel_exit_reraised`, `otel_exit_deferred_to_host`, `otel_shutdown_deadline_exceeded`; the
+`opencode-lightbridge` module uses the `lightbridge_otel_` prefix) — never to the terminal.
 
 If you see traces but no metrics, wait out the interval or end the session; that is the batch
 window, not a failure.

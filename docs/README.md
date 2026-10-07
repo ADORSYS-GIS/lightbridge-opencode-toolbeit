@@ -55,6 +55,7 @@ install; come here when you need depth on a specific topic.
 | [lightbridge.md](lightbridge.md) | The umbrella plugin: `register` (provider registration + model discovery), the shared gateway bearer + OTEL export credential, the shared root-token cache with oauth2, the opt-in RFC 8693 exchange, config reference, migration notes |
 | [adr/0012-single-auth-across-gateway-and-otel.md](adr/0012-single-auth-across-gateway-and-otel.md) | Why one runtime, why MCP is out of scope, the alternatives considered |
 | [adr/0017-lightbridge-all-in-one.md](adr/0017-lightbridge-all-in-one.md) | `register`, the shared cache with oauth2, and the exchange becoming opt-in — amends ADR-0012 |
+| [adr/0018-exit-handlers-reraise-the-signal.md](adr/0018-exit-handlers-reraise-the-signal.md) | Why the OTel exit handlers re-raise SIGINT/SIGTERM after flushing (a bare listener keeps the process alive), and flush-only when the host owns the signal |
 
 ## Cross-cutting
 

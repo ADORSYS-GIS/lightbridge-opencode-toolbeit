@@ -118,6 +118,14 @@ than sending it with no `Authorization` header. Both modules keep re-trying on t
 cadence (`gateway` on the next request, `otel` on the next batch flush), so a later successful login
 resumes both without a restart.
 
+**Exit behaviour (`otel`).** When the `otel` module is active it flushes buffered telemetry on
+`beforeExit`, and on `SIGINT`/`SIGTERM` it shuts the exporters down (waiting at most 2 s), then
+re-raises the signal so the process still terminates with the usual status — a bare signal listener
+would replace the runtime's default "terminate" action and leave `opencode serve` running. Where the
+host also handles the signal (e.g. `opencode run`'s Ctrl-C), the plugin only flushes and never ends
+the process. Same implementation as `@vymalo/opencode-otel`, events prefixed `lightbridge_otel_`; see
+[ADR-0018](adr/0018-exit-handlers-reraise-the-signal.md) and [`otel.md` → Flushing](otel.md#flushing).
+
 ## `register` — provider registration + model discovery (ADR-0017)
 
 `register` makes lightbridge do everything `@vymalo/opencode-oauth2` does: register `auth`'s IdP as

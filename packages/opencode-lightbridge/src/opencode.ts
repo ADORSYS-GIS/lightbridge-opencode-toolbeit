@@ -21,15 +21,14 @@ import {
   fromOpenCodeLogLevel,
   installTracePropagation,
   readVcsInfo,
+  registerExitHandlers,
   resolveOtelConfig,
   TelemetryRecorder,
-  type DeferredAttribute,
   type EnvSource,
   type ExporterFactories,
   type OtelPluginOptions,
   type PropagationConfigInput,
   type ResolvedOtelConfig,
-  type TelemetryProviders,
   type TokenSource,
   type VcsInfo
 } from "@vymalo/opencode-core-otel";
@@ -86,7 +85,7 @@ export interface LightbridgePluginFactoryOptions {
   exporters?: ExporterFactories;
   /** Injectable clock; defaults to `Date.now`. */
   now?: () => number;
-  /** Skip `beforeExit`/`SIGINT`/`SIGTERM` registration (tests). */
+  /** Skip the `beforeExit`/`SIGINT`/`SIGTERM` exit handlers (tests). See ADR-0018. */
   registerProcessHandlers?: boolean;
   /** Override the resolved host metadata (hostname, version) for tests. */
   hostInfo?: { hostname?: string; version?: string };
@@ -143,35 +142,6 @@ function safeHostname(): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-/**
- * Drain buffered telemetry on process exit — same rationale as
- * `@vymalo/opencode-otel`'s `registerExitHandlers`: the plugin API has no
- * dispose hook, so without this a short CLI invocation loses everything still
- * in a batch processor.
- */
-function registerExitHandlers(
-  providers: TelemetryProviders,
-  logger: Logger,
-  deferred: DeferredAttribute[]
-): void {
-  let done = false;
-  const drain = () => {
-    if (done) {
-      return;
-    }
-    done = true;
-    for (const attribute of deferred) {
-      attribute.abandon();
-    }
-    void providers.shutdown().catch((error) => {
-      logger.warn("lightbridge_otel_shutdown_failed", { error: describeError(error) });
-    });
-  };
-  process.once("beforeExit", drain);
-  process.once("SIGINT", drain);
-  process.once("SIGTERM", drain);
 }
 
 /**
@@ -448,7 +418,10 @@ async function buildOtelModule(
   });
 
   if (factoryOptions.registerProcessHandlers !== false) {
-    registerExitHandlers(providers, logger, [version, branch]);
+    // Flush on exit, and hand the default signal action back (ADR-0018).
+    registerExitHandlers(providers, logger, [version, branch], {
+      eventPrefix: "lightbridge_otel"
+    });
   }
 
   logger.info("lightbridge_otel_enabled", {
