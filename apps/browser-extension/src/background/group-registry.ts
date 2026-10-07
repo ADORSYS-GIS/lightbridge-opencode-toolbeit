@@ -1,3 +1,5 @@
+import { browser } from "wxt/browser";
+
 import { db } from "../shared/db";
 import type { GroupRecord } from "../shared/types";
 import type { Executor } from "./executor";
@@ -5,9 +7,7 @@ import type { Executor } from "./executor";
 const LOAD_TIMEOUT_MS = 15_000;
 
 function hasTabGroups(): boolean {
-  return (
-    typeof chrome !== "undefined" && typeof chrome.tabs?.group === "function" && !!chrome.tabGroups
-  );
+  return typeof browser.tabs?.group === "function" && !!browser.tabGroups;
 }
 
 /** Wait until a tab finishes loading (or the timeout elapses). */
@@ -16,10 +16,10 @@ async function waitForComplete(
   timeoutMs = LOAD_TIMEOUT_MS
 ): Promise<chrome.tabs.Tab> {
   const deadline = Date.now() + timeoutMs;
-  let tab = await chrome.tabs.get(tabId);
+  let tab = await browser.tabs.get(tabId);
   while (tab.status !== "complete" && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 150));
-    tab = await chrome.tabs.get(tabId);
+    tab = await browser.tabs.get(tabId);
   }
   return tab;
 }
@@ -53,7 +53,7 @@ export class GroupRegistry {
       const alive: number[] = [];
       for (const id of row.tabIds) {
         try {
-          await chrome.tabs.get(id);
+          await browser.tabs.get(id);
           alive.push(id);
         } catch {
           /* tab closed while the worker was suspended */
@@ -85,12 +85,12 @@ export class GroupRegistry {
       // Chrome uses -1 (TAB_GROUP_ID_NONE) for "no group" and 0 is a valid id,
       // so test for presence explicitly rather than truthiness — otherwise a
       // group with id 0 would be split into a fresh native group on reuse.
-      const groupId = await chrome.tabs.group(
+      const groupId = await browser.tabs.group(
         existing?.tabGroupId !== undefined
           ? { tabIds: [tabId], groupId: existing.tabGroupId }
           : { tabIds: [tabId] }
       );
-      await chrome.tabGroups.update(groupId, { title: name });
+      await browser.tabGroups.update(groupId, { title: name });
       return groupId;
     } catch {
       return existing?.tabGroupId;
@@ -98,7 +98,7 @@ export class GroupRegistry {
   }
 
   async open(name: string, url?: string, focus = true): Promise<TabInfo> {
-    const created = await chrome.tabs.create({ url: url ?? "about:blank", active: focus });
+    const created = await browser.tabs.create({ url: url ?? "about:blank", active: focus });
     const tabId = created.id;
     if (tabId === undefined) {
       throw new Error("failed to create tab");
@@ -138,7 +138,7 @@ export class GroupRegistry {
 
   async navigate(name: string, url: string, tabId?: number): Promise<TabInfo> {
     const target = this.resolveTab(name, tabId);
-    await chrome.tabs.update(target, { url });
+    await browser.tabs.update(target, { url });
     const tab = await waitForComplete(target);
     const group = this.groups.get(name);
     if (group) {
@@ -158,28 +158,28 @@ export class GroupRegistry {
 
   async back(name: string, tabId?: number): Promise<TabInfo> {
     const target = this.resolveTab(name, tabId);
-    await chrome.tabs.goBack(target);
+    await browser.tabs.goBack(target);
     return this.afterNav(name, target);
   }
 
   async forward(name: string, tabId?: number): Promise<TabInfo> {
     const target = this.resolveTab(name, tabId);
-    await chrome.tabs.goForward(target);
+    await browser.tabs.goForward(target);
     return this.afterNav(name, target);
   }
 
   async reload(name: string, tabId?: number): Promise<TabInfo> {
     const target = this.resolveTab(name, tabId);
-    await chrome.tabs.reload(target);
+    await browser.tabs.reload(target);
     return this.afterNav(name, target);
   }
 
   async activate(name: string, tabId?: number): Promise<TabInfo> {
     const target = this.resolveTab(name, tabId);
-    await chrome.tabs.update(target, { active: true });
-    const tab = await chrome.tabs.get(target);
+    await browser.tabs.update(target, { active: true });
+    const tab = await browser.tabs.get(target);
     if (tab.windowId !== undefined) {
-      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+      await browser.windows.update(tab.windowId, { focused: true }).catch(() => {});
     }
     const group = this.groups.get(name);
     if (group) {
@@ -195,7 +195,7 @@ export class GroupRegistry {
         const tabs: TabInfo[] = [];
         for (const tabId of group.tabIds) {
           try {
-            const tab = await chrome.tabs.get(tabId);
+            const tab = await browser.tabs.get(tabId);
             tabs.push({ tabId, url: tab.url ?? "", title: tab.title ?? "" });
           } catch {
             /* tab gone; pruned on next close/removal event */
@@ -220,7 +220,7 @@ export class GroupRegistry {
     const toClose = tabId !== undefined ? [tabId] : [...group.tabIds];
     for (const id of toClose) {
       await this.executor.release(id).catch(() => {});
-      await chrome.tabs.remove(id).catch(() => {});
+      await browser.tabs.remove(id).catch(() => {});
     }
     const remaining = group.tabIds.filter((id) => !toClose.includes(id));
     if (remaining.length === 0) {

@@ -10,6 +10,8 @@
  * answer with the same `ocb-feedback-result` shape the overlay uses, so the
  * background's per-request listener correlates both surfaces identically.
  */
+import { browser } from "wxt/browser";
+
 import type { FeedbackSession } from "../shared/messages";
 
 /** The single in-flight side-panel request (one at a time keeps the UX simple). */
@@ -30,14 +32,14 @@ interface SidePanelApi {
 interface SidebarActionApi {
   setPanel(details: { panel: string }): Promise<void> | void;
 }
-const sidePanelApi = (chrome as unknown as { sidePanel?: SidePanelApi }).sidePanel;
-const sidebarActionApi = (chrome as unknown as { sidebarAction?: SidebarActionApi }).sidebarAction;
+const sidePanelApi = (browser as unknown as { sidePanel?: SidePanelApi }).sidePanel;
+const sidebarActionApi = (browser as unknown as { sidebarAction?: SidebarActionApi }).sidebarAction;
 
 const SIDE_PANEL_PATH = "sidepanel.html";
 
 function broadcastPendingChanged(): void {
   // No receiver (panel closed) rejects — that's fine, the panel queries on open.
-  chrome.runtime.sendMessage({ type: "feedback:pending-changed" }).catch(() => {});
+  browser.runtime.sendMessage({ type: "feedback:pending-changed" }).catch(() => {});
 }
 
 /**
@@ -56,9 +58,9 @@ export async function openSidePanelFallback(
   }
   let screenshot: string;
   try {
-    const tab = await chrome.tabs.get(tabId);
-    await chrome.tabs.update(tabId, { active: true });
-    screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const tab = await browser.tabs.get(tabId);
+    await browser.tabs.update(tabId, { active: true });
+    screenshot = await browser.tabs.captureVisibleTab(tab.windowId, { format: "png" });
   } catch {
     return false; // can't even screenshot (e.g. a blocked page) — let caller error out
   }
