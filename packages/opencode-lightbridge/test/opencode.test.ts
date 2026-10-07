@@ -487,18 +487,27 @@ describe("createLightbridgePlugin — default logger + exit handling", () => {
     });
   });
 
-  it("registers exit handlers exactly once when otel is active and drains on beforeExit", async () => {
-    const before = process.listenerCount("beforeExit");
+  it("registers the shared exit handlers exactly once when otel is active and drains on beforeExit", async () => {
+    const before = {
+      beforeExit: process.listenerCount("beforeExit"),
+      SIGINT: process.listenerCount("SIGINT"),
+      SIGTERM: process.listenerCount("SIGTERM")
+    };
     await createLightbridgePlugin({
       logger: createSilentLogger(),
       deferredTimeoutMs: 5,
       exporters: { trace: () => undefined, metric: () => undefined, log: () => undefined }
     })(pluginInput(), { auth: makeAuth(), otel: { endpoint: "http://localhost:4318" } });
 
-    expect(process.listenerCount("beforeExit")).toBe(before + 1);
+    expect(process.listenerCount("beforeExit")).toBe(before.beforeExit + 1);
+    expect(process.listenerCount("SIGINT")).toBe(before.SIGINT + 1);
+    expect(process.listenerCount("SIGTERM")).toBe(before.SIGTERM + 1);
     try {
       process.emit("beforeExit", 0);
     } finally {
+      // Never fire a real signal here: ours would re-raise it at the test runner.
+      // The re-raise semantics are tested against an injected process in
+      // `@vymalo/opencode-core-otel` (test/exit-handlers.test.ts).
       for (const signal of ["SIGINT", "SIGTERM"] as const) {
         const [handler] = process.listeners(signal).slice(-1);
         if (handler) {
@@ -506,7 +515,9 @@ describe("createLightbridgePlugin — default logger + exit handling", () => {
         }
       }
     }
-    expect(process.listenerCount("beforeExit")).toBe(before);
+    expect(process.listenerCount("beforeExit")).toBe(before.beforeExit);
+    expect(process.listenerCount("SIGINT")).toBe(before.SIGINT);
+    expect(process.listenerCount("SIGTERM")).toBe(before.SIGTERM);
   });
 });
 

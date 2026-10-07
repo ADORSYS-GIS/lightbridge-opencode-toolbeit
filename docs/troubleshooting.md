@@ -394,7 +394,7 @@ The shipped `pnpm-workspace.yaml` allows these two by default (they're dependenc
 
 ## Traces arrive but metrics do not (`@vymalo/opencode-otel`)
 
-**What's happening.** This is very often not a failure at all. Traces and logs flush at `session.idle` (the natural turn boundary) plus `beforeExit`/`SIGINT`/`SIGTERM` for hard exits, so they tend to show up quickly. Metrics only export on their own periodic interval — `metricExportIntervalMs` / `OTEL_METRIC_EXPORT_INTERVAL`, **60 seconds by default** — which is not tied to session boundaries at all.
+**What's happening.** This is very often not a failure at all. Traces and logs flush at `session.idle` (the natural turn boundary) plus `beforeExit`/`SIGINT`/`SIGTERM` for hard exits (see [otel.md → Flushing](./otel.md#flushing)), so they tend to show up quickly. Metrics only export on their own periodic interval — `metricExportIntervalMs` / `OTEL_METRIC_EXPORT_INTERVAL`, **60 seconds by default** — which is not tied to session boundaries at all.
 
 **Look for.** No `otel_metrics_init_failed` and no `otel_export_failed` with `signal: "metrics"` — their absence plus an otherwise-quiet log is the signature of "just wait," not "something broke."
 
