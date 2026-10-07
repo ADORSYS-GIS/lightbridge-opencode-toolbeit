@@ -3,7 +3,9 @@
 // Namespace rule for this extension (issue #63):
 //
 // - Awaited / promise-chained extension API calls go through `browser` from
-//   `wxt/browser` (which resolves to `globalThis.browser ?? globalThis.chrome`).
+//   `wxt/browser` (which uses `globalThis.browser` only when
+//   `globalThis.browser?.runtime?.id` exists; otherwise it uses
+//   `globalThis.chrome`).
 //   Chromium's `chrome.*` returns promises, but Firefox's `chrome.*` is
 //   callback-only: awaiting it resolves to `undefined`, so e.g.
 //   `await chrome.tabs.create(...)` yields `undefined` and the follow-up `.id`

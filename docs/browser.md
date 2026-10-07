@@ -472,10 +472,11 @@ pnpm typecheck      # wxt prepare && tsc --noEmit
 ### Cross-browser extension API namespace
 
 Every **awaited** (or promise-chained) extension API call goes through `browser` from
-`wxt/browser` — that export resolves to `globalThis.browser ?? globalThis.chrome` and is
-promise-based on both browsers. Firefox's `chrome.*` namespace is callback-only, so awaiting it
-resolves to `undefined` there: the call fires but the result is lost, and the follow-up access
-throws (e.g. `await chrome.tabs.create(...)` → `.id of undefined`,
+`wxt/browser` — WXT selects `globalThis.browser` when `globalThis.browser?.runtime?.id` exists,
+otherwise it falls back to `globalThis.chrome`; the selected namespace is promise-based on both
+browsers. Firefox's `chrome.*` namespace is callback-only, so awaiting it resolves to `undefined`
+there: the call fires but the result is lost, and the follow-up access throws (e.g.
+`await chrome.tabs.create(...)` → `.id of undefined`,
 [issue #63](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/63)). `chrome.*`
 remains only where no promise is involved: event registration, synchronous calls
 (`runtime.getURL`), feature detection, the callback-style `cdp.ts` debugger calls, and the
