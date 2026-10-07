@@ -12,9 +12,10 @@ export default defineConfig({
       include: ["src/**"],
       reporter: ["text-summary"],
       // Floors a few points below current so a regression fails CI without
-      // brittle exact-match churn. The plugin-host wiring (process-exit drain,
-      // the OpenCode-logger adapter) lives in `@vymalo/opencode-otel`, not
-      // here — this package is the engine only.
+      // brittle exact-match churn. The plugin-host wiring (the OpenCode-logger
+      // adapter) lives in `@vymalo/opencode-otel`, not here. The process-exit
+      // drain is the one host seam that does live here (`exit-handlers.ts`,
+      // ADR-0018), tested against an injected process.
       thresholds: { statements: 92, branches: 82, functions: 89, lines: 92 }
     }
   }
