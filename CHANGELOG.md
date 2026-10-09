@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [0.17.2] — 2026-10-09
+
+Fixes the Firefox extension crash on `browser_open` (issue #63) and strengthens the cross-browser namespace guard.
+
+### Fixed
+
+- **browser-extension:** Firefox's `chrome.*` namespace is callback-only, so `await chrome.tabs.create(...)` resolved to `undefined` and the follow-up `.id` access threw. Every awaited or promise-chained extension API call now routes through `browser` from `wxt/browser` (which selects Firefox's promise namespace and falls back to Chromium's `chrome` namespace). Affected calls: `tabs.create`, `tabs.get`, `tabs.update`, `tabs.captureVisibleTab`, `windows.update`, `scripting.executeScript`, `action.setBadge*`, `runtime.sendMessage`, `cookies.*`. Event listeners (`runtime.onMessage`, `tabs.onRemoved`), synchronous calls (`runtime.getURL`, `runtime.lastError`), feature detection (`typeof chrome.debugger`), callback-style CDP calls (`debugger.attach/sendCommand/detach`), and serialized page functions remain on `chrome.*`. ([#124](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/124))
+
+- **browser-extension:** Restored the `typeof chrome !== "undefined"` guard in `hasTabGroups()` to avoid a potential `ReferenceError` if the `chrome` namespace is ever unavailable.
+
+- **browser-extension:** `popup/App.tsx` now uses `browser.runtime.openOptionsPage()` (was `chrome.runtime.openOptionsPage()`).
+
+### Added
+
+- **browser-extension:** `test/promise-namespace-guard.test.ts` now catches more violation patterns: direct `await chrome.*`, awaited bindings (`const x = chrome.tabs.create(...); await x`), `return chrome.*` from async functions, `Promise.all([chrome.*])`, and chained `.then()`/`.catch()`/`.finally()` calls. Allowed contexts (event listeners, sync calls, feature detection, CDP callbacks, page-injected code) are excluded via context-aware heuristics. The comment stripper is now string-aware, so `//` inside strings/templates no longer hides code.
+
+### Documentation
+
+- **browser-extension, browser, AGENTS.md, CLAUDE.md, global.d.ts:** Updated cross-browser namespace rule documentation to match the strengthened guard.
+
 ## [0.17.1] — 2026-09-18
 
 A dependency-only patch. No package's code changes in this release — it exists to carry a

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { browser } from "wxt/browser";
 
 import { Button } from "../../components/ui/button";
 import { naturalRect, type Rect, rectFromCorners, toNatural } from "../../lib/annotate";
@@ -39,7 +40,7 @@ function usePendingSession(): FeedbackSession | null {
   useEffect(() => {
     let alive = true;
     const load = (): void => {
-      void chrome.runtime
+      void browser.runtime
         .sendMessage({ type: "feedback:get-pending" })
         .then((r: FeedbackPendingResponse | undefined) => {
           if (alive) {
@@ -64,7 +65,7 @@ function usePendingSession(): FeedbackSession | null {
 }
 
 function respond(id: string, responded: boolean, annotations: unknown[]): void {
-  void chrome.runtime
+  void browser.runtime
     .sendMessage({
       type: "ocb-feedback-result",
       id,

@@ -7,6 +7,8 @@
  * result message, the timeout, or a `cancel()` (broker abandoned the command).
  * Whatever ends it, the overlay is torn down and the attention flag cleared.
  */
+import { browser } from "wxt/browser";
+
 import {
   type FeedbackAnnotation,
   type FeedbackMessage,
@@ -46,16 +48,16 @@ let attentionCount = 0;
 async function flagAttention(tabId: number): Promise<void> {
   attentionCount++;
   try {
-    await chrome.action.setBadgeBackgroundColor({ color: "#3b82f6" });
-    await chrome.action.setBadgeText({ text: "?" });
+    await browser.action.setBadgeBackgroundColor({ color: "#3b82f6" });
+    await browser.action.setBadgeText({ text: "?" });
   } catch {
     /* action API unavailable */
   }
   try {
-    const tab = await chrome.tabs.get(tabId);
-    await chrome.tabs.update(tabId, { active: true });
+    const tab = await browser.tabs.get(tabId);
+    await browser.tabs.update(tabId, { active: true });
     if (tab.windowId !== undefined) {
-      await chrome.windows.update(tab.windowId, { focused: true });
+      await browser.windows.update(tab.windowId, { focused: true });
     }
   } catch {
     /* tab/window gone */
@@ -69,7 +71,7 @@ async function clearAttention(): Promise<void> {
     return;
   }
   try {
-    await chrome.action.setBadgeText({ text: "" });
+    await browser.action.setBadgeText({ text: "" });
   } catch {
     /* action API unavailable */
   }
