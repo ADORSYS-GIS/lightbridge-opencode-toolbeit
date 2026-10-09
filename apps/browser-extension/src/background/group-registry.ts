@@ -7,7 +7,11 @@ import type { Executor } from "./executor";
 const LOAD_TIMEOUT_MS = 15_000;
 
 function hasTabGroups(): boolean {
-  return typeof browser.tabs?.group === "function" && !!browser.tabGroups;
+  return (
+    typeof chrome !== "undefined" &&
+    typeof browser.tabs?.group === "function" &&
+    !!browser.tabGroups
+  );
 }
 
 /** Wait until a tab finishes loading (or the timeout elapses). */

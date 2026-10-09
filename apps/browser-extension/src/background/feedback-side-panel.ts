@@ -76,7 +76,7 @@ export async function openSidePanelFallback(
       // can't open the panel ourselves — it needs the user's click.
       await sidePanelApi.setPanelBehavior?.({ openPanelOnActionClick: true });
     } else if (sidebarActionApi) {
-      await sidebarActionApi.setPanel({ panel: chrome.runtime.getURL(SIDE_PANEL_PATH) });
+      await sidebarActionApi.setPanel({ panel: browser.runtime.getURL(`/sidepanel.html`) });
     }
   } catch {
     activeSession = null;
