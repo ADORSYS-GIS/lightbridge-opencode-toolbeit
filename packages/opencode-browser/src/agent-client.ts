@@ -27,6 +27,8 @@ export interface AgentClientOptions {
   token: string;
   label?: string;
   timeoutMs: number;
+  /** Ceiling for the guest handshake; `connect()` rejects after it. Default 5000. */
+  connectTimeoutMs?: number;
 }
 
 /**
@@ -37,6 +39,14 @@ export interface AgentClientOptions {
  * before — otherwise the guest rejects locally while the executor keeps running.
  */
 const AGENT_TIMEOUT_GRACE_MS = 5_000;
+
+/**
+ * Default ceiling for the guest handshake (socket open -> broker `ready`).
+ * A broker port can stay bound by a dead process (on Windows a listen socket is
+ * inherited by child processes), so the TCP/WebSocket open succeeds but no
+ * `ready` frame ever arrives. Without a ceiling `connect()` never settles.
+ */
+const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 
 export interface AgentClientDeps {
   logger: Logger;
@@ -81,6 +91,25 @@ export class AgentClient implements AgentEndpoint {
   connect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
+      const connectTimeoutMs = this.opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+      const connectTimer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.deps.logger.debug("browser_guest_connect_timeout", {
+          url: this.opts.url,
+          timeoutMs: connectTimeoutMs
+        });
+        const socket = this.socket;
+        this.socket = null;
+        try {
+          socket?.close();
+        } catch {
+          // already closed
+        }
+        reject(new AgentClientError("bridge connect timed out", "connect_failed"));
+      }, connectTimeoutMs);
       this.socket = this.deps.createSocket(this.opts.url, {
         onOpen: () => {
           this.socket?.send(
@@ -101,6 +130,7 @@ export class AgentClient implements AgentEndpoint {
             }
             if (!settled) {
               settled = true;
+              clearTimeout(connectTimer);
               resolve();
             }
           } else if (frame.type === "result") {
@@ -113,6 +143,7 @@ export class AgentClient implements AgentEndpoint {
           this.socket = null;
           if (!settled) {
             settled = true;
+            clearTimeout(connectTimer);
             reject(new AgentClientError("bridge connection closed before ready", "connect_failed"));
           }
           if (!this.closed) {

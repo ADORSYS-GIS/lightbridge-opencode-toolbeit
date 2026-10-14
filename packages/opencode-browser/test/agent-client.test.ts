@@ -135,6 +135,52 @@ const READY = encodeFrame({
   clientId: "a1"
 });
 
+describe("AgentClient connect handshake timeout", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("rejects connect() when the broker never answers `ready`", async () => {
+    const fs = fakeSocket();
+    const client = new AgentClient(
+      { url: "ws://x", token: "t", timeoutMs: 1000, connectTimeoutMs: 2000 },
+      { logger: noopLogger, createSocket: fs.factory }
+    );
+    const cp = client.connect();
+    const settled = cp.then(
+      () => "resolved",
+      (err: unknown) => err
+    );
+    fs.handlers().onOpen();
+    await vi.advanceTimersByTimeAsync(2000);
+    const err = await settled;
+    expect(err).toBeInstanceOf(AgentClientError);
+    expect((err as AgentClientError).code).toBe("connect_failed");
+  });
+
+  it("does not time out once the broker answered `ready`", async () => {
+    const fs = fakeSocket();
+    const client = new AgentClient(
+      { url: "ws://x", token: "t", timeoutMs: 1000, connectTimeoutMs: 2000 },
+      { logger: noopLogger, createSocket: fs.factory }
+    );
+    const cp = client.connect();
+    fs.handlers().onOpen();
+    fs.handlers().onMessage(
+      encodeFrame({
+        v: PROTOCOL_VERSION,
+        type: "ready",
+        server: "opencode-browser",
+        protocol: PROTOCOL_VERSION,
+        role: "agent",
+        clientId: "a1"
+      })
+    );
+    await cp;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(cp).resolves.toBeUndefined();
+  });
+});
+
 describe("AgentClient lifecycle & results", () => {
   it("resolves connect() only after the broker replies ready", async () => {
     const fs = fakeSocket();
