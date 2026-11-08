@@ -68,6 +68,8 @@ Options (all optional):
 | `timeoutMs` | `30000` | Default per-command timeout before the tool call rejects. A tool may request a longer per-command deadline (e.g. `browser_request_feedback`), capped at 10 min. |
 | `screenshotDir` | `".opencode/browser"` | Where screenshots are written (relative paths resolve against the session worktree). |
 
+**Guest handshake timeout.** When another process already hosts the bridge, this one joins as a guest and waits for the broker's `ready` frame. A port left bound by a dead process accepts the socket but never answers, so the handshake is bounded: after `connectTimeoutMs` (default `5000`) the attempt is abandoned (logged `browser_guest_connect_timeout` at debug), its socket is closed and any late close from it is ignored, and the endpoint retries election after `reelectMs` (default `500`). Embedders using `createEndpoint` can tune it via the `connectTimeoutMs` endpoint option; the plugin's own options do not expose it.
+
 On first run with no `token`, watch the log for:
 
 ```
