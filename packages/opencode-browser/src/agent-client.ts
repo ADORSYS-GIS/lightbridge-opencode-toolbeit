@@ -101,6 +101,11 @@ export class AgentClient implements AgentEndpoint {
           url: this.opts.url,
           timeoutMs: connectTimeoutMs
         });
+        // Abandon this attempt: `ws.close()` against a non-responsive peer can take
+        // ~30s to actually fire `onClose`. Marking the client closed makes that late
+        // close inert (it must not trigger the endpoint's re-election and wipe a
+        // later, successful election). Same flag `stop()` uses.
+        this.closed = true;
         const socket = this.socket;
         this.socket = null;
         try {
@@ -110,47 +115,57 @@ export class AgentClient implements AgentEndpoint {
         }
         reject(new AgentClientError("bridge connect timed out", "connect_failed"));
       }, connectTimeoutMs);
-      this.socket = this.deps.createSocket(this.opts.url, {
-        onOpen: () => {
-          this.socket?.send(
-            encodeFrame(helloFrame(this.opts.token, { role: "agent", client: this.opts.label }))
-          );
-          // Resolve only once the broker replies `ready`.
-        },
-        onMessage: (data) => {
-          const frame = decodeFrame(data);
-          if (!frame) {
-            return;
-          }
-          if (frame.type === "ready") {
-            this.ready = true;
-            this.deps.logger.trace("browser_guest_ready", { label: this.opts.label });
-            for (const w of this.readyWaiters.splice(0)) {
-              w();
+      // A pending handshake must not keep the process alive on its own.
+      connectTimer.unref?.();
+      try {
+        this.socket = this.deps.createSocket(this.opts.url, {
+          onOpen: () => {
+            this.socket?.send(
+              encodeFrame(helloFrame(this.opts.token, { role: "agent", client: this.opts.label }))
+            );
+            // Resolve only once the broker replies `ready`.
+          },
+          onMessage: (data) => {
+            const frame = decodeFrame(data);
+            if (!frame) {
+              return;
             }
+            if (frame.type === "ready") {
+              this.ready = true;
+              this.deps.logger.trace("browser_guest_ready", { label: this.opts.label });
+              for (const w of this.readyWaiters.splice(0)) {
+                w();
+              }
+              if (!settled) {
+                settled = true;
+                clearTimeout(connectTimer);
+                resolve();
+              }
+            } else if (frame.type === "result") {
+              this.handleResult(frame);
+            }
+          },
+          onClose: () => {
+            this.ready = false;
+            this.rejectAllPending(new AgentClientError("disconnected from bridge", "disconnected"));
+            this.socket = null;
             if (!settled) {
               settled = true;
               clearTimeout(connectTimer);
-              resolve();
+              reject(
+                new AgentClientError("bridge connection closed before ready", "connect_failed")
+              );
             }
-          } else if (frame.type === "result") {
-            this.handleResult(frame);
+            if (!this.closed) {
+              this.deps.onClose?.();
+            }
           }
-        },
-        onClose: () => {
-          this.ready = false;
-          this.rejectAllPending(new AgentClientError("disconnected from bridge", "disconnected"));
-          this.socket = null;
-          if (!settled) {
-            settled = true;
-            clearTimeout(connectTimer);
-            reject(new AgentClientError("bridge connection closed before ready", "connect_failed"));
-          }
-          if (!this.closed) {
-            this.deps.onClose?.();
-          }
-        }
-      });
+        });
+      } catch (err) {
+        settled = true;
+        clearTimeout(connectTimer);
+        reject(err);
+      }
     });
   }
 

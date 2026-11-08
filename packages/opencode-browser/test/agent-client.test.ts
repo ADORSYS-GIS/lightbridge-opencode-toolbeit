@@ -181,6 +181,109 @@ describe("AgentClient connect handshake timeout", () => {
   });
 });
 
+describe("AgentClient handshake timeout edge cases", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const readyFrame = encodeFrame({
+    v: PROTOCOL_VERSION,
+    type: "ready",
+    server: "opencode-browser",
+    protocol: PROTOCOL_VERSION,
+    role: "agent",
+    clientId: "a1"
+  });
+
+  it("an abandoned socket's late close does not invoke deps.onClose (stale re-election)", async () => {
+    const fs = fakeSocket();
+    const onClose = vi.fn();
+    const client = new AgentClient(
+      { url: "ws://x", token: "t", timeoutMs: 1000, connectTimeoutMs: 2000 },
+      { logger: noopLogger, createSocket: fs.factory, onClose }
+    );
+    const settled = client.connect().then(
+      () => "resolved",
+      (err: unknown) => err
+    );
+    fs.handlers().onOpen();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await settled).toBeInstanceOf(AgentClientError);
+    // ws.close() against a dead peer fires onClose much later (~30s).
+    fs.handlers().onClose();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("a real close before the timeout still notifies deps.onClose once", async () => {
+    const fs = fakeSocket();
+    const onClose = vi.fn();
+    const client = new AgentClient(
+      { url: "ws://x", token: "t", timeoutMs: 1000, connectTimeoutMs: 2000 },
+      { logger: noopLogger, createSocket: fs.factory, onClose }
+    );
+    const settled = client.connect().then(
+      () => "resolved",
+      (err: unknown) => err
+    );
+    fs.handlers().onClose();
+    expect(((await settled) as AgentClientError).code).toBe("connect_failed");
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000); // timer was cleared: no second settle/log
+  });
+
+  it("timeout then late ready/close does not double-settle or revive the client", async () => {
+    const fs = fakeSocket();
+    const debug = vi.fn();
+    const client = new AgentClient(
+      { url: "ws://x", token: "t", timeoutMs: 1000, connectTimeoutMs: 2000 },
+      { logger: { ...noopLogger, debug }, createSocket: fs.factory }
+    );
+    const results: string[] = [];
+    const cp = client.connect().then(
+      () => results.push("resolved"),
+      () => results.push("rejected")
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    fs.handlers().onMessage(readyFrame);
+    fs.handlers().onClose();
+    await cp;
+    expect(results).toEqual(["rejected"]);
+    expect(debug).toHaveBeenCalledTimes(1);
+  });
+
+  it("ready racing the timer clears it: a later close is not a timeout", async () => {
+    const fs = fakeSocket();
+    const debug = vi.fn();
+    const client = new AgentClient(
+      { url: "ws://x", token: "t", timeoutMs: 1000, connectTimeoutMs: 2000 },
+      { logger: { ...noopLogger, debug }, createSocket: fs.factory }
+    );
+    const cp = client.connect();
+    fs.handlers().onMessage(readyFrame);
+    await cp;
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(debug).not.toHaveBeenCalled();
+  });
+
+  it("clears the timer and rejects when createSocket throws synchronously", async () => {
+    const debug = vi.fn();
+    const client = new AgentClient(
+      { url: "ws://x", token: "t", timeoutMs: 1000, connectTimeoutMs: 2000 },
+      {
+        logger: { ...noopLogger, debug },
+        createSocket: () => {
+          throw new Error("boom");
+        }
+      }
+    );
+    await expect(client.connect()).rejects.toThrow("boom");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(debug).not.toHaveBeenCalled();
+  });
+});
+
 describe("AgentClient lifecycle & results", () => {
   it("resolves connect() only after the broker replies ready", async () => {
     const fs = fakeSocket();
