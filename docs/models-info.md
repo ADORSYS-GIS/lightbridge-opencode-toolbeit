@@ -101,6 +101,14 @@ The fetch sends the union of the provider's `options.headers` and the meta-speci
 
 If the metadata endpoint needs a *different* credential than inference (e.g. a service-account token), set `meta.modelsInfoHeaders.Authorization` — it overrides whatever the provider carries.
 
+> **Under the OpenCode v2 API the bearer lives on `Provider.Info.headers`.** v2 has no `options`
+> object, so the oauth2 side (via `@vymalo/opencode-provider-sync`) stamps
+> `Provider.Info.headers.Authorization` instead, and "list oauth2 first" becomes transform
+> registration order. The precise contract — where it is written, when it is absent, the ordering
+> guarantee and what this plugin must do about transforms being synchronous — is in
+> [provider-sync.md → The `Authorization` handoff](./provider-sync.md#the-authorization-handoff-to-models-info-v2-contract).
+> This page still describes the v1 `options.headers` shape until models-info itself is ported.
+
 > **Why this works with oauth2 without coupling.** The two plugins never import each other. oauth2 writes its token into the shared, already-resolved provider config; this plugin reads whatever is there. The oauth2 `chat.headers` hook still injects a freshly-refreshed token per chat request, so a slightly-stale config-time header can only ever affect *this* plugin's metadata fetch — never the actual inference call.
 
 ## URL resolution

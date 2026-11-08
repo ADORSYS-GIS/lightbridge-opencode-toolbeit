@@ -350,25 +350,12 @@ importers:
 
   packages/opencode-provider-sync:
     dependencies:
-      '@opencode-ai/plugin':
-        specifier: 1.18.32
-        version: 1.18.32
-      '@vymalo/opencode-auth-core':
-        specifier: workspace:*
-        version: link:../opencode-auth-core
-    devDependencies:
-      vite:
-        specifier: ^8.3.0
-        version: 8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1)
-      vitest:
-        specifier: ^5.0.1
-        version: 5.1.0(@opentelemetry/api@1.9.1)(@types/node@25.9.1)(@vitest/coverage-v8@5.0.1(vitest@5.0.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
-
-  packages/opencode-ratelimit:
-    dependencies:
       '@opencode/plugin':
         specifier: 2.2.6
         version: 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
+      '@vymalo/opencode-auth-core':
+        specifier: workspace:*
+        version: link:../opencode-auth-core
     devDependencies:
       effect:
         specifier: 4.1.0
@@ -379,6 +366,22 @@ importers:
       vitest:
         specifier: ^5.0.1
         version: 5.1.0(@opentelemetry/api@1.9.0)(@types/node@25.9.1)(@vitest/coverage-v8@5.0.1(vitest@5.0.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
+
+  packages/opencode-ratelimit:
+    dependencies:
+      '@opencode/plugin':
+        specifier: 2.2.6
+        version: 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
+    devDependencies:
+      effect:
+        specifier: 4.1.0
+        version: 4.1.0
+      vite:
+        specifier: ^8.3.0
+        version: 8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1)
+      vitest:
+        specifier: ^5.0.1
+        version: 5.1.0(@opentelemetry/api@1.9.1)(@types/node@25.9.1)(@vitest/coverage-v8@5.0.1(vitest@5.0.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
 
   packages/opencode-repo-auth:
     dependencies:
@@ -4064,6 +4067,16 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
+  '@effect/platform-node@4.1.0(effect@4.1.0)(redis@6.3.1(@opentelemetry/api@1.9.1))':
+    dependencies:
+      '@effect/platform-node-shared': 4.1.0(effect@4.1.0)
+      effect: 4.1.0
+      redis: 6.3.1(@opentelemetry/api@1.9.1)
+      undici: 8.12.4
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@gar/promise-retry@1.0.3': {}
 
   '@hono/node-server@1.19.14(hono@4.12.25)':
@@ -4333,6 +4346,25 @@ snapshots:
       - supports-color
       - utf-8-validate
 
+  '@opencode/plugin@2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))':
+    dependencies:
+      '@ai-sdk/provider': 3.0.8
+      '@opencode/ai': 2.2.6
+      '@opencode/client': 2.2.6(effect@4.1.0)
+      '@opencode/protocol': 2.2.6
+      '@opencode/schema': 2.2.6
+      '@opencode/util': 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.1))
+      effect: 4.1.0
+    optionalDependencies:
+      vite: 8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1)
+    transitivePeerDependencies:
+      - '@opentelemetry/sdk-trace-web'
+      - '@opentelemetry/semantic-conventions'
+      - bufferutil
+      - redis
+      - supports-color
+      - utf-8-validate
+
   '@opencode/protocol@2.2.6':
     dependencies:
       '@opencode/schema': 2.2.6
@@ -4347,6 +4379,38 @@ snapshots:
     dependencies:
       '@effect/opentelemetry': 4.1.0(@opentelemetry/api-logs@0.219.0)(@opentelemetry/api@1.9.0)(@opentelemetry/resources@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-logs@0.219.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-node@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)
       '@effect/platform-node': 4.1.0(effect@4.1.0)(redis@6.3.1(@opentelemetry/api@1.9.0))
+      '@effect/platform-node-shared': 4.1.0(effect@4.1.0)
+      '@npmcli/arborist': 9.4.0
+      '@npmcli/config': 10.8.1
+      '@opentelemetry/api': 1.9.0
+      '@opentelemetry/api-logs': 0.219.0
+      '@opentelemetry/context-async-hooks': 2.8.0(@opentelemetry/api@1.9.0)
+      '@opentelemetry/exporter-trace-otlp-http': 0.219.0(@opentelemetry/api@1.9.0)
+      '@opentelemetry/resources': 2.8.0(@opentelemetry/api@1.9.0)
+      '@opentelemetry/sdk-logs': 0.219.0(@opentelemetry/api@1.9.0)
+      '@opentelemetry/sdk-metrics': 2.8.0(@opentelemetry/api@1.9.0)
+      '@opentelemetry/sdk-trace-base': 2.8.0(@opentelemetry/api@1.9.0)
+      '@opentelemetry/sdk-trace-node': 2.8.0(@opentelemetry/api@1.9.0)
+      cross-spawn: 7.0.6
+      effect: 4.1.0
+      glob: 13.0.5
+      mime-types: 3.0.2
+      minimatch: 10.2.5
+      npm-package-arg: 13.0.2
+      open: 11.0.4
+      pacote: 21.5.1
+    transitivePeerDependencies:
+      - '@opentelemetry/sdk-trace-web'
+      - '@opentelemetry/semantic-conventions'
+      - bufferutil
+      - redis
+      - supports-color
+      - utf-8-validate
+
+  '@opencode/util@2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.1))':
+    dependencies:
+      '@effect/opentelemetry': 4.1.0(@opentelemetry/api-logs@0.219.0)(@opentelemetry/api@1.9.0)(@opentelemetry/resources@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-logs@0.219.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-node@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)
+      '@effect/platform-node': 4.1.0(effect@4.1.0)(redis@6.3.1(@opentelemetry/api@1.9.1))
       '@effect/platform-node-shared': 4.1.0(effect@4.1.0)
       '@npmcli/arborist': 9.4.0
       '@npmcli/config': 10.8.1
@@ -4601,21 +4665,41 @@ snapshots:
     dependencies:
       '@redis/client': 6.3.1(@opentelemetry/api@1.9.0)
 
+  '@redis/bloom@6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.1))':
+    dependencies:
+      '@redis/client': 6.3.1(@opentelemetry/api@1.9.1)
+
   '@redis/client@6.3.1(@opentelemetry/api@1.9.0)':
     optionalDependencies:
       '@opentelemetry/api': 1.9.0
+
+  '@redis/client@6.3.1(@opentelemetry/api@1.9.1)':
+    optionalDependencies:
+      '@opentelemetry/api': 1.9.1
 
   '@redis/json@6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.0))':
     dependencies:
       '@redis/client': 6.3.1(@opentelemetry/api@1.9.0)
 
+  '@redis/json@6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.1))':
+    dependencies:
+      '@redis/client': 6.3.1(@opentelemetry/api@1.9.1)
+
   '@redis/search@6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.0))':
     dependencies:
       '@redis/client': 6.3.1(@opentelemetry/api@1.9.0)
 
+  '@redis/search@6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.1))':
+    dependencies:
+      '@redis/client': 6.3.1(@opentelemetry/api@1.9.1)
+
   '@redis/time-series@6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.0))':
     dependencies:
       '@redis/client': 6.3.1(@opentelemetry/api@1.9.0)
+
+  '@redis/time-series@6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.1))':
+    dependencies:
+      '@redis/client': 6.3.1(@opentelemetry/api@1.9.1)
 
   '@rolldown/binding-android-arm-eabi@1.2.9':
     optional: true
@@ -6315,6 +6399,17 @@ snapshots:
       '@redis/json': 6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.0))
       '@redis/search': 6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.0))
       '@redis/time-series': 6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.0))
+    transitivePeerDependencies:
+      - '@node-rs/xxhash'
+      - '@opentelemetry/api'
+
+  redis@6.3.1(@opentelemetry/api@1.9.1):
+    dependencies:
+      '@redis/bloom': 6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.1))
+      '@redis/client': 6.3.1(@opentelemetry/api@1.9.1)
+      '@redis/json': 6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.1))
+      '@redis/search': 6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.1))
+      '@redis/time-series': 6.3.1(@redis/client@6.3.1(@opentelemetry/api@1.9.1))
     transitivePeerDependencies:
       - '@node-rs/xxhash'
       - '@opentelemetry/api'

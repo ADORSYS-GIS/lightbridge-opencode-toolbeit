@@ -28,25 +28,25 @@ export type {
   ServerSnapshot
 } from "./types.js";
 
-// Host-config wiring helpers for an OpenCode plugin composing the engine
-// above. Each consumer supplies its own config-key literals and (optionally)
-// a Responses-API SSE repair hook — see opencode-helpers.ts's module doc.
+// Provider-editor wiring helpers for an OpenCode v2 plugin composing the
+// engine above. Each consumer supplies its own `settings` opt-in key literals
+// and passes its `ctx.options` — see opencode-helpers.ts's module doc.
 export {
-  applyResponsesApiOptions,
+  applyResponsesApiSettings,
   collectManagedProviders,
   mergeDiscoveredModels,
   parseOAuthExtension,
-  parsePluginConfigServers,
+  parsePluginOptionsServers,
   propagateCachedBearer,
-  resolveProviderNpm,
+  resolveCachedBearer,
+  resolveProviderPackage,
   runtimeSignature,
-  type ApplyResponsesApiOptionsHooks,
   type CollectManagedProvidersOptions,
+  type HasProviderSettings,
   type ManagedProviders,
-  type OpenCodeConfig,
-  type OpenCodeModelConfig,
-  type OpenCodeProviderConfig,
-  type OpenCodeProviderMap,
+  type ModelInfo,
+  type ProviderEditor,
   type ProviderExtension,
+  type ProviderInfo,
   type ProviderServerConfigInput
 } from "./opencode-helpers.js";

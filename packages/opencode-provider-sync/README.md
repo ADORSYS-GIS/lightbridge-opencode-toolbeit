@@ -24,27 +24,30 @@ share it instead of forking it.
 - `cache.ts` — `resolveCacheDir(segment, namespace)` + `FileCacheStore`, the
   fused model+token on-disk state, atomic-write via auth-core's generic store.
 - `scheduler.ts` — a backoff-retrying interval runner.
-- Host-config wiring helpers (`./lib` only) — `collectManagedProviders`,
-  `parsePluginConfigServers`, `parseOAuthExtension`, `mergeDiscoveredModels`,
-  `propagateCachedBearer`, `resolveProviderNpm`, `applyResponsesApiOptions`,
-  `runtimeSignature` — the `Hooks.config` plumbing a consumer plugin composes
-  with its **own** config-key literals (see below).
+- Provider-editor wiring helpers (`./lib` only) — `collectManagedProviders`,
+  `parsePluginOptionsServers`, `parseOAuthExtension`, `mergeDiscoveredModels`,
+  `resolveCachedBearer` / `propagateCachedBearer`, `resolveProviderPackage`,
+  `applyResponsesApiSettings`, `runtimeSignature` — the OpenCode v2
+  `ProviderEditor` plumbing a consumer plugin composes inside
+  `ctx.provider.transform`, with its **own** settings-key literals (see below).
+  Targets `@opencode/plugin` v2 ([ADR-0019](../../docs/adr/0019-opencode-v2-cutover.md));
+  `effect` is a peer dependency supplied by the host.
 
 ## What it deliberately does NOT own
 
-- **Config-key literals.** Which `pluginConfig.<key>` / `provider.options.<key>`
-  a consumer reads is its own config surface — passed in as
-  `pluginConfigKey` / `optionKeys` options, never hardcoded here. oauth2's are
-  `"oauth2ModelSync"` and `["oauth2", "oauth2ModelSync"]`.
+- **Settings-key literals.** Which `provider.settings.<key>` a consumer reads
+  is its own config surface — passed in as the `settingsKeys` option, never
+  hardcoded here. oauth2's are `["oauth2", "oauth2ModelSync"]`. The plugin's
+  own options (`ctx.options`) are handed in by the caller.
 - **Auth-subset validation.** A consumer's own config module (layered on
   `@vymalo/opencode-auth-core`'s `validateAuthConfig`) normalizes/validates
   servers before constructing the engine — the engine accepts already-valid
   `ProviderServerConfig` objects and does no field-level validation of its own
   beyond "servers must be a non-empty array".
-- **The Responses-API SSE repair fetch.** Gateway-specific (observed: Envoy AI
-  Gateway) — a consumer injects its own `createResponsesRepairFetch`-shaped
-  hook via `ApplyResponsesApiOptionsHooks` / `CollectManagedProvidersOptions`;
-  this package never imports or implements the repair itself.
+- **The Responses-API SSE repair.** Gateway-specific (observed: Envoy AI
+  Gateway). v1 installed it as `provider.options.fetch`; `Provider.Info` has no
+  `fetch`, so this package no longer offers a hook for it — a consumer that
+  needs it registers `session.hook("http.response")` itself.
 
 ## Usage
 
@@ -61,28 +64,29 @@ await engine.start({ warmup: true });
 const token = await engine.ensureAccessToken("my-server");
 ```
 
-For the full surface (host-config helpers, cache, scheduler) import from
+For the full surface (editor helpers, cache, scheduler) import from
 `@vymalo/opencode-provider-sync/lib`.
 
-## Composing the `Hooks.config` wiring
+## Composing the provider-editor wiring
 
-A consumer plugin supplies its own config-key literals and (optionally) a
-Responses-API repair hook, then delegates the rest:
+A consumer plugin supplies its own settings-key literals and its `ctx.options`,
+then delegates the rest from inside `ctx.provider.transform` (callbacks must be
+synchronous — resolve tokens beforehand with `resolveCachedBearer`, then
+`ctx.provider.reload()`):
 
 ```ts
-import {
-  collectManagedProviders,
-  mergeDiscoveredModels,
-  propagateCachedBearer,
-  runtimeSignature
-} from "@vymalo/opencode-provider-sync/lib";
+import { collectManagedProviders } from "@vymalo/opencode-provider-sync/lib";
 
-const managed = collectManagedProviders(config, logger, {
-  pluginConfigKey: "myPluginModelSync",
-  optionKeys: ["myPlugin", "myPluginModelSync"],
-  createResponsesRepairFetch: myOwnRepairFetch // optional
+yield* ctx.provider.transform((editor) => {
+  const managed = collectManagedProviders(editor, ctx.options, logger, {
+    settingsKeys: ["myPlugin", "myPluginModelSync"]
+  });
 });
 ```
+
+The `Authorization` handoff to `@vymalo/opencode-models-info`
+(`Provider.Info.headers`) is specified in
+[`docs/provider-sync.md`](../../docs/provider-sync.md#the-authorization-handoff-to-models-info-v2-contract).
 
 ## Scheduler ownership (ADR-0017)
 
