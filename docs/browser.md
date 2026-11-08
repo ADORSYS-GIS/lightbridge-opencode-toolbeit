@@ -45,12 +45,12 @@ shapes that into output for the model.
 ### 1. Enable the plugin
 
 Add it to your OpenCode config (or serve it from a `.well-known/opencode` document). The
-second tuple element is the plugin's options:
+plugin entry's `options` configure it (OpenCode v2; see [ADR-0019](adr/0019-opencode-v2-cutover.md)):
 
 ```jsonc
 {
-  "plugin": [
-    ["@vymalo/opencode-browser", { "port": 4517 }]
+  "plugins": [
+    { "package": "@vymalo/opencode-browser", "options": { "port": 4517 } }
   ]
 }
 ```
@@ -66,7 +66,8 @@ Options (all optional):
 | `executor` | `"auto"` | Forwarded executor preference: `auto` \| `cdp` \| `content`. |
 | `groups` | `["page","control"]` | Which tool groups to register (`page` \| `control` \| `debug` \| `interactive`). `debug` and `interactive` are opt-in. |
 | `timeoutMs` | `30000` | Default per-command timeout before the tool call rejects. A tool may request a longer per-command deadline (e.g. `browser_request_feedback`), capped at 10 min. |
-| `screenshotDir` | `".opencode/browser"` | Where screenshots are written (relative paths resolve against the session worktree). |
+| `screenshotDir` | `".opencode/browser"` | Where screenshots are written (relative paths resolve against the plugin's project directory). |
+| `logLevel` | `"info"` | Plugin log gate; falls back to `OPENCODE_LOG_LEVEL`. The host's own minimum (default `Info`) applies too, so `debug`/`trace` also need `OPENCODE_LOG_LEVEL=DEBUG`. |
 
 **Guest handshake timeout.** When another process already hosts the bridge, this one joins as a guest and waits for the broker's `ready` frame. A port left bound by a dead process accepts the socket but never answers, so the handshake is bounded: after `connectTimeoutMs` (default `5000`) the attempt is abandoned (logged `browser_guest_connect_timeout` at debug), its socket is closed and any late close from it is ignored, and the endpoint retries election after `reelectMs` (default `500`). Embedders using `createEndpoint` can tune it via the `connectTimeoutMs` endpoint option; the plugin's own options do not expose it.
 
@@ -222,7 +223,7 @@ form.) Recommended pattern — register the full surface once, scope per agent w
 
 ```jsonc
 {
-  "plugin": [["@vymalo/opencode-browser", { "groups": ["page", "control", "debug"] }]],   // global
+  "plugins": [{ "package": "@vymalo/opencode-browser", "options": { "groups": ["page", "control", "debug"] } }],   // global
   "agent": {
     "researcher": {
       "permission": {
@@ -258,9 +259,26 @@ absolute `x`/`y` coordinates.
 ### Screenshots — disk + the `read` tool
 
 OpenCode tool results are **text only** — there's no image channel. So `browser_screenshot`
-writes the PNG to `<worktree>/.opencode/browser/<group>/<timestamp>.png` and returns the path.
+writes the PNG to `<project dir>/.opencode/browser/<group>/<timestamp>.png` and returns the path.
 The model then **`read`s that path** to view the image (OpenCode's `read` tool emits an image
 part). The extension also keeps a copy in IndexedDB for the dashboard gallery.
+
+## OpenCode v2 integration
+
+`src/opencode.ts` is a `Plugin.define({ id: "vymalo.browser", effect })` on the Effect surface:
+
+- **Tools** — `ctx.tool.transform(editor => editor.add(...))` registers the catalog's tools with
+  `input` = `toJsonSchema(spec.input)`, the same JSON Schema the MCP server emits. `execute`
+  returns an `Effect`; the bridge `send` runs in `Effect.tryPromise`, whose `AbortSignal` fires on
+  host interruption and still drives the broker's `cancel` frame (feedback overlay teardown).
+  `ToolEditor.namespace` is **not** used: its effect on the effective tool name is not
+  documented, and renaming `browser_*` would break users' permission rules.
+- **Lifecycle** — the endpoint (host broker *or* guest socket) is acquired into the plugin scope
+  with `Effect.acquireRelease`; closing the scope stops the `ws` listener, so the next process can
+  win the bind. Known gap: sockets already connected to a stopped host are not closed by
+  `ws`'s `close()` (the transport is outside the v2 port's scope).
+- **Logging** — `captureHostContext` inside the plugin fiber + `createEffectLogger`, so records go
+  to the host file logger (ADR-0014). Level: `options.logLevel`, then `OPENCODE_LOG_LEVEL`.
 
 ## Named groups
 
@@ -310,7 +328,7 @@ command transparently re-attaches):
 
 - **`browser_release`** — the model/plugin calls it when done. The bridge sends a `release`
   frame and the extension detaches.
-- **OpenCode exits** — the plugin's `exit` hook calls `bridge.shutdown()` (a `release` frame +
+- **OpenCode exits** — the plugin scope closing (plus a process `exit` safety net) calls `endpoint.shutdown()` (a `release` frame +
   server stop), and the dropped socket independently triggers the extension to release. So a
   hard kill releases too.
 - **Manual** — the dashboard's Disconnect still works, and so does the `chrome.debugger` banner's
