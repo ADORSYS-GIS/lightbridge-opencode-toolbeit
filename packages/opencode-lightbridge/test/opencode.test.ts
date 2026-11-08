@@ -1,23 +1,20 @@
-import type { PluginInput } from "@opencode-ai/plugin";
-import { InMemorySpanExporter } from "@opentelemetry/sdk-trace";
 import { InMemoryLogRecordExporter } from "@opentelemetry/sdk-logs";
+import { InMemorySpanExporter } from "@opentelemetry/sdk-trace";
+import { Effect, Logger, References } from "effect";
 import { describe, expect, it, vi } from "vitest";
 
-import type { TokenSource } from "@vymalo/opencode-core-otel";
 import type { TokenSet } from "@vymalo/opencode-auth-core/lib";
+import type { TokenSource } from "@vymalo/opencode-core-otel";
 
-import { createLightbridgePlugin } from "../src/opencode.js";
-import type { LightbridgeRuntimeFactory, LightbridgeRuntimeLike } from "../src/plugin.js";
+import type { LightbridgePluginFactoryOptions } from "../src/opencode.js";
+import { createLightbridgePlugin, PLUGIN_ID } from "../src/opencode.js";
+import type {
+  LightbridgeRuntimeFactory,
+  LightbridgeRuntimeLike,
+  LightbridgeRuntimeOptions
+} from "../src/plugin.js";
+import { startPlugin } from "./harness.js";
 import { createRecordingLogger, createSilentLogger, makeAuth } from "./helpers.js";
-
-function pluginInput(): PluginInput {
-  return {
-    client: { app: { log: vi.fn().mockResolvedValue(undefined) } },
-    project: { id: "toolbelt" },
-    directory: "/repo",
-    worktree: "/repo"
-  } as unknown as PluginInput;
-}
 
 function makeToken(overrides: Partial<TokenSet> = {}): TokenSet {
   return {
@@ -45,223 +42,212 @@ function makeSpyRuntime(
   };
 }
 
-/** Builds a `runtimeFactory` that always returns `runtime` and counts calls. */
+/** Builds a `runtimeFactory` that always returns `runtime` and records each construction. */
 function fixedRuntimeFactory(runtime: LightbridgeRuntimeLike): {
   factory: LightbridgeRuntimeFactory;
-  calls: number[];
+  built: LightbridgeRuntimeOptions[];
 } {
-  const calls: number[] = [];
-  const factory: LightbridgeRuntimeFactory = (_auth, _projectId, _options) => {
-    calls.push(calls.length);
+  const built: LightbridgeRuntimeOptions[] = [];
+  const factory: LightbridgeRuntimeFactory = (_auth, _projectId, options) => {
+    built.push(options);
     return runtime;
   };
-  return { factory, calls };
+  return { factory, built };
 }
 
+const NO_EXPORTERS = { trace: () => undefined, metric: () => undefined, log: () => undefined };
+
+function start(
+  options: Record<string, unknown>,
+  factory: Partial<LightbridgePluginFactoryOptions> = {}
+) {
+  return startPlugin({
+    options,
+    factory: { deferredTimeoutMs: 5, exporters: NO_EXPORTERS, ...factory }
+  });
+}
+
+const requestEvent = (providerID: string, headers: Record<string, string> = {}) => ({
+  model: { id: "glm-5", providerID },
+  headers
+});
+
+describe("plugin identity", () => {
+  it("uses the stable id vymalo.lightbridge", () => {
+    expect(PLUGIN_ID).toBe("vymalo.lightbridge");
+    expect(createLightbridgePlugin().id).toBe("vymalo.lightbridge");
+  });
+});
+
 describe("createLightbridgePlugin — config validation", () => {
-  it("returns inert hooks (only config) rather than throwing on malformed options", async () => {
+  it("registers nothing (and does not throw) on malformed options", async () => {
     const logger = createRecordingLogger();
-    const hooks = await createLightbridgePlugin({ logger, registerProcessHandlers: false })(
-      pluginInput(),
-      { gateway: { providers: ["gateway"] } } // missing `auth`
-    );
-    expect(hooks["chat.headers"]).toBeUndefined();
-    expect(hooks.event).toBeUndefined();
-    expect(hooks.config).toBeDefined();
-    await expect(hooks.config?.({ logLevel: "INFO" } as never)).resolves.toBeUndefined();
+    const harness = await start({ gateway: { providers: ["gateway"] } }, { logger });
+    expect(harness.hooks.size).toBe(0);
     expect(logger.events.some((e) => e.event === "lightbridge_config_invalid")).toBe(true);
   });
 });
 
 describe("createLightbridgePlugin — auth-only (inert)", () => {
-  it("activates neither module when only `auth` is configured", async () => {
+  it("activates no module when only `auth` is configured", async () => {
     const logger = createRecordingLogger();
-    const hooks = await createLightbridgePlugin({ logger, registerProcessHandlers: false })(
-      pluginInput(),
-      { auth: makeAuth() }
-    );
-    expect(hooks["chat.headers"]).toBeUndefined();
-    expect(hooks.event).toBeUndefined();
-    expect(hooks["tool.execute.before"]).toBeUndefined();
-    expect(hooks.config).toBeDefined();
+    const harness = await start({ auth: makeAuth() }, { logger });
+    expect(harness.hooks.size).toBe(0);
     expect(logger.events.some((e) => e.event === "lightbridge_plugin_ready")).toBe(true);
   });
 });
 
 describe("createLightbridgePlugin — gateway module", () => {
-  it("injects the shared project bearer on a managed provider", async () => {
+  const gatewayOptions = {
+    auth: makeAuth(),
+    gateway: { projectId: "proj-1", providers: ["gateway"] }
+  };
+
+  it("injects the shared bearer on a configured provider, replacing any header variant", async () => {
     const runtime = makeSpyRuntime();
     const { factory } = fixedRuntimeFactory(runtime);
-    const hooks = await createLightbridgePlugin({
-      logger: createSilentLogger(),
-      registerProcessHandlers: false,
-      runtimeFactory: factory
-    })(pluginInput(), {
-      auth: makeAuth(),
-      gateway: { projectId: "proj-1", providers: ["gateway"] }
-    });
+    const harness = await start(gatewayOptions, { runtimeFactory: factory });
 
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.({ model: { providerID: "gateway" } } as never, output);
-    expect(output.headers.Authorization).toBe("Bearer shared-project-token");
+    const event = requestEvent("gateway", { authorization: "Bearer stale", "x-keep": "1" });
+    await harness.call("session.model.request", event);
+    expect(event.headers).toEqual({ "x-keep": "1", Authorization: "Bearer shared-project-token" });
     expect(runtime.calls).toEqual([{ interactive: true }]);
   });
 
   it("leaves an unmanaged provider untouched", async () => {
     const runtime = makeSpyRuntime();
     const { factory } = fixedRuntimeFactory(runtime);
-    const hooks = await createLightbridgePlugin({
-      logger: createSilentLogger(),
-      registerProcessHandlers: false,
-      runtimeFactory: factory
-    })(pluginInput(), {
-      auth: makeAuth(),
-      gateway: { projectId: "proj-1", providers: ["gateway"] }
-    });
+    const harness = await start(gatewayOptions, { runtimeFactory: factory });
 
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.({ model: { providerID: "some-other" } } as never, output);
-    expect(output.headers.Authorization).toBeUndefined();
+    const event = requestEvent("some-other", { Authorization: "Bearer theirs" });
+    await harness.call("session.model.request", event);
+    expect(event.headers.Authorization).toBe("Bearer theirs");
     expect(runtime.calls).toEqual([]);
   });
 
-  it("fails closed: no header when the shared exchange rejects", async () => {
+  it("fails closed: the request dies when the shared token cannot be produced", async () => {
     const logger = createRecordingLogger();
     const runtime = makeSpyRuntime(async () => {
       throw new Error("exchange failed");
     });
     const { factory } = fixedRuntimeFactory(runtime);
-    const hooks = await createLightbridgePlugin({
-      logger,
-      registerProcessHandlers: false,
-      runtimeFactory: factory
-    })(pluginInput(), {
-      auth: makeAuth(),
-      gateway: { projectId: "proj-1", providers: ["gateway"] }
-    });
+    const harness = await start(gatewayOptions, { logger, runtimeFactory: factory });
 
-    const output = { headers: {} as Record<string, string> };
-    await expect(
-      hooks["chat.headers"]?.({ model: { providerID: "gateway" } } as never, output)
-    ).resolves.toBeUndefined();
-    expect(output.headers.Authorization).toBeUndefined();
+    // A stale bearer stamped on the record (e.g. by `register` or oauth2) must not ride out.
+    const event = requestEvent("gateway", { Authorization: "Bearer stamped-stale" });
+    await expect(harness.call("session.model.request", event)).rejects.toThrow("exchange failed");
     expect(logger.events.some((e) => e.event === "lightbridge_gateway_no_bearer")).toBe(true);
   });
 
-  it("activates the gateway with the default project when projectId is omitted", async () => {
-    // `projectId` is fully optional: the exchange sends no `project_id` and the
-    // backend mints a token for the caller's default project (ADR-0012).
+  it("activates with the default project when projectId is omitted", async () => {
     const logger = createRecordingLogger();
     const runtime = makeSpyRuntime();
     const { factory } = fixedRuntimeFactory(runtime);
-    const hooks = await createLightbridgePlugin({
-      logger,
-      registerProcessHandlers: false,
-      runtimeFactory: factory
-    })(pluginInput(), { auth: makeAuth(), gateway: { providers: ["gateway"] } });
-    expect(hooks["chat.headers"]).toBeDefined();
+    const harness = await start(
+      { auth: makeAuth(), gateway: { providers: ["gateway"] } },
+      { logger, runtimeFactory: factory }
+    );
     expect(logger.events.some((e) => e.event === "lightbridge_default_project")).toBe(true);
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.({ model: { providerID: "gateway" } } as never, output);
-    expect(output.headers.Authorization).toBe("Bearer shared-project-token");
+    const event = requestEvent("gateway");
+    await harness.call("session.model.request", event);
+    expect(event.headers.Authorization).toBe("Bearer shared-project-token");
   });
 
-  it("activates otel with the default project when no projectId is resolvable", async () => {
-    const logger = createRecordingLogger();
-    const runtime = makeSpyRuntime();
-    const { factory } = fixedRuntimeFactory(runtime);
-    const hooks = await createLightbridgePlugin({
-      logger,
-      registerProcessHandlers: false,
-      deferredTimeoutMs: 5,
-      runtimeFactory: factory,
-      exporters: { trace: () => undefined, metric: () => undefined, log: () => undefined }
-    })(pluginInput(), { auth: makeAuth(), otel: { endpoint: "http://localhost:4318" } });
-    expect(hooks["chat.headers"]).toBeUndefined();
-    expect(hooks.event).toBeDefined();
-    expect(logger.events.some((e) => e.event === "lightbridge_default_project")).toBe(true);
+  it("defaults gateway.exchange to false and passes true through (ADR-0017)", async () => {
+    const off = fixedRuntimeFactory(makeSpyRuntime());
+    await start(gatewayOptions, { runtimeFactory: off.factory });
+    expect(off.built[0]?.exchange).toBe(false);
+
+    const on = fixedRuntimeFactory(makeSpyRuntime());
+    await start(
+      { auth: makeAuth(), gateway: { providers: ["gateway"], exchange: true } },
+      { runtimeFactory: on.factory }
+    );
+    expect(on.built[0]?.exchange).toBe(true);
+  });
+
+  it("builds no runtime for a register-only config", async () => {
+    const { factory, built } = fixedRuntimeFactory(makeSpyRuntime());
+    await start(
+      { auth: makeAuth(), register: { baseURL: "https://gw.example.com/v1" } },
+      { runtimeFactory: factory, fetchImpl: (async () => new Response("{}")) as typeof fetch }
+    );
+    expect(built).toEqual([]);
   });
 });
 
 describe("createLightbridgePlugin — otel module", () => {
-  async function loadOtel(options: {
-    runtime?: LightbridgeRuntimeLike;
-    otel?: Record<string, unknown>;
-    projectId?: string;
-    gateway?: Record<string, unknown>;
-  }) {
-    const logger = createSilentLogger();
+  async function loadOtel(
+    options: {
+      runtime?: LightbridgeRuntimeLike;
+      otel?: Record<string, unknown>;
+      gateway?: Record<string, unknown>;
+    } = {},
+    factory: Partial<LightbridgePluginFactoryOptions> = {}
+  ) {
     let capturedTokenSource: TokenSource | undefined;
     const spans = new InMemorySpanExporter();
     const logs = new InMemoryLogRecordExporter();
-
-    const runtimeFactory: LightbridgeRuntimeFactory | undefined = options.runtime
-      ? () => options.runtime as LightbridgeRuntimeLike
-      : undefined;
-
-    const hooks = await createLightbridgePlugin({
-      logger,
-      registerProcessHandlers: false,
-      deferredTimeoutMs: 5,
-      hostInfo: { hostname: "test-host", version: "0.14.1" },
-      runtimeFactory,
-      exporters: {
-        trace: (_config, tokenSource) => {
-          capturedTokenSource = tokenSource;
-          return spans;
+    const harness = await startPlugin({
+      options: {
+        auth: makeAuth(),
+        gateway: options.gateway,
+        projectId: "proj-1",
+        otel: { endpoint: "http://localhost:4318", ...options.otel }
+      },
+      factory: {
+        deferredTimeoutMs: 5,
+        hostInfo: { hostname: "test-host", version: "0.14.1" },
+        runtimeFactory: options.runtime
+          ? () => options.runtime as LightbridgeRuntimeLike
+          : undefined,
+        exporters: {
+          trace: (_config, tokenSource) => {
+            capturedTokenSource = tokenSource;
+            return spans;
+          },
+          log: () => logs,
+          metric: () => undefined
         },
-        log: () => logs,
-        metric: () => undefined
+        ...factory
       }
-    })(pluginInput(), {
-      auth: makeAuth(),
-      gateway: options.gateway,
-      projectId: options.projectId,
-      otel: { endpoint: "http://localhost:4318", ...options.otel }
     });
-
-    return { hooks, capturedTokenSource, spans, logs };
+    return { harness, tokenSource: () => capturedTokenSource, spans, logs };
   }
 
   it("registers the observing hooks and passes a runtime-backed TokenSource", async () => {
-    const runtime = makeSpyRuntime();
-    const { hooks, capturedTokenSource } = await loadOtel({ runtime, projectId: "proj-1" });
-
-    expect(hooks.event).toBeDefined();
-    expect(hooks["chat.message"]).toBeDefined();
-    expect(hooks["tool.execute.before"]).toBeDefined();
-    expect(hooks["chat.params"]).toBeDefined();
-    expect(hooks["permission.ask"]).toBeDefined();
-    expect(hooks["experimental.text.complete"]).toBeDefined();
-    expect(capturedTokenSource).toBeDefined();
+    const { harness, tokenSource } = await loadOtel({ runtime: makeSpyRuntime() });
+    for (const key of [
+      "session.prompt",
+      "session.context",
+      "tool.execute.before",
+      "tool.execute.after",
+      "permission.evaluate",
+      "session.http.request"
+    ]) {
+      expect(harness.hasHook(key)).toBe(true);
+    }
+    expect(tokenSource()).toBeDefined();
   });
 
   it("TokenSource.headers() returns the Bearer from the shared exchange", async () => {
     const runtime = makeSpyRuntime(async () => makeToken({ accessToken: "otel-token" }));
-    const { capturedTokenSource } = await loadOtel({ runtime, projectId: "proj-1" });
-
-    await expect(capturedTokenSource?.headers()).resolves.toEqual({
-      Authorization: "Bearer otel-token"
-    });
+    const { tokenSource } = await loadOtel({ runtime });
+    await expect(tokenSource()?.headers()).resolves.toEqual({ Authorization: "Bearer otel-token" });
     expect(runtime.calls).toEqual([{ interactive: false }]);
   });
 
-  it("TokenSource.headers() degrades to undefined on an exchange failure (never throws)", async () => {
-    // `undefined`, not `{}`: the shared export gate in `@vymalo/opencode-core-otel`
-    // (`withFailureLogging`, ADR-0015) treats `{}` as "export with no extra
-    // headers" and `undefined` as "skip the export entirely." A logged-out
-    // session must resolve to the latter.
+  it("TokenSource.headers() degrades to undefined on an exchange failure (ADR-0015)", async () => {
+    // `undefined`, not `{}`: the shared export gate in core-otel treats `{}` as
+    // "export with no extra headers" and `undefined` as "skip the export".
     const runtime = makeSpyRuntime(async () => {
       throw new Error("exchange failed");
     });
-    const { capturedTokenSource } = await loadOtel({ runtime, projectId: "proj-1" });
-
-    await expect(capturedTokenSource?.headers()).resolves.toBeUndefined();
+    const { tokenSource } = await loadOtel({ runtime });
+    await expect(tokenSource()?.headers()).resolves.toBeUndefined();
   });
 
-  it("TokenSource.headers() resumes returning the Bearer once a later exchange succeeds", async () => {
-    // Lazy re-evaluation: a call that fails does not poison later calls — the
-    // very next `headers()` call after a successful login resumes exporting.
+  it("TokenSource.headers() resumes once a later exchange succeeds", async () => {
     let succeed = false;
     const runtime = makeSpyRuntime(async () => {
       if (!succeed) {
@@ -269,58 +255,40 @@ describe("createLightbridgePlugin — otel module", () => {
       }
       return makeToken({ accessToken: "recovered-token" });
     });
-    const { capturedTokenSource } = await loadOtel({ runtime, projectId: "proj-1" });
-
-    await expect(capturedTokenSource?.headers()).resolves.toBeUndefined();
-
+    const { tokenSource } = await loadOtel({ runtime });
+    await expect(tokenSource()?.headers()).resolves.toBeUndefined();
     succeed = true;
-    await expect(capturedTokenSource?.headers()).resolves.toEqual({
+    await expect(tokenSource()?.headers()).resolves.toEqual({
       Authorization: "Bearer recovered-token"
     });
   });
 
   it("invalidate() is a documented no-op", async () => {
-    const runtime = makeSpyRuntime();
-    const { capturedTokenSource } = await loadOtel({ runtime, projectId: "proj-1" });
-    expect(() => capturedTokenSource?.invalidate()).not.toThrow();
-  });
-
-  it("builds providers with a runtime-backed TokenSource (default project) when no projectId", async () => {
-    const runtime = makeSpyRuntime();
-    const { hooks, capturedTokenSource } = await loadOtel({ runtime });
-    expect(hooks.event).toBeDefined();
-    expect(capturedTokenSource).toBeDefined();
+    const { tokenSource } = await loadOtel({ runtime: makeSpyRuntime() });
+    expect(() => tokenSource()?.invalidate()).not.toThrow();
   });
 
   it("stays inert (no observing hooks) when otel is unconfigured", async () => {
-    const hooks = await createLightbridgePlugin({
-      logger: createSilentLogger(),
-      registerProcessHandlers: false
-    })(pluginInput(), { auth: makeAuth() });
-    expect(hooks.event).toBeUndefined();
+    const harness = await start({ auth: makeAuth() });
+    expect(harness.hasHook("session.prompt")).toBe(false);
   });
 
-  it("logs that otel.tokenCommand/tokenHeader/tokenPrefix are ignored, never silently", async () => {
-    // The shared runtime-backed TokenSource always wins in `createProviders`
-    // (ADR-0012) — these fields are otherwise dead config. ADR-0015 requires a
-    // diagnostic instead of a silent no-op.
+  it("stays inert and says why when no exporter is configured", async () => {
     const logger = createRecordingLogger();
-    const runtime = makeSpyRuntime();
-    const { factory } = fixedRuntimeFactory(runtime);
-    await createLightbridgePlugin({
-      logger,
-      registerProcessHandlers: false,
-      deferredTimeoutMs: 5,
-      runtimeFactory: factory,
-      exporters: { trace: () => undefined, metric: () => undefined, log: () => undefined }
-    })(pluginInput(), {
-      auth: makeAuth(),
-      otel: {
-        endpoint: "http://localhost:4318",
-        tokenCommand: "some-other-helper"
-      }
-    });
+    const harness = await start(
+      { auth: makeAuth(), otel: { enabled: false } },
+      { logger, env: {} }
+    );
+    expect(harness.hasHook("session.prompt")).toBe(false);
+    expect(logger.events.some((e) => e.event === "lightbridge_otel_inactive")).toBe(true);
+  });
 
+  it("logs that otel.tokenCommand is ignored, never silently", async () => {
+    const logger = createRecordingLogger();
+    await loadOtel(
+      { runtime: makeSpyRuntime(), otel: { tokenCommand: "some-other-helper" } },
+      { logger }
+    );
     expect(logger.events.some((e) => e.event === "lightbridge_otel_token_command_ignored")).toBe(
       true
     );
@@ -328,171 +296,134 @@ describe("createLightbridgePlugin — otel module", () => {
 
   it("says nothing when otel has no tokenCommand/tokenHeader/tokenPrefix set", async () => {
     const logger = createRecordingLogger();
-    const runtime = makeSpyRuntime();
-    const { factory } = fixedRuntimeFactory(runtime);
-    await createLightbridgePlugin({
-      logger,
-      registerProcessHandlers: false,
-      deferredTimeoutMs: 5,
-      runtimeFactory: factory,
-      exporters: { trace: () => undefined, metric: () => undefined, log: () => undefined }
-    })(pluginInput(), { auth: makeAuth(), otel: { endpoint: "http://localhost:4318" } });
-
+    await loadOtel({ runtime: makeSpyRuntime() }, { logger });
     expect(logger.events.some((e) => e.event === "lightbridge_otel_token_command_ignored")).toBe(
       false
     );
   });
 
-  it("propagates trace context through the config hook when otel traces are active", async () => {
-    const runtime = makeSpyRuntime();
-    const { hooks } = await loadOtel({ runtime, projectId: "proj-1" });
-    const hostConfig = {
-      logLevel: "INFO",
-      provider: { openai: { options: {} as Record<string, unknown> } }
-    };
-    await hooks.config?.(hostConfig as never);
-    expect(typeof hostConfig.provider.openai.options.fetch).toBe("function");
-  });
-});
+  it("injects trace context into outgoing model requests, never clobbering one", async () => {
+    const { harness } = await loadOtel({ runtime: makeSpyRuntime() });
+    await harness.emit({ type: "session.created", data: { sessionID: "ses_1" } });
+    const [input, output] = [
+      { sessionID: "ses_1", agent: "build", model: { id: "m", providerID: "p" } },
+      { prompt: { text: "hello" } }
+    ];
+    await harness.call("session.prompt", { ...input, ...output });
+    await harness.call("session.context", { ...input, options: { temperature: 0.3 } });
 
-describe("createLightbridgePlugin — full otel hook surface", () => {
-  it("drives every observing hook without throwing", async () => {
-    const runtime = makeSpyRuntime();
-    const logs = new InMemoryLogRecordExporter();
-    const hooks = await createLightbridgePlugin({
-      logger: createSilentLogger(),
-      registerProcessHandlers: false,
-      deferredTimeoutMs: 5,
-      runtimeFactory: () => runtime,
-      exporters: { trace: () => undefined, metric: () => undefined, log: () => logs }
-    })(pluginInput(), {
-      auth: makeAuth(),
-      projectId: "proj-1",
-      otel: { endpoint: "http://localhost:4318" }
+    const request = new Request("https://gw.example.com/v1/chat");
+    await harness.call("session.http.request", { request });
+    expect(request.headers.get("traceparent")).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]$/);
+
+    const upstream = new Request("https://gw.example.com/v1/chat", {
+      headers: { traceparent: "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01" }
     });
+    await harness.call("session.http.request", { request: upstream });
+    expect(upstream.headers.get("traceparent")).toContain("aaaaaaaa");
+  });
 
-    await hooks.event?.({
-      event: { type: "session.created", properties: { info: { id: "ses_1" } } }
-    } as never);
-    await hooks["chat.message"]?.({} as never, {} as never);
-    await hooks["tool.execute.before"]?.({
+  it("skips trace propagation when there is no active chat context", async () => {
+    const { harness } = await loadOtel({ runtime: makeSpyRuntime() });
+    const request = new Request("https://gw.example.com/v1/chat");
+    await harness.call("session.http.request", { request });
+    expect(request.headers.has("traceparent")).toBe(false);
+  });
+
+  it("does not register propagation when propagateTraceContext is off", async () => {
+    const { harness } = await loadOtel({
+      runtime: makeSpyRuntime(),
+      otel: { propagateTraceContext: false }
+    });
+    expect(harness.hasHook("session.http.request")).toBe(false);
+  });
+
+  it("drives the whole observing surface and exports a log record", async () => {
+    const { harness, logs } = await loadOtel({ runtime: makeSpyRuntime() });
+    const model = { id: "kimi-k2.6", providerID: "gateway" };
+
+    await harness.emit({ type: "session.created", data: { sessionID: "ses_1" } });
+    await harness.call("session.prompt", {
+      sessionID: "ses_1",
+      agent: "build",
+      model,
+      prompt: { text: "hi", files: [{}] }
+    });
+    await harness.call("session.context", {
+      sessionID: "ses_1",
+      agent: "build",
+      model,
+      options: { temperature: 0.3, maxTokens: 100 }
+    });
+    await harness.call("tool.execute.before", { tool: "edit", sessionID: "ses_1", id: "c1" });
+    await harness.call("tool.execute.after", {
       tool: "edit",
       sessionID: "ses_1",
-      callID: "c1"
-    } as never);
-    await hooks["tool.execute.after"]?.(
-      { tool: "edit", sessionID: "ses_1", callID: "c1", args: {} } as never,
-      { title: "", output: "ok", metadata: {} } as never
-    );
-    await hooks["chat.params"]?.(
-      { sessionID: "ses_1", agent: "build", model: { id: "kimi-k2.6" } } as never,
-      { temperature: 0.3 } as never
-    );
-    await hooks["permission.ask"]?.(
-      { id: "perm_1", sessionID: "ses_1", type: "edit" } as never,
-      { status: "allow" } as never
-    );
-    await hooks["experimental.text.complete"]?.(
-      { sessionID: "ses_1", messageID: "msg_1", partID: "p1" } as never,
-      { text: "abcd" } as never
-    );
-    await hooks.event?.({
-      event: { type: "session.idle", properties: { sessionID: "ses_1" } }
-    } as never);
+      id: "c1",
+      status: "completed",
+      result: { content: "ok" }
+    });
+    await harness.call("tool.execute.after", {
+      tool: "bash",
+      sessionID: "ses_1",
+      id: "c2",
+      status: "error"
+    });
+    await harness.call("permission.evaluate", {
+      sessionID: "ses_1",
+      action: "edit",
+      effect: "allow"
+    });
+    await harness.emit({
+      type: "session.step.started",
+      data: { sessionID: "ses_1", assistantMessageID: "msg_1", agent: "build", model, started: 1 }
+    });
+    await harness.emit({
+      type: "session.text.ended",
+      data: { sessionID: "ses_1", assistantMessageID: "msg_1", text: "abcd" }
+    });
+    await harness.emit({
+      type: "session.step.ended",
+      created: 2000,
+      data: {
+        sessionID: "ses_1",
+        assistantMessageID: "msg_1",
+        finish: "stop",
+        cost: 0.01,
+        tokens: { input: 10, output: 5, reasoning: 0, cache: { read: 0, write: 0 } }
+      }
+    });
+    await harness.emit({
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses_1" }
+    });
 
     await vi.waitFor(() => expect(logs.getFinishedLogRecords().length).toBeGreaterThan(0));
   });
+
+  it("drains the exporters when the plugin scope closes", async () => {
+    const { harness, logs } = await loadOtel({ runtime: makeSpyRuntime() });
+    await harness.emit({ type: "session.created", data: { sessionID: "ses_1" } });
+    await harness.close();
+    await vi.waitFor(() => expect(logs.getFinishedLogRecords().length).toBeGreaterThanOrEqual(0));
+  });
 });
 
-describe("createLightbridgePlugin — default logger + exit handling", () => {
-  it("pipes diagnostics through client.app.log when no logger is injected", async () => {
-    const input = pluginInput();
-    await createLightbridgePlugin({ registerProcessHandlers: false })(input, { auth: makeAuth() });
-    const log = input.client.app.log as unknown as ReturnType<typeof vi.fn>;
-    expect(log).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body: expect.objectContaining({ service: "opencode-lightbridge-plugin" })
-      })
-    );
-  });
-
-  describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
-    // Malformed options (missing `auth`) is the simplest reliable way to
-    // exercise a real `error` record (`lightbridge_config_invalid`) through
-    // the REAL `createOpenCodeLogger` — no injected logger, no otel/exporter
-    // seams required. Mirrors `@vymalo/opencode-otel`'s ADR-0013 test block,
-    // adapted to ADR-0014 (this plugin is one of the eight the wider ADR now
-    // covers, not the original narrower-scoped exception).
-    it("never mirrors an error record to the console fallback", async () => {
-      const input = pluginInput();
-      const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const log = vi.spyOn(console, "log").mockImplementation(() => {});
-
-      await createLightbridgePlugin({ registerProcessHandlers: false })(input, {
-        gateway: { providers: ["gateway"] } // missing `auth`
-      });
-
-      expect(error).not.toHaveBeenCalled();
-      expect(warn).not.toHaveBeenCalled();
-      expect(log).not.toHaveBeenCalled();
-      vi.restoreAllMocks();
-    });
-
-    it("still forwards the error record to client.app.log at its true level", async () => {
-      const input = pluginInput();
-      vi.spyOn(console, "error").mockImplementation(() => {});
-
-      await createLightbridgePlugin({ registerProcessHandlers: false })(input, {
-        gateway: { providers: ["gateway"] } // missing `auth`
-      });
-
-      const log = input.client.app.log as unknown as ReturnType<typeof vi.fn>;
-      expect(log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          body: expect.objectContaining({
-            service: "opencode-lightbridge-plugin",
-            level: "error",
-            message: "lightbridge_config_invalid"
-          })
-        })
-      );
-      vi.restoreAllMocks();
-    });
-
-    it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
-      const input = pluginInput();
-      const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
-      process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
-
-      try {
-        await createLightbridgePlugin({ registerProcessHandlers: false })(input, {
-          gateway: { providers: ["gateway"] } // missing `auth`
-        });
-        expect(error).toHaveBeenCalled();
-      } finally {
-        if (previous === undefined) {
-          delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
-        } else {
-          process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
-        }
-        error.mockRestore();
-      }
-    });
-  });
-
+describe("createLightbridgePlugin — exit handling", () => {
   it("registers the shared exit handlers exactly once when otel is active and drains on beforeExit", async () => {
     const before = {
       beforeExit: process.listenerCount("beforeExit"),
       SIGINT: process.listenerCount("SIGINT"),
       SIGTERM: process.listenerCount("SIGTERM")
     };
-    await createLightbridgePlugin({
-      logger: createSilentLogger(),
-      deferredTimeoutMs: 5,
-      exporters: { trace: () => undefined, metric: () => undefined, log: () => undefined }
-    })(pluginInput(), { auth: makeAuth(), otel: { endpoint: "http://localhost:4318" } });
+    await startPlugin({
+      options: { auth: makeAuth(), otel: { endpoint: "http://localhost:4318" } },
+      plugin: createLightbridgePlugin({
+        logger: createSilentLogger(),
+        deferredTimeoutMs: 5,
+        exporters: NO_EXPORTERS
+      })
+    });
 
     expect(process.listenerCount("beforeExit")).toBe(before.beforeExit + 1);
     expect(process.listenerCount("SIGINT")).toBe(before.SIGINT + 1);
@@ -517,36 +448,60 @@ describe("createLightbridgePlugin — default logger + exit handling", () => {
 });
 
 describe("createLightbridgePlugin — one shared runtime across both modules", () => {
-  it("builds the runtime exactly once and both modules call into the same instance", async () => {
+  it("builds the runtime exactly once; gateway and otel read the same instance", async () => {
     const runtime = makeSpyRuntime();
-    const { factory, calls } = fixedRuntimeFactory(runtime);
-    const spans = new InMemorySpanExporter();
+    const { factory, built } = fixedRuntimeFactory(runtime);
+    const harness = await start(
+      {
+        auth: makeAuth(),
+        gateway: { projectId: "proj-1", providers: ["gateway"] },
+        otel: { endpoint: "http://localhost:4318" }
+      },
+      { runtimeFactory: factory }
+    );
+    expect(built).toHaveLength(1);
 
-    const hooks = await createLightbridgePlugin({
-      logger: createSilentLogger(),
-      registerProcessHandlers: false,
-      deferredTimeoutMs: 5,
-      runtimeFactory: factory,
-      exporters: { trace: () => spans, log: () => undefined, metric: () => undefined }
-    })(pluginInput(), {
-      auth: makeAuth(),
-      gateway: { projectId: "proj-1", providers: ["gateway"] },
-      otel: { endpoint: "http://localhost:4318" }
+    await harness.call("session.model.request", requestEvent("gateway"));
+    expect(runtime.calls).toEqual([{ interactive: true }]);
+  });
+});
+
+describe("ADR-0014: the default logger writes to the host Effect logger, not the terminal", () => {
+  it("delivers lightbridge_config_invalid to the host logger and never to the console", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+    delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+
+    const sink: Array<{ level: string; message: unknown[] }> = [];
+    const recorder = Logger.make<unknown, void>((options) => {
+      sink.push({ level: options.logLevel, message: options.message as unknown[] });
     });
 
-    expect(calls).toEqual([0]); // exactly one construction
+    try {
+      await startPlugin({
+        // No injected logger: the production captureHostContext path.
+        plugin: createLightbridgePlugin({ registerProcessHandlers: false }),
+        options: { gateway: { providers: ["gateway"] } }, // missing `auth`
+        provide: (effect) =>
+          effect.pipe(
+            Effect.provide(Logger.layer([recorder], { mergeWithExisting: false })),
+            Effect.provideService(References.MinimumLogLevel, "All")
+          )
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.({ model: { providerID: "gateway" } } as never, output);
-    await hooks.event?.({
-      event: { type: "session.created", properties: { info: { id: "s1" } } }
-    } as never);
-
-    // Both the gateway hook and (indirectly, via the injected exporter/token
-    // source seam exercised in the otel describe block above) the OTEL module
-    // read the SAME runtime — evidenced by the single spy accumulating a call
-    // from the gateway path here, and by `calls` proving only one runtime was
-    // ever constructed for the whole plugin instance.
-    expect(runtime.calls).toEqual([{ interactive: true }]);
+      expect(
+        sink.some((c) => c.level === "Error" && c.message[0] === "lightbridge_config_invalid")
+      ).toBe(true);
+      expect(error).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      if (previous !== undefined) {
+        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+      }
+    }
   });
 });

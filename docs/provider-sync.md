@@ -246,17 +246,24 @@ OAuth-protected `modelsInfoUrl`. The coupling survives, relocated:
 
 ## Consumers
 
-> Both consumers below still build on the v1 helper signatures until their own v2 ports land
-> (`plans/opencode-v2.md`, rows 6 and 9); they will not compile against this package until then.
+> Both consumers have been ported to the v2 editor-shaped helpers (oauth2: [ADR-0020](adr/0020-oauth2-integration-domain.md);
+> lightbridge: `packages/opencode-lightbridge/src/opencode.ts`). Both run the engine in a queued
+> background build and call `ctx.provider.reload()` when models or a bearer arrive; the transform
+> callbacks themselves stay synchronous.
 
-- **`@vymalo/opencode-oauth2`** (live) — `OAuth2ModelSyncPlugin` is now a thin subclass:
-  `packages/opencode-oauth2/src/plugin.ts` validates oauth2's own config shape (unchanged —
-  `./config.js`'s `validateConfig`) and hands the engine an already-validated config plus oauth2's
-  `"opencode-oauth2"` cache segment and service label. Every symbol `opencode-oauth2`'s `lib.ts`
-  exported before this extraction still exports the same name from the same subpath — no consumer
-  of `@vymalo/opencode-oauth2` needs to change anything.
+- **`@vymalo/opencode-oauth2`** (live) — `OAuth2ModelSyncPlugin` is a thin subclass over the engine
+  and uses the full helper set (`collectManagedProviders`, `mergeDiscoveredModels`,
+  `resolveCachedBearer` + `propagateCachedBearer`, `runtimeSignature`), marking every provider it
+  manages with `settings.oauth2` so other plugins can see it.
+  `packages/opencode-oauth2/src/plugin.ts` validates oauth2's own config shape
+  (`./config.js`'s `validateConfig`) and hands the engine an already-validated config plus oauth2's
+  `"opencode-oauth2"` cache segment and service label.
 - **`@vymalo/opencode-lightbridge`** (live, ADR-0017) — the optional `register` block builds ONE
-  `ProviderModelSyncEngine` from `auth`+`register.baseURL`, pointed at the SAME cache
+  `ProviderModelSyncEngine` from `auth`+`register.baseURL`, and applies it with the per-provider
+  helpers directly (`resolveProviderPackage`, `applyResponsesApiSettings`, `mergeDiscoveredModels`,
+  `resolveCachedBearer` + `propagateCachedBearer`) — not `collectManagedProviders`, which is
+  oauth2-only. It skips entirely when the provider record already carries oauth2's
+  `settings.oauth2` marker. The engine is pointed at the SAME cache
   segment/namespace `opencode-oauth2` uses (`"opencode-oauth2"` /
   `"opencode-oauth2-model-sync"`) so a matching `id`/`issuer`/`clientId` shares its cache file (and
   therefore its login) with an oauth2-managed server of the same id — see

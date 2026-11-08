@@ -1,7 +1,9 @@
 export {
   createLightbridgePlugin,
   LightbridgePlugin,
-  type LightbridgePluginFactoryOptions
+  PLUGIN_ID,
+  type LightbridgePluginFactoryOptions,
+  type LightbridgeRegisterHandle
 } from "./opencode.js";
 
 export {
@@ -21,13 +23,12 @@ export {
 export {
   hasOAuth2Conflict,
   needsProjectToken,
-  oauth2ManagedProviderIds,
   parseLightbridgeOptions,
   type LightbridgeGatewayOptions,
   type LightbridgeOptions,
   type LightbridgeRegisterOptions,
-  type OpenCodeConfigLike,
-  type ParsedLightbridgeOptions
+  type ParsedLightbridgeOptions,
+  type ProviderLookup
 } from "./config.js";
 
 export { migrateRootTokenIfNeeded } from "./migration.js";
