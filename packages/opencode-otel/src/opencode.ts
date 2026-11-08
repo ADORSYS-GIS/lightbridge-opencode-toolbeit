@@ -1,33 +1,37 @@
 import { hostname } from "node:os";
 
-import type { Hooks, Plugin, PluginInput, PluginOptions } from "@opencode-ai/plugin";
+import { defaultTextMapSetter } from "@opentelemetry/api";
+import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { Plugin } from "@opencode/plugin/effect";
+import { Effect, Stream } from "effect";
 
 import {
   buildResource,
-  createJsonConsoleLogger,
   createProviders,
-  DEFAULT_LOG_LEVEL,
   deferredAttribute,
   type EnvSource,
   type ExporterFactories,
-  fromOpenCodeLogLevel,
-  installTracePropagation,
-  type LogFields,
-  LOG_LEVEL_PRIORITY,
   type Logger,
   type LogLevel,
-  type PropagationConfigInput,
   readVcsInfo,
-  type RecorderEvent,
   registerExitHandlers,
   resolveOtelConfig,
   TelemetryRecorder,
   type VcsInfo
 } from "@vymalo/opencode-core-otel";
 
-const PLUGIN_SERVICE_NAME = "opencode-otel-plugin";
+import { createEventBridge, EVENT_TYPES } from "./events.js";
+import {
+  captureHostContext,
+  createEffectLogger,
+  DEFAULT_LOG_LEVEL,
+  resolveLogLevel
+} from "./logging.js";
 
-type OpenCodeConfig = Parameters<NonNullable<Hooks["config"]>>[0];
+/** Stable plugin id. v2 requires one and keys storage/registrations by it. */
+export const PLUGIN_ID = "vymalo.otel";
+
+const propagator = new W3CTraceContextPropagator();
 
 export interface OtelPluginFactoryOptions {
   logger?: Logger;
@@ -43,210 +47,231 @@ export interface OtelPluginFactoryOptions {
   hostInfo?: { hostname?: string; version?: string };
   /** How long a deferred resource attribute waits for its event. */
   deferredTimeoutMs?: number;
+  /** Observe the recorder the plugin built (tests). */
+  onRecorder?: (recorder: TelemetryRecorder) => void;
 }
 
 /**
- * Pipe plugin logs through OpenCode's `client.app.log` so they show up in the
- * host's structured log stream, with the JSON console as a reliable fallback.
- * Mirrors the rest of the suite.
+ * Build the OpenCode v2 plugin.
  *
- * Note this is the plugin's *own* diagnostic logging — entirely separate from
- * the OTLP logs signal it exports.
+ * An observer: no tools, no server, no mutation except the `traceparent` header
+ * on primary model requests. Registrations:
  *
- * Unlike the rest of the suite, this logger never mirrors `warn`/`error` to
- * the console: a telemetry exporter must never interrupt the work it
- * observes with terminal output. Every record still reaches `client.app.log`
- * at its true level, so the diagnostic (a failed export, an expired
- * `tokenCommand`, …) is always persisted to OpenCode's own log — just not on
- * the developer's screen. See ADR-0013. Set `VYMALO_PLUGIN_CONSOLE_LOG=1`
- * (`consoleAll` below) to opt back into the console mirror for every level.
+ *  - `event.subscribe` — a `Stream` forked into the plugin scope; closing the
+ *    scope interrupts it. Translated to the engine by {@link createEventBridge}.
+ *  - `session.hook("prompt" | "context")` — user prompts and generation params.
+ *  - `session.hook("model.request")` — W3C trace-context propagation. v1 wrapped
+ *    `provider.options.fetch`; v2's `Provider.Info` has no such field.
+ *  - `tool.hook("execute.before" | "execute.after")` — tool spans and results.
+ *  - `permission.hook("evaluate")` — permission decisions config resolved on its own.
  */
-function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
-  const fallback = createJsonConsoleLogger("debug");
-  const consoleAll = /^(1|true|yes|on)$/i.test(process.env.VYMALO_PLUGIN_CONSOLE_LOG ?? "");
+export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}): Plugin.Plugin {
+  return Plugin.define({
+    id: PLUGIN_ID,
+    effect: Effect.fn(function* (ctx) {
+      const env = factoryOptions.env ?? process.env;
+      // v2 gives plugins no `config` object, so the v1 `config.logLevel`
+      // channel is gone: take this plugin's own `logLevel` option first, then
+      // the host's `OPENCODE_LOG_LEVEL`.
+      const logLevel: LogLevel =
+        resolveLogLevel(ctx.options.logLevel) ??
+        resolveLogLevel(env.OPENCODE_LOG_LEVEL) ??
+        DEFAULT_LOG_LEVEL;
 
-  const write = (level: LogLevel, event: string, fields?: LogFields) => {
-    if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
-      return;
-    }
-    if (consoleAll) {
-      fallback[level](event, fields);
-    }
-    const hostLevel = level === "trace" ? "debug" : level;
-    void client.app
-      .log({
-        body: { service: PLUGIN_SERVICE_NAME, level: hostLevel, message: event, extra: fields }
-      })
-      .catch(() => {
-        /* best-effort */
-      });
-  };
-
-  return {
-    trace: (event, fields) => write("trace", event, fields),
-    debug: (event, fields) => write("debug", event, fields),
-    info: (event, fields) => write("info", event, fields),
-    warn: (event, fields) => write("warn", event, fields),
-    error: (event, fields) => write("error", event, fields)
-  };
-}
-
-export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}): Plugin {
-  return async (input: PluginInput, pluginOptions?: PluginOptions) => {
-    let currentLogLevel: LogLevel = DEFAULT_LOG_LEVEL;
-    const logger =
-      factoryOptions.logger ?? createOpenCodeLogger(input.client, () => currentLogLevel);
-
-    const config = resolveOtelConfig(pluginOptions, factoryOptions.env ?? process.env);
-
-    if (!config.active) {
-      // No endpoint and no explicit exporter means the plugin was installed but
-      // never configured — cost nothing rather than half-initializing.
-      logger.info("otel_plugin_inactive", {
-        enabled: config.enabled,
-        reason: config.enabled ? "no_exporter_configured" : "disabled"
-      });
-      return {
-        config: async (hostConfig: OpenCodeConfig) => {
-          currentLogLevel = fromOpenCodeLogLevel(hostConfig.logLevel) ?? DEFAULT_LOG_LEVEL;
-        }
-      };
-    }
-
-    // `service.version` and the git branch only ever reach a plugin as events
-    // (`installation.updated` / `vcs.branch.updated`), which arrive after the
-    // resource is built. Deferred attributes bridge that, with a bounded wait
-    // so a host that never emits them cannot stall the first export.
-    const version = deferredAttribute(factoryOptions.deferredTimeoutMs);
-    const branch = deferredAttribute(factoryOptions.deferredTimeoutMs);
-    if (factoryOptions.hostInfo?.version) {
-      version.settle(factoryOptions.hostInfo.version);
-    }
-
-    // Read the checkout straight off disk. This is both richer and more
-    // reliable than waiting for `vcs.branch.updated`: it arrives before the
-    // first export instead of racing the deferral window, and it carries the
-    // remote and revision, which no event reports at all. The event stays as a
-    // fallback — `settle` keeps the first value, so whichever lands first wins.
-    const vcs: VcsInfo = config.collectVcs
-      ? await readVcsInfo(input.worktree ?? input.directory).catch(() => ({}))
-      : {};
-    if (vcs.ref) {
-      branch.settle(vcs.ref);
-    }
-
-    const resource = buildResource(config, {
-      version: version.value,
-      hostname: factoryOptions.hostInfo?.hostname ?? safeHostname(),
-      projectName: input.project?.id,
-      directory: input.directory,
-      worktree: input.worktree,
-      branch: branch.value,
-      vcs
-    });
-
-    const providers = createProviders(config, resource, logger, factoryOptions.exporters);
-    const recorder = new TelemetryRecorder({
-      providers,
-      config,
-      logger,
-      now: factoryOptions.now,
-      resourceSinks: {
-        version: (value) => version.settle(value),
-        branch: (value) => branch.settle(value)
+      let logger = factoryOptions.logger;
+      if (!logger) {
+        // Must run inside the plugin's own fiber: a bare `Effect.runFork` would
+        // log to the terminal and violate ADR-0014.
+        const hostContext = yield* captureHostContext;
+        logger = createEffectLogger(hostContext, () => logLevel);
       }
-    });
+      const log = logger;
 
-    if (factoryOptions.registerProcessHandlers !== false) {
-      // Flush on exit, and hand the default signal action back (ADR-0018). The `dispose`
-      // hook (plugin API 1.18.32) is deliberately not registered: these handlers plus
-      // `session.idle` already cover both exit paths (tracked follow-up).
-      registerExitHandlers(providers, logger, [version, branch], { eventPrefix: "otel" });
-    }
+      const config = resolveOtelConfig(ctx.options, env);
 
-    logger.info("otel_plugin_enabled", {
-      serviceName: config.serviceName,
-      exporters: config.exporters,
-      endpoint: config.endpoint,
-      includeSessionId: config.includeSessionId,
-      filteredTools: [...config.filteredTools]
-    });
-
-    return {
-      config: async (hostConfig: OpenCodeConfig) => {
-        currentLogLevel = fromOpenCodeLogLevel(hostConfig.logLevel) ?? DEFAULT_LOG_LEVEL;
-        if (config.propagateTraceContext) {
-          const wrapped = installTracePropagation(hostConfig as PropagationConfigInput, {
-            getContext: () => recorder.currentChatContext(),
-            logger
-          });
-          logger.debug("otel_trace_propagation_ready", { providerCount: wrapped });
-        }
-      },
-      // v1 -> engine adapters. `core-otel` owns its input types and no longer
-      // reads the v1 plugin API, so each v1 payload is narrowed here. This whole
-      // block is replaced by the v2 hooks when `otel` is ported (ADR-0019).
-      event: async ({ event }) => {
-        // The recorder ignores event types it does not handle.
-        recorder.onEvent(event as unknown as RecorderEvent);
-      },
-      "chat.message": async (chatInput, chatOutput) => {
-        recorder.onChatMessage(
-          {
-            sessionID: chatInput.sessionID,
-            agent: chatInput.agent,
-            model: chatInput.model && {
-              id: chatInput.model.modelID,
-              providerID: chatInput.model.providerID
-            }
-          },
-          { parts: chatOutput.parts }
-        );
-      },
-      "tool.execute.before": async (toolInput) => {
-        recorder.onToolBefore({
-          tool: toolInput.tool,
-          sessionID: toolInput.sessionID,
-          id: toolInput.callID
+      if (!config.active) {
+        // No endpoint and no explicit exporter means the plugin was installed but
+        // never configured — cost nothing rather than half-initializing.
+        log.info("otel_plugin_inactive", {
+          enabled: config.enabled,
+          reason: config.enabled ? "no_exporter_configured" : "disabled"
         });
-      },
-      "tool.execute.after": async (toolInput, toolOutput) => {
-        recorder.onToolAfter(
-          {
-            tool: toolInput.tool,
-            sessionID: toolInput.sessionID,
-            id: toolInput.callID,
-            status: "completed"
-          },
-          { content: toolOutput.output }
-        );
-      },
-      "chat.params": async (paramsInput, paramsOutput) => {
-        recorder.onChatParams(
-          { sessionID: paramsInput.sessionID, agent: paramsInput.agent, model: paramsInput.model },
-          {
-            temperature: paramsOutput.temperature,
-            topP: paramsOutput.topP,
-            topK: paramsOutput.topK,
-            maxTokens: paramsOutput.maxOutputTokens
-          }
-        );
-      },
-      "permission.ask": async (permissionInput, permissionOutput) => {
-        recorder.onPermissionAsk(
-          {
-            sessionID: permissionInput.sessionID,
-            id: permissionInput.id,
-            type: permissionInput.type
-          },
-          permissionOutput
-        );
-      },
-      "experimental.text.complete": async (textInput, textOutput) => {
-        recorder.onTextComplete(textInput.messageID, textOutput.text);
+        return;
       }
-    };
-  };
+
+      // The git branch only ever reaches a plugin as an event
+      // (`vcs.branch.updated`), after the resource is built. A deferred
+      // attribute bridges that, with a bounded wait so a host that never emits
+      // it cannot stall the first export. The host version is known up front
+      // (`ctx.app.version`), so `service.version` no longer needs an event.
+      const version = deferredAttribute(factoryOptions.deferredTimeoutMs);
+      const branch = deferredAttribute(factoryOptions.deferredTimeoutMs);
+      const hostVersion = factoryOptions.hostInfo?.version ?? ctx.app.version;
+      if (hostVersion) {
+        version.settle(hostVersion);
+      }
+
+      // Read the checkout straight off disk. This is both richer and more
+      // reliable than waiting for `vcs.branch.updated`, and it carries the
+      // remote and revision, which no event reports at all. The event stays as a
+      // fallback — `settle` keeps the first value, so whichever lands first wins.
+      const vcs: VcsInfo = config.collectVcs
+        ? yield* Effect.promise(() =>
+            readVcsInfo(ctx.location.project.directory || ctx.location.directory).catch(
+              (): VcsInfo => ({})
+            )
+          )
+        : {};
+      if (vcs.ref) {
+        branch.settle(vcs.ref);
+      }
+
+      const resource = buildResource(config, {
+        version: version.value,
+        hostname: factoryOptions.hostInfo?.hostname ?? safeHostname(),
+        projectName: ctx.location.project.id,
+        directory: ctx.location.directory,
+        worktree: ctx.location.project.directory,
+        branch: branch.value,
+        vcs
+      });
+
+      const providers = createProviders(config, resource, log, factoryOptions.exporters);
+      const recorder = new TelemetryRecorder({
+        providers,
+        config,
+        logger: log,
+        now: factoryOptions.now,
+        resourceSinks: { branch: (value) => branch.settle(value) }
+      });
+      factoryOptions.onRecorder?.(recorder);
+
+      if (factoryOptions.registerProcessHandlers !== false) {
+        // Flush on exit, and hand the default signal action back (ADR-0018). The scope
+        // finalizer is deliberately not used to shut down: these handlers, the
+        // `location.shutdown` event and `session.idle` already cover the exit paths.
+        registerExitHandlers(providers, log, [version, branch], { eventPrefix: "otel" });
+      }
+
+      log.info("otel_plugin_enabled", {
+        serviceName: config.serviceName,
+        exporters: config.exporters,
+        endpoint: config.endpoint,
+        includeSessionId: config.includeSessionId,
+        filteredTools: [...config.filteredTools]
+      });
+
+      const bridge = createEventBridge({
+        recorder,
+        logger: log,
+        onBranch: (value) => branch.settle(value)
+      });
+
+      // Telemetry must never break the host: a throwing observer is logged and dropped.
+      const guard = (hook: string, run: () => void): Effect.Effect<void> =>
+        Effect.sync(() => {
+          try {
+            run();
+          } catch (error) {
+            log.warn("otel_hook_failed", {
+              hook,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+        });
+
+      // The event stream is a `Stream`, not an async iterator with a signal.
+      // Forking it into the plugin scope is what ties its lifetime to the
+      // plugin: closing the scope interrupts the fiber, which closes the
+      // subscription.
+      yield* Effect.forkScoped(
+        ctx.event.subscribe({ types: EVENT_TYPES }).pipe(
+          Stream.runForEach((event) => Effect.sync(() => bridge.handle(event))),
+          Effect.catchCause(() => Effect.sync(() => log.warn("otel_event_stream_failed", {})))
+        )
+      );
+
+      yield* ctx.session.hook("prompt", (event) =>
+        guard("prompt", () => {
+          const known = bridge.defaults(event.sessionID);
+          // Shape only: part types and text length. The text itself is never kept.
+          const parts: Array<{ type: string; text?: string }> = [
+            { type: "text", text: event.prompt.text },
+            ...(event.prompt.files ?? []).map(() => ({ type: "file" }))
+          ];
+          recorder.onChatMessage(
+            { sessionID: event.sessionID, agent: known?.agent, model: known?.model },
+            { parts }
+          );
+        })
+      );
+
+      yield* ctx.session.hook("context", (event) =>
+        guard("context", () => {
+          bridge.noteContext(event.sessionID, event.agent, event.model);
+          recorder.onChatParams(
+            { sessionID: event.sessionID, agent: event.agent, model: event.model },
+            {
+              temperature: event.options.temperature,
+              topP: event.options.topP,
+              topK: event.options.topK,
+              maxTokens: event.options.maxTokens
+            }
+          );
+        })
+      );
+
+      if (config.propagateTraceContext) {
+        yield* ctx.session.hook("model.request", (event) =>
+          guard("model.request", () => {
+            // Auxiliary requests (title, compaction, generate) can run beside the
+            // primary one, where "the single in-flight chat" would be ambiguous.
+            if (event.kind !== "primary") {
+              return;
+            }
+            const context = recorder.currentChatContext();
+            if (!context) {
+              return;
+            }
+            const carrier: Record<string, string> = {};
+            propagator.inject(context, carrier, defaultTextMapSetter);
+            const present = new Set(Object.keys(event.headers).map((key) => key.toLowerCase()));
+            for (const [key, value] of Object.entries(carrier)) {
+              // Never clobber an upstream traceparent — whatever set it knows more than we do.
+              if (!present.has(key.toLowerCase())) {
+                event.headers[key] = value;
+              }
+            }
+          })
+        );
+        log.debug("otel_trace_propagation_ready", {});
+      }
+
+      yield* ctx.tool.hook("execute.before", (event) =>
+        guard("execute.before", () => {
+          recorder.onToolBefore({ tool: event.tool, sessionID: event.sessionID, id: event.id });
+        })
+      );
+
+      yield* ctx.tool.hook("execute.after", (event) =>
+        guard("execute.after", () => {
+          recorder.onToolAfter(
+            { tool: event.tool, sessionID: event.sessionID, id: event.id, status: event.status },
+            event.status === "completed" ? { content: event.result.content } : undefined
+          );
+        })
+      );
+
+      yield* ctx.permission.hook("evaluate", (event) =>
+        guard("evaluate", () => {
+          recorder.onPermissionAsk(
+            { sessionID: event.sessionID, type: event.action },
+            { status: event.effect }
+          );
+        })
+      );
+    })
+  });
 }
 
 function safeHostname(): string | undefined {
@@ -257,6 +282,6 @@ function safeHostname(): string | undefined {
   }
 }
 
-export const OpencodeOtelPlugin: Plugin = createOtelPlugin();
+export const OpencodeOtelPlugin: Plugin.Plugin = createOtelPlugin();
 
 export default OpencodeOtelPlugin;
