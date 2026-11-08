@@ -1,7 +1,8 @@
 export {
   type BrowserPluginFactoryOptions,
   createBrowserPlugin,
-  OpencodeBrowserPlugin
+  OpencodeBrowserPlugin,
+  PLUGIN_ID
 } from "./opencode.js";
 
 export {
@@ -47,7 +48,13 @@ export {
   writeBridgeFile
 } from "./token-file.js";
 
-export { createBrowserTools, type SaveScreenshot, type SendFn, type ToolDeps } from "./tools.js";
+export {
+  type BrowserToolInfo,
+  createBrowserTools,
+  type SaveScreenshot,
+  type SendFn,
+  type ToolDeps
+} from "./tools.js";
 
 export {
   type Annotation,
@@ -65,7 +72,7 @@ export { type Field, type JsonInput, type JsonSchema, toJsonSchema } from "./sch
 export {
   createJsonConsoleLogger,
   DEFAULT_LOG_LEVEL,
-  fromOpenCodeLogLevel,
+  resolveLogLevel,
   type LogFields,
   type Logger,
   type LogLevel
