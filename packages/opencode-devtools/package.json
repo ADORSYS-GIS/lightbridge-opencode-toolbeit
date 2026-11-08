@@ -63,19 +63,19 @@
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
-    "@opencode-ai/plugin": "1.15.10",
-    "cron-parser": "^5.5.0",
-    "cronstrue": "^3.20.0",
+    "@opencode-ai/plugin": "1.18.32",
+    "cron-parser": "^5.10.1",
+    "cronstrue": "^3.27.0",
     "jsonpath-plus": "^10.4.0",
     "luxon": "^3.7.2",
     "mathjs": "^15.2.0",
-    "papaparse": "^5.5.3",
-    "yaml": "^2.9.0"
+    "papaparse": "^5.7.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/luxon": "^3.7.1",
     "@types/papaparse": "^5.5.2",
-    "vite": "^8.2.1",
+    "vite": "^8.3.0",
     "vitest": "^4.1.7"
   }
 }

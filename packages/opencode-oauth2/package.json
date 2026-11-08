@@ -57,14 +57,14 @@
     "format:check": "biome format ."
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.15.10",
+    "@opencode-ai/plugin": "1.18.32",
     "@vymalo/opencode-auth-core": "workspace:*",
     "@vymalo/opencode-provider-sync": "workspace:*"
   },
   "devDependencies": {
     "@ai-sdk/openai": "^2.0.106",
     "ai": "^5.0.199",
-    "vite": "^8.2.1",
+    "vite": "^8.3.0",
     "vitest": "^4.1.7"
   }
 }
