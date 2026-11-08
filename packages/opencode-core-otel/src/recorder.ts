@@ -8,7 +8,7 @@ import {
   trace
 } from "@opentelemetry/api";
 import { SeverityNumber } from "@opentelemetry/api-logs";
-import { createInstruments, detectLanguage, type Instruments } from "./instruments.js";
+import { createInstruments, type Instruments } from "./instruments.js";
 import type { Logger } from "./logging.js";
 import type { TelemetryProviders } from "./providers.js";
 import type {
@@ -16,7 +16,6 @@ import type {
   ChatMessageOutput,
   ChatParamsInput,
   ChatParamsOutput,
-  FileDiff,
   MessageInfo,
   PartInfo,
   PermissionAskInput,
@@ -25,7 +24,6 @@ import type {
   SessionErrorInfo,
   SessionInfo,
   SessionStatusInfo,
-  TodoInfo,
   ToolAfterInput,
   ToolBeforeInput,
   ToolResultOutput
@@ -73,22 +71,6 @@ interface ToolSpanState {
   tool: string;
   sessionID: string;
   startedAt: number;
-}
-
-/**
- * `diffs` is keyed by session *and* file. The separator is a NUL because it
- * cannot occur in either part — and it lives here, behind two functions,
- * because an invisible character duplicated across a writer and a reader is
- * exactly the kind of literal that silently stops matching.
- */
-const DIFF_KEY_SEPARATOR = "\u0000";
-
-function diffKey(sessionID: string, file: string): string {
-  return `${sessionID}${DIFF_KEY_SEPARATOR}${file}`;
-}
-
-function diffKeyPrefix(sessionID: string): string {
-  return `${sessionID}${DIFF_KEY_SEPARATOR}`;
 }
 
 /**
@@ -148,12 +130,6 @@ export class TelemetryRecorder {
   private readonly finalizedMessages = new Map<string, string>();
   /** Pending permission prompts, so `permission.replied` can name the tool it resolved. */
   private readonly permissions = new Map<string, { type: string; sessionID: string }>();
-  /**
-   * Last-seen cumulative diff per `sessionID\0file`. `session.diff` reports the
-   * session's whole diff each time, so only the delta may be counted.
-   */
-  private readonly diffs = new Map<string, { additions: number; deletions: number }>();
-
   constructor(private readonly deps: RecorderDeps) {
     this.now = deps.now ?? Date.now;
     this.instruments = deps.providers.meter ? createInstruments(deps.providers.meter) : undefined;
@@ -235,9 +211,6 @@ export class TelemetryRecorder {
       case "session.error":
         this.onSessionError(event.properties.sessionID, event.properties.error);
         return;
-      case "session.diff":
-        this.onSessionDiff(event.properties.sessionID, event.properties.diff);
-        return;
       case "message.updated":
         this.onMessageUpdated(event.properties.info);
         return;
@@ -257,13 +230,6 @@ export class TelemetryRecorder {
           event.properties.response
         );
         return;
-      case "command.executed":
-        this.onCommandExecuted(
-          event.properties.sessionID,
-          event.properties.name,
-          event.properties.arguments
-        );
-        return;
       case "installation.updated":
         // The only channel the host version arrives on. See `deferred.ts`.
         this.deps.resourceSinks?.version?.(event.properties.version);
@@ -272,9 +238,6 @@ export class TelemetryRecorder {
         if (event.properties.branch) {
           this.deps.resourceSinks?.branch?.(event.properties.branch);
         }
-        return;
-      case "todo.updated":
-        this.onTodoUpdated(event.properties.sessionID, event.properties.todos);
         return;
       case "session.deleted":
         this.forgetSession(event.properties.info.id);
@@ -400,8 +363,7 @@ export class TelemetryRecorder {
     }
     this.sessions.delete(sessionID);
     // A turn ended: the dedupe bookkeeping for its finished messages and tools
-    // is dead weight from here on. `diffs` deliberately survives — the session
-    // may resume, and its diff totals are cumulative.
+    // is dead weight from here on.
     this.pruneCompleted(sessionID);
 
     // A short CLI invocation may exit right after idle, so drain now rather
@@ -443,52 +405,6 @@ export class TelemetryRecorder {
       SeverityNumber.ERROR,
       state?.context
     );
-  }
-
-  private onSessionDiff(sessionID: string, diff: ReadonlyArray<FileDiff>): void {
-    const state = this.session(sessionID);
-    for (const entry of diff) {
-      const key = diffKey(sessionID, entry.file);
-      const previous = this.diffs.get(key) ?? { additions: 0, deletions: 0 };
-      // Cumulative source → count only what is new since the last report.
-      const added = Math.max(0, (entry.additions ?? 0) - previous.additions);
-      const removed = Math.max(0, (entry.deletions ?? 0) - previous.deletions);
-      this.diffs.set(key, {
-        additions: entry.additions ?? 0,
-        deletions: entry.deletions ?? 0
-      });
-      if (added === 0 && removed === 0) {
-        continue;
-      }
-
-      const language = detectLanguage(entry.file);
-      const languageAttr = language ? { "code.language": language } : {};
-      if (added > 0) {
-        this.instruments?.linesOfCode.add(added, {
-          "opencode.change.type": "added",
-          ...languageAttr,
-          ...this.metricSession(sessionID)
-        });
-      }
-      if (removed > 0) {
-        this.instruments?.linesOfCode.add(removed, {
-          "opencode.change.type": "removed",
-          ...languageAttr,
-          ...this.metricSession(sessionID)
-        });
-      }
-      this.emit(
-        "opencode.file_edited",
-        {
-          "gen_ai.conversation.id": sessionID,
-          ...languageAttr,
-          "opencode.file.additions": added,
-          "opencode.file.deletions": removed
-        },
-        SeverityNumber.INFO,
-        state.context
-      );
-    }
   }
 
   private onMessageUpdated(message: MessageInfo): void {
@@ -726,11 +642,6 @@ export class TelemetryRecorder {
         this.tools.delete(callID);
       }
     }
-    for (const key of this.diffs.keys()) {
-      if (key.startsWith(diffKeyPrefix(sessionID))) {
-        this.diffs.delete(key);
-      }
-    }
     for (const [id, permission] of this.permissions) {
       if (permission.sessionID === sessionID) {
         this.permissions.delete(id);
@@ -743,9 +654,7 @@ export class TelemetryRecorder {
   /**
    * Drop the dedupe bookkeeping for a session's finished messages and tool
    * calls. Safe to run at every idle — those ids are never reused, so nothing
-   * can be double-counted afterwards. Deliberately does **not** touch `diffs`:
-   * `session.diff` is cumulative, so forgetting the last-seen totals for a
-   * session that later resumes would re-count its whole diff.
+   * can be double-counted afterwards.
    */
   private pruneCompleted(sessionID: string): void {
     for (const [id, owner] of this.finalizedMessages) {
@@ -759,46 +668,6 @@ export class TelemetryRecorder {
         this.finishedTools.delete(callID);
       }
     }
-  }
-
-  private onCommandExecuted(sessionID: string, name: string, args?: string): void {
-    const state = this.session(sessionID);
-    this.instruments?.commands.add(1, {
-      "opencode.command.name": name,
-      ...this.metricSession(sessionID)
-    });
-    this.emit(
-      "opencode.command_executed",
-      {
-        "gen_ai.conversation.id": sessionID,
-        "opencode.command.name": name,
-        // Whether arguments were passed, never what they were.
-        "opencode.command.has_arguments": Boolean(args && args.trim() !== "")
-      },
-      SeverityNumber.INFO,
-      state.context
-    );
-  }
-
-  private onTodoUpdated(sessionID: string, todos: ReadonlyArray<TodoInfo>): void {
-    const state = this.session(sessionID);
-    const byStatus: Record<string, number> = {};
-    for (const todo of todos ?? []) {
-      const status = todo?.status ?? "unknown";
-      byStatus[status] = (byStatus[status] ?? 0) + 1;
-    }
-    this.emit(
-      "opencode.todo_updated",
-      {
-        "gen_ai.conversation.id": sessionID,
-        "opencode.todo.total": todos?.length ?? 0,
-        ...Object.fromEntries(
-          Object.entries(byStatus).map(([status, count]) => [`opencode.todo.${status}`, count])
-        )
-      },
-      SeverityNumber.INFO,
-      state.context
-    );
   }
 
   // ------------------------------------------------------------------ hooks
@@ -1041,8 +910,7 @@ export class TelemetryRecorder {
       tools: this.tools.size,
       finalizedMessages: this.finalizedMessages.size,
       finishedTools: this.finishedTools.size,
-      permissions: this.permissions.size,
-      diffs: this.diffs.size
+      permissions: this.permissions.size
     };
   }
 

@@ -12,6 +12,20 @@ All sixteen workspace packages move on **one version line** and are released tog
 
 - **all packages:** Brought the root documentation in line with the completed OpenCode v2 cutover ([ADR-0019](docs/adr/0019-opencode-v2-cutover.md), source of truth [#128](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/128)). `CLAUDE.md` / `AGENTS.md` drop the mid-migration banner, correct the package count to sixteen (three private), remove every `code-index` reference, describe each plugin by the v2 domain transforms and hooks it really registers, re-derive the models-info `Authorization` handoff on `Provider.Info.headers`, document that `oauth2` must be listed before `models-info` and `lightbridge`, and record the `effect` peer-dependency invariant and the Effect-logger convention. The remaining v1-shaped guides and config examples (`README.md`, `GETTING_STARTED.md`, `docs/architecture.md`, `docs/troubleshooting.md`, `docs/local-development.md`, `docs/github-actions.md`, `docs/kubernetes.md`, `docs/security.md`, `docs/well-known.md`, `docs/lightbridge.md`, `docs/repo-auth.md`) move to the v2 config shape (`plugins`, `providers`, `settings`). `plans/opencode-v2.md` is marked done, and `docs/adr/0019-opencode-v2-cutover.md` no longer points at the removed `code-index` package. The preamble above now says sixteen packages and drops the `code-index` tag.
 
+## [Unreleased]
+
+### Removed
+
+- **core-otel, otel:** Deleted the now-unreachable `session.diff`, `todo.updated` and `command.executed` paths from `@vymalo/opencode-core-otel`. The v2 port of `otel` already stopped feeding them; the engine still carried the recorder handlers, the `opencode.lines_of_code.count` and `opencode.command.executed.count` instruments, and the `opencode.file_edited`, `opencode.todo_updated` and `opencode.command_executed` log emitters. All gone, along with their `RecorderEvent` variants, the `FileDiff` and `TodoInfo` types, the `detectLanguage` helper (its only caller was the diff recorder) and the `diffs` key of `TelemetryRecorder.pendingStateSize()`. **Breaking for direct `./lib` consumers** of those exports; the `otel` and `lightbridge` plugins are unaffected, since neither emitted them after the v2 port. ([#140](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/140))
+
+### Changed
+
+- **provider-sync, lightbridge:** `upsertManagedProvider` (add the provider as `activation: "enabled"` if absent, otherwise update `package`/`name`/`settings` in place) is now exported from `@vymalo/opencode-provider-sync/lib` and is the single implementation; lightbridge's `register` module calls it instead of carrying its own copy. No behaviour change, and the shared root-token cache path is untouched. ([#141](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/141))
+
+### Documentation
+
+- **core-otel, otel:** `docs/otel.md` no longer says the engine still implements the dropped signals.
+
 ## [0.17.1] — 2026-09-18
 
 A dependency-only patch. No package's code changes in this release — it exists to carry a

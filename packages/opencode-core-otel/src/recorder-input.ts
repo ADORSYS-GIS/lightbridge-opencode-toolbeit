@@ -125,16 +125,6 @@ export interface SessionStatusInfo {
   readonly attempt?: number;
 }
 
-export interface FileDiff {
-  readonly file: string;
-  readonly additions: number;
-  readonly deletions: number;
-}
-
-export interface TodoInfo {
-  readonly status?: string;
-}
-
 export interface TokenCounts {
   readonly input: number;
   readonly output: number;
@@ -188,10 +178,6 @@ export type RecorderEvent =
       readonly type: "session.error";
       readonly properties: { readonly sessionID?: string; readonly error?: SessionErrorInfo };
     }
-  | {
-      readonly type: "session.diff";
-      readonly properties: { readonly sessionID: string; readonly diff: ReadonlyArray<FileDiff> };
-    }
   | { readonly type: "message.updated"; readonly properties: { readonly info: MessageInfo } }
   | { readonly type: "message.part.updated"; readonly properties: { readonly part: PartInfo } }
   | {
@@ -210,20 +196,8 @@ export type RecorderEvent =
         readonly response: string;
       };
     }
-  | {
-      readonly type: "command.executed";
-      readonly properties: {
-        readonly sessionID: string;
-        readonly name: string;
-        readonly arguments?: string;
-      };
-    }
   | { readonly type: "installation.updated"; readonly properties: { readonly version: string } }
   | { readonly type: "vcs.branch.updated"; readonly properties: { readonly branch?: string } }
-  | {
-      readonly type: "todo.updated";
-      readonly properties: { readonly sessionID: string; readonly todos: ReadonlyArray<TodoInfo> };
-    }
   | {
       readonly type: "session.deleted";
       readonly properties: { readonly info: { readonly id: string } };

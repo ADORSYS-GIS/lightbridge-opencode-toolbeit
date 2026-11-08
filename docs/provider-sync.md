@@ -38,7 +38,8 @@ loaded directly by the OpenCode host. It is a library two plugins compose: `@vym
   doubles per consecutive failure, capped at the configured interval).
 - **`opencode-helpers.ts`** (exported from `./lib` only) — the **`ProviderEditor`** wiring a
   consumer composes inside `ctx.provider.transform` with its **own** settings-key literals:
-  `collectManagedProviders`, `parsePluginOptionsServers`, `parseOAuthExtension`,
+  `collectManagedProviders`, `upsertManagedProvider` (the single add-or-update-in-place implementation —
+  lightbridge's `register` module calls it rather than carrying a copy), `parsePluginOptionsServers`, `parseOAuthExtension`,
   `mergeDiscoveredModels`, `resolveCachedBearer` + `propagateCachedBearer`, `resolveProviderPackage`,
   `applyResponsesApiSettings`, `runtimeSignature`. These were private functions inside
   `opencode-oauth2`'s `opencode.ts` before the extraction, and operated on the v1 `config` object

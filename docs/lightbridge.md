@@ -138,7 +138,7 @@ sequenceDiagram
   participant Rec as TelemetryRecorder
   Host->>LB: provider.transform(editor)  [sync, opencode.ts register block]
   LB->>LB: collision? settings.oauth2 on auth.id → skip, never build
-  LB->>Host: upsert provider + merge cached models + stamp cached bearer
+  LB->>Host: upsertManagedProvider (provider-sync) + merge cached models + stamp cached bearer
   LB-)Eng: queued build: initialize, start(warmup), resolveCachedBearer
   Eng--)LB: models + bearer ready
   LB->>Host: provider.reload()
