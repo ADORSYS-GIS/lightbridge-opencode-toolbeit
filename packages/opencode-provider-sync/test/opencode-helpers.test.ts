@@ -466,7 +466,10 @@ describe("mergeDiscoveredModels", () => {
       modelID: "glm-5",
       providerID: "p1",
       name: "GLM 5",
-      enabled: true
+      enabled: true,
+      limit: { context: 0, output: 0 },
+      cost: [],
+      capabilities: { tools: false, input: [], output: [] }
     });
     expect(() => Schema.decodeUnknownSync(Model.Info)(added)).not.toThrow();
   });

@@ -180,16 +180,26 @@ A newly added provider (from `options.servers`) gets `activation: "enabled"`: th
 injected per request, not held as a host connection, so `"auto"` could leave it inactive. A provider
 the user already declared keeps its own `activation`, `id` and unrelated fields.
 
-**Discovered models are placeholders.** `Model.Info` requires `limit`, `capabilities`, `cost`,
-`status`, `enabled`, `time` and `variants`, which v1 simply left absent until
-`@vymalo/opencode-models-info` filled them in. `mergeDiscoveredModels` therefore creates a model from
-`Model.Info.default(providerID, id)` (200k context / 32k output, `tools: true`,
-`input: ["text", "image"]`, `output: ["text"]`, `status: "active"`, `enabled: true`) with only `name`
-set from discovery. **These values are not facts about the model** — models-info's "upstream wins"
-merge can no longer tell "absent" from "defaulted" by presence alone, and has to treat a value equal
-to the `Model.Info.default(…)` one as unset. `ProviderEditor.models.set` replaces a provider's whole
-model list, so the helper writes the union of existing and discovered models in one call; existing
-models keep every field except `name`, which discovery still overwrites (as in v1).
+**Discovered models carry sentinels, not defaults.** `Model.Info` requires `limit`, `capabilities`,
+`cost`, `status`, `enabled`, `time` and `variants`, which v1 left absent until
+`@vymalo/opencode-models-info` filled them in. `mergeDiscoveredModels` creates models via
+`discoveredModelPlaceholder`: only `id`/`modelID`/`providerID`/`name` are real; the rest are values
+that mean "unknown" and cannot be mistaken for data (unlike `Model.Info.default(...)`'s 200k context
+and text+image modalities):
+
+| Field | Sentinel = "not known" |
+| --- | --- |
+| `limit` | `{ context: 0, output: 0 }` (the same zero v1's host backfilled) |
+| `cost` | `[]` |
+| `capabilities.tools` | `false` (models-info's mapper only ever sets `true`) |
+| `capabilities.input` / `.output` | `[]` |
+| `time.released` | `0` |
+
+models-info's upstream-wins merge should treat exactly these as absent. Unverified: whether the host
+tolerates empty modalities / a zero limit on a model that never gets enriched. `ProviderEditor.models.set`
+replaces a provider's whole model list, so the helper writes the union of existing and discovered
+models in one call; existing models keep every field except `name`, which discovery still overwrites
+(as in v1).
 
 ### The `Authorization` handoff to models-info (v2 contract)
 
@@ -206,7 +216,8 @@ OAuth-protected `modelsInfoUrl`. The coupling survives, relocated:
 - **Never overwrites the user.** An `Authorization` header — matched case-insensitively — that the
   user declared always wins, and is logged as `oauth2_bearer_propagation_skipped_user_set`. The
   optional `stamped` map lets the helper recognise (and refresh) a value it wrote on an earlier pass,
-  so refresh works whether or not the host hands each transform pass a fresh editor.
+  so refresh works whether or not the host hands each transform pass a fresh editor. (Defensive:
+  the published types do not say which; unverified.)
 - **Freshness.** The token is resolved *outside* the transform by `resolveCachedBearer` — a
   refresh-only, non-interactive `ensureAccessToken` (a near-expiry token is refreshed; anything
   needing a fresh login is skipped, `oauth2_bearer_propagation_skipped_no_token`). The owner caches

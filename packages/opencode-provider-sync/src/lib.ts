@@ -34,6 +34,7 @@ export type {
 export {
   applyResponsesApiSettings,
   collectManagedProviders,
+  discoveredModelPlaceholder,
   mergeDiscoveredModels,
   parseOAuthExtension,
   parsePluginOptionsServers,

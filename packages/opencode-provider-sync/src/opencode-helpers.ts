@@ -536,10 +536,38 @@ export function runtimeSignature(config: { servers: Array<{ id: string }> }): st
 }
 
 /**
+ * A discovered model: only `id`/`modelID`/`providerID`/`name` are real. `Model.Info`
+ * requires every other field, so they are filled with SENTINELS that mean
+ * "unknown" and that a later enrichment pass (models-info) can recognise:
+ *
+ * - `limit`: `{ context: 0, output: 0 }` (what v1's host backfilled for an absent `limit`)
+ * - `cost`: `[]`
+ * - `capabilities`: `{ tools: false, input: [], output: [] }` (models-info's mapper only
+ *   ever sets `tools` to `true`, so `false` is "unknown", never "known false")
+ * - `time.released: 0`, `status: "active"`, `enabled: true`, `variants: []`
+ *
+ * Unlike `Model.Info.default(...)` (200k context, text+image), none of these can
+ * be mistaken for real data. Whether the host copes with empty modalities / a
+ * zero limit is unverified; v1 relied on the same zero `limit` backfill.
+ */
+export function discoveredModelPlaceholder(
+  providerId: string,
+  id: string,
+  name: string
+): ModelInfo {
+  return {
+    ...Model.Info.default(Provider.ID.make(providerId), Model.ID.make(id)),
+    name,
+    capabilities: { tools: false, input: [], output: [] },
+    limit: { context: 0, output: 0 }
+  };
+}
+
+/**
  * Merge discovered models into a provider on the editor. Existing models are
  * kept as-is (a user's overrides survive) except that a model whose id was
  * discovered takes the discovered display `name`; ids not yet on the provider
- * are added as `Model.Info.default(...)` placeholders carrying that name.
+ * are added as {@link discoveredModelPlaceholder}s carrying that name.
  *
  * `ProviderEditor.models.update` can only edit an existing model, and `set`
  * replaces the provider's whole model list, so the union is built here and
@@ -567,10 +595,7 @@ export function mergeDiscoveredModels(
   }
 
   for (const [id, name] of names) {
-    merged.push({
-      ...Model.Info.default(Provider.ID.make(providerId), Model.ID.make(id)),
-      name
-    });
+    merged.push(discoveredModelPlaceholder(providerId, id, name));
   }
 
   editor.models.set(providerId, merged);
@@ -628,7 +653,9 @@ export async function resolveCachedBearer(
  * never overwritten. To tell the user's header from one this plugin stamped on
  * an earlier pass, pass the same `stamped` map every call: it records the last
  * value written per provider, and a header equal to it is ours to refresh.
- * This keeps the refresh working whether or not the host hands each transform
+ * DEFENSIVE: the published types do not say whether the host gives each
+ * transform pass a fresh editor or carries state across passes (unverified), so
+ * this keeps the refresh working whether or not the host hands each transform
  * pass a fresh editor.
  */
 export function propagateCachedBearer(
