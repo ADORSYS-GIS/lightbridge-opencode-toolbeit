@@ -2,8 +2,9 @@
  * A tiny, neutral schema vocabulary for tool arguments. The tool catalog
  * (`catalog.ts`) is the single source of truth; each adapter turns these specs
  * into its own format:
- *   - the OpenCode plugin builds a zod shape (see `buildShape` in tools.ts),
- *   - the MCP server emits standard JSON Schema via `toJsonSchema` below.
+ *   - the OpenCode v2 plugin hands `toJsonSchema`'s output straight to
+ *     `ToolEditor.add({ input })` (v2 takes raw JSON Schema; see tools.ts),
+ *   - the MCP server emits the same standard JSON Schema via `toJsonSchema`.
  *
  * Lifted verbatim from `@vymalo/opencode-browser` so the two tool-registering
  * plugins describe their surface the same way. Keeping the vocabulary small
@@ -63,12 +64,15 @@ export type Field =
 /** Top-level argument map for a tool. */
 export type JsonInput = Record<string, Field>;
 
-export interface JsonSchema {
+// A type alias, not an interface: v2's `Tool.ValueSchema` accepts effect's
+// `JsonSchema` (`{ [x: string]: unknown }`), and only a type alias carries the
+// implicit index signature that makes this assignable to it.
+export type JsonSchema = {
   type: "object";
   properties: Record<string, unknown>;
   required: string[];
   additionalProperties: false;
-}
+};
 
 function fieldToJsonSchema(field: Field): Record<string, unknown> {
   const out: Record<string, unknown> = { type: field.type };

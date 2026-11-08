@@ -63,7 +63,7 @@
   },
   "dependencies": {
     "@iarna/toml": "^2.2.5",
-    "@opencode-ai/plugin": "1.18.32",
+    "@opencode/plugin": "2.2.6",
     "cron-parser": "^5.10.1",
     "cronstrue": "^3.27.0",
     "jsonpath-plus": "^10.4.0",
@@ -75,7 +75,11 @@
   "devDependencies": {
     "@types/luxon": "^3.7.1",
     "@types/papaparse": "^5.5.2",
+    "effect": "4.1.0",
     "vite": "^8.3.0",
     "vitest": "^5.0.1"
+  },
+  "peerDependencies": {
+    "effect": "^4.0.0"
   }
 }

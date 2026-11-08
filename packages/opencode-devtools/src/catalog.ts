@@ -32,6 +32,19 @@ export const DEFAULT_GROUPS: readonly ToolGroup[] = [
 ] as const;
 
 /**
+ * One-line description per group. The OpenCode v2 plugin registers each group
+ * as a tool `namespace`, which carries a description.
+ */
+export const GROUP_DESCRIPTIONS: Readonly<Record<ToolGroup, string>> = {
+  math: "Precise arithmetic, unit and base conversion, and statistics.",
+  codec: "Encode and decode base64, hex, URL and gzip; decode JWTs (unverified).",
+  crypto: "Hashes, HMACs, UUID/ULID, random bytes and keypairs.",
+  datetime: "Parse, format, diff and convert dates and timezones; explain cron expressions.",
+  convert: "Convert between JSON, YAML, TOML and CSV; run JSONPath queries.",
+  http: "HTTP and GraphQL requests (network egress; SSRF-guarded)."
+};
+
+/**
  * The single source of truth for the devtools tool surface, shared by the
  * OpenCode plugin and the MCP server. Filter by `group` to gate what an agent
  * sees.
