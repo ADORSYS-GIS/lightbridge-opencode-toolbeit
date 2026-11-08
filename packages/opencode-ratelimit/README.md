@@ -2,7 +2,9 @@
 
 OpenCode plugin that makes OpenAI-compatible providers **rate-limit aware**. It reads the IETF draft-03 rate-limit response headers emitted by [Envoy Gateway](https://gateway.envoyproxy.io/docs/tasks/traffic/global-rate-limit/)'s global rate limiting (`x-ratelimit-limit` / `-remaining` / `-reset`), proactively pauses new requests when the quota is exhausted, and backs off + retries on HTTP `429` — so your OpenCode client cooperates with the gateway instead of hammering it.
 
-Auth-agnostic by design: it runs as an OpenCode `config` hook and only wraps the provider's `fetch`. It never reads or sets `Authorization`, so it composes with `@vymalo/opencode-oauth2`, static API keys, or no auth at all.
+Auth-agnostic by design: it observes OpenCode's HTTP request/response hooks and never reads or sets `Authorization`, so it composes with `@vymalo/opencode-oauth2`, static API keys, or no auth at all.
+
+> **Requires OpenCode v2.** This release targets the v2 plugin API and does not run on v1. Migrating from `0.17.x`? See [Migrating from v1](#migrating-from-v1).
 
 ## Why use this
 
@@ -10,14 +12,14 @@ OpenCode has no built-in client-side rate-limit handling. If your inference sits
 
 ## How it works
 
-OpenCode's plugin API has **no post-response hook**, so the only way to observe response status and headers is to inject a custom `fetch` onto the provider's `options.fetch` during the `config` hook (OpenCode forwards it to the AI SDK provider). This plugin wraps that fetch:
+Four registrations on OpenCode's native request lifecycle:
 
-1. **Pre-request gate** — if the last response said `remaining: 0`, hold new requests until `x-ratelimit-reset` elapses.
-2. **Send** the request through the underlying fetch (or any fetch a prior plugin already installed).
-3. **Read** the rate-limit headers from the response and update per-provider state.
-4. **On `429`** — wait the reset window (`x-ratelimit-reset`, or `Retry-After` as a fallback) and retry, up to `maxRetries`.
+1. **`provider.transform`** — read which providers opted in via `settings.rateLimit`. Reads only; it never mutates a provider.
+2. **`http.request`** — pre-request gate. If the last response said `remaining: 0`, hold new requests until `x-ratelimit-reset` elapses.
+3. **`http.response`** — read the rate-limit headers and update per-bucket state.
+4. **`retry`** — on a `429`, return the reset window (`x-ratelimit-reset`, or `Retry-After` as a fallback) as the host's retry delay, up to `maxRetries`; or decline the retry so the `429` surfaces immediately.
 
-The `Response` is returned untouched (no `.clone()`), so the streaming body reaches OpenCode intact.
+The response body is never read — only `status` and `headers` — so the streaming body reaches OpenCode intact. Because `retry` hands the delay to OpenCode, the plugin never blocks a request thread on a `429`; the host sleeps, cancellably, and counts the attempts.
 
 > **Where the headers live.** Envoy attaches its rate-limit `BackendTrafficPolicy` to a specific route — in practice `/v1/chat/completions`, **not** `/v1/models`. So the plugin sees the quota on the inference calls that matter, and a `curl` of `/v1/models` may show no `x-ratelimit-*` at all. The `limit` header is also commonly *multi-policy*, e.g. `x-ratelimit-limit: 200, 200;w=60, 200000;w=60, 50000000;w=2592000` — the parser takes the first token as `limit`, while `remaining`/`reset` already track whichever bucket is closest to its cap (which is all the throttle logic needs).
 
@@ -29,29 +31,42 @@ npm install @vymalo/opencode-ratelimit
 
 ## Usage
 
-A provider opts in via `options.meta.rateLimit`. All fields are optional:
+A provider opts in via `settings.rateLimit`. All fields are optional:
 
 ```json
 {
-  "plugin": ["@vymalo/opencode-ratelimit"],
-  "provider": {
+  "plugins": ["@vymalo/opencode-ratelimit"],
+  "providers": {
     "my-provider": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
         "baseURL": "https://api.example.com/v1",
-        "meta": {
-          "rateLimit": {
-            "enabled": true,
-            "maxWaitMs": 0,
-            "maxRetries": 5,
-            "headerPrefix": "x-ratelimit"
-          }
+        "rateLimit": {
+          "enabled": true,
+          "maxWaitMs": 0,
+          "maxRetries": 5,
+          "headerPrefix": "x-ratelimit"
         }
       }
     }
   }
 }
 ```
+
+The plugin's own options (currently just `logLevel`) go on its `plugins` entry:
+
+```json
+{
+  "plugins": [
+    { "package": "@vymalo/opencode-ratelimit", "options": { "logLevel": "debug" } }
+  ]
+}
+```
+
+> **`logLevel` is a gate, not an override.** Records go to OpenCode's own logger, which applies the
+> host's level too — and Effect's default minimum is `Info`. So `"logLevel": "debug"` alone will not
+> surface `debug`/`trace` records; the host has to permit them as well
+> (`OPENCODE_LOG_LEVEL=DEBUG`). Both gates must be open.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -62,14 +77,15 @@ A provider opts in via `options.meta.rateLimit`. All fields are optional:
 | `headerPrefix` | `x-ratelimit` | Lowercased prefix of the draft-03 triple. Remap for gateways that use e.g. `ratelimit-*`. |
 | `tiers` | — | Optional array of policy bands keyed by reset magnitude. Replaces flat `maxWaitMs`/`maxRetries` with per-window behavior. See [Tiered policies](#tiered-policies). |
 
-If you also use `@vymalo/opencode-oauth2`, list it **before** this plugin in `plugin` (config hooks run in registration order). It is only a soft recommendation — this plugin's fetch wrapping is auth-independent.
+Ordering in `plugins` does not matter for this plugin. Each v2 plugin registers against a different domain, and this one touches neither auth nor the provider definition.
 
 ### Tiered policies
 
 A single `maxWaitMs` can't tell a **per-minute burst reset** (≤60s — worth waiting through) from a **monthly-budget reset** (days away — should error fast): both arrive as the same `x-ratelimit-reset`. The discriminator is the reset's *magnitude*, and `tiers` lets you act on it. Each tier matches resets up to `maxResetSeconds` (first match wins; ascending, catch-all last):
 
 ```jsonc
-"meta": { "rateLimit": {
+// providers.<id>.settings
+"rateLimit": {
   "scope": "model",
   "tiers": [
     { "maxResetSeconds": 120, "action": "wait", "maxWaitMs": 0, "maxRetries": 3 }, // ≤2min: wait it out
@@ -92,18 +108,18 @@ Notes:
 
 ### Per-model scope
 
-If your gateway buckets per model (e.g. Envoy `BackendTrafficPolicy` selectors that include the model), `scope: "model"` (the default) keys cooldown state per `(provider, model)` — so exhausting one model's bucket never blocks requests to a sibling model that still has quota. The model is read from the request body (`@ai-sdk/openai-compatible` sends a JSON body with `model`); when it can't be parsed the bucket falls back to provider-wide. Use `scope: "provider"` if your gateway buckets per provider/account.
+If your gateway buckets per model (e.g. Envoy `BackendTrafficPolicy` selectors that include the model), `scope: "model"` (the default) keys cooldown state per `(provider, model)` — so exhausting one model's bucket never blocks requests to a sibling model that still has quota. The model comes straight off the hook event, so there is no body parsing and no fallback case. Use `scope: "provider"` if your gateway buckets per provider/account.
 
 ## Caveats
 
 ### Long waits can be cut short by OpenCode's own timeouts
 
-OpenCode wraps the injected `fetch` with its own `headerTimeout` / `chunkTimeout` logic, and our pre-request gate and `429` backoff wait **inside** that fetch. With the default `maxWaitMs: 0`, a 55-second reset window means a 55-second wait — which OpenCode may abort if it exceeds the header timeout. When that happens the wait is cancelled cleanly (a `ratelimit_wait_aborted` event is logged and the abort is propagated as a normal cancellation).
+The pre-request gate holds the request inside OpenCode's own request path, so it competes with the provider's `headerTimeout` / `chunkTimeout`. With the default `maxWaitMs: 0`, a 55-second reset window means a 55-second hold — which OpenCode may abort if it exceeds the header timeout. When that happens the wait is cancelled cleanly (a `ratelimit_wait_aborted` event is logged and the abort is propagated as a normal cancellation). The `429` backoff is the host's own retry delay and is not subject to this.
 
 If you expect long waits, raise the provider's `headerTimeout` (and `chunkTimeout`) above your largest reset window:
 
 ```json
-"options": { "headerTimeout": 90000, "chunkTimeout": 90000 }
+"settings": { "headerTimeout": 90000, "chunkTimeout": 90000 }
 ```
 
 ### State is in-memory only
@@ -138,3 +154,22 @@ The `./lib` subpath exports the testable internals for embedders: `parseRateLimi
 ## License
 
 MIT
+
+## Migrating from v1
+
+`0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See
+[ADR-0018](../../docs/adr/0018-opencode-v2-cutover.md) for why there is no dual-support build.
+
+| v1 | v2 |
+| --- | --- |
+| `"plugin": [...]` | `"plugins": [...]` |
+| `"provider": { ... }` | `"providers": { ... }` |
+| `"npm": "@ai-sdk/openai-compatible"` | `"package": "aisdk:@ai-sdk/openai-compatible"` |
+| `options.baseURL` | `settings.baseURL` |
+| `options.meta.rateLimit` | `settings.rateLimit` |
+| `options.headerTimeout` / `chunkTimeout` | `settings.headerTimeout` / `chunkTimeout` |
+| `pluginConfig.ratelimit.logLevel` | the plugin's own `options.logLevel` |
+| host `config.logLevel` drove the log level | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
+
+The `rateLimit` block's own fields — `enabled`, `scope`, `maxWaitMs`, `maxRetries`,
+`headerPrefix`, `tiers` — are unchanged, as is every `ratelimit_*` event name.

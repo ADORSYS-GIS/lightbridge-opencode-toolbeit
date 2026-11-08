@@ -1,14 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Logger } from "../src/logging.js";
-import {
-  createProviderState,
-  type InstallConfigInput,
-  installRateLimiter,
-  makeRateLimitFetch,
-  type RateLimitDeps,
-  type RateStateStore
-} from "../src/plugin.js";
+import { collectOptIns, createRateLimiter, type RateLimiter } from "../src/plugin.js";
 import type { RateLimitOptions, RateLimitScope, RateLimitTier } from "../src/types.js";
 
 const NOW = 1_700_000_000_000;
@@ -54,30 +47,8 @@ function makeOpts(
   };
 }
 
-function res(status: number, headers: Record<string, string> = {}, body?: string): Response {
-  return new Response(body ?? null, { status, headers });
-}
-
-interface Harness {
-  logger: Logger;
-  clock: ReturnType<typeof fakeClock>;
-  fetchImpl: ReturnType<typeof vi.fn>;
-  store: RateStateStore;
-  state: ReturnType<typeof createProviderState>;
-  deps: RateLimitDeps;
-  fetch: typeof fetch;
-}
-
-function harness(opts: RateLimitOptions = makeOpts()): Harness {
-  const logger = silentLogger();
-  const clock = fakeClock();
-  const fetchImpl = vi.fn();
-  const store: RateStateStore = new Map();
-  const state = createProviderState();
-  store.set("test-provider", state); // provider scope → bucket key is the provider id
-  const deps: RateLimitDeps = { logger, now: clock.now, sleep: clock.sleep, fetchImpl };
-  const fetch = makeRateLimitFetch("test-provider", opts, store, deps);
-  return { logger, clock, fetchImpl, store, state, deps, fetch };
+function resp(status: number, headers: Record<string, string> = {}) {
+  return { status, headers: new Headers(headers) };
 }
 
 function eventNames(spy: Logger[keyof Logger]): string[] {
@@ -86,553 +57,526 @@ function eventNames(spy: Logger[keyof Logger]): string[] {
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-describe("makeRateLimitFetch", () => {
+const P = { providerId: "p" };
+
+interface Harness {
+  logger: Logger;
+  clock: ReturnType<typeof fakeClock>;
+  limiter: RateLimiter;
+}
+
+function harness(opts: RateLimitOptions = makeOpts(), ids: string[] = ["p"]): Harness {
+  const logger = silentLogger();
+  const clock = fakeClock();
+  const limiter = createRateLimiter({ logger, now: clock.now, sleep: clock.sleep });
+  limiter.configure(new Map(ids.map((id) => [id, opts])));
+  return { logger, clock, limiter };
+}
+
+const tiered = () =>
+  makeOpts({
+    tiers: [
+      { maxResetSeconds: 120, action: "wait", maxWaitMs: 0, maxRetries: 3 }, // burst → wait
+      { maxResetSeconds: null, action: "error", maxWaitMs: 0, maxRetries: 0 } // long → fail fast
+    ]
+  });
+
+const cappedTiered = () =>
+  makeOpts({
+    tiers: [
+      { maxResetSeconds: 120, action: "wait", maxWaitMs: 1_000, maxRetries: 3 },
+      { maxResetSeconds: null, action: "error", maxWaitMs: 0, maxRetries: 0 }
+    ]
+  });
+
+describe("RateLimiter basics", () => {
   it("logs the parsed quota without waiting on a healthy response", async () => {
     const h = harness();
-    h.fetchImpl.mockResolvedValueOnce(
-      res(200, {
+    h.limiter.observe(
+      P,
+      resp(200, {
         "x-ratelimit-limit": "10",
         "x-ratelimit-remaining": "2",
         "x-ratelimit-reset": "30"
       })
     );
+    await h.limiter.acquire(P);
 
-    const response = await h.fetch("https://api.test/v1/chat");
-
-    expect(response.status).toBe(200);
-    expect(h.clock.sleep).not.toHaveBeenCalled();
-    expect(h.state.cooldownUntilMs).toBe(0); // healthy → gate not armed
+    expect(h.clock.sleep).not.toHaveBeenCalled(); // healthy → gate not armed
     expect(h.logger.debug).toHaveBeenCalledWith(
       "ratelimit_quota",
       expect.objectContaining({ remaining: 2, limit: 10, resetSeconds: 30 })
     );
   });
 
-  it("proactively throttles the next request after remaining hits 0", async () => {
+  it("proactively throttles the next acquire after remaining hits 0", async () => {
     const h = harness();
-    h.fetchImpl
-      .mockResolvedValueOnce(res(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" }))
-      .mockResolvedValueOnce(res(200, { "x-ratelimit-remaining": "5" }));
-
-    await h.fetch("https://api.test"); // arms the cooldown
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" }));
     expect(h.clock.sleep).not.toHaveBeenCalled();
 
-    const second = await h.fetch("https://api.test"); // gated
+    await h.limiter.acquire(P); // gated
 
     expect(h.clock.sleep).toHaveBeenCalledTimes(1);
     expect(h.clock.sleep).toHaveBeenCalledWith(48_000);
-    expect(second.status).toBe(200);
     expect(eventNames(h.logger.info)).toContain("ratelimit_throttle_wait");
   });
 
-  it("backs off and retries on a 429 then returns the 200", async () => {
+  it("does nothing for a provider that has not opted in", async () => {
     const h = harness();
-    h.fetchImpl
-      .mockResolvedValueOnce(res(429, { "x-ratelimit-reset": "5" }))
-      .mockResolvedValueOnce(res(200, { "x-ratelimit-remaining": "3" }));
+    const other = { providerId: "other" };
+    h.limiter.observe(
+      other,
+      resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" })
+    );
+    await h.limiter.acquire(other);
 
-    const response = await h.fetch("https://api.test");
+    expect(h.clock.sleep).not.toHaveBeenCalled();
+    expect(h.limiter.options("other")).toBeUndefined();
+    expect(h.limiter.options("p")?.scope).toBe("provider");
+  });
 
-    expect(response.status).toBe(200);
-    expect(h.fetchImpl).toHaveBeenCalledTimes(2);
-    expect(h.clock.sleep).toHaveBeenCalledTimes(1);
-    expect(h.clock.sleep).toHaveBeenCalledWith(5_000);
+  it("does not wait when the clamped wait is zero", async () => {
+    // maxWaitMs:1 with a cooldown already expired by the clock → no sleep.
+    const h = harness();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "5" }));
+    h.clock.advance(6_000);
+    await h.limiter.acquire(P);
+    expect(h.clock.sleep).not.toHaveBeenCalled();
+  });
+
+  it("survives a header parse that yields nothing", () => {
+    const h = harness();
+    h.limiter.observe(P, resp(200));
+    expect(h.logger.debug).toHaveBeenCalledWith("ratelimit_quota", expect.any(Object));
+  });
+});
+
+describe("RateLimiter.decideRetry", () => {
+  it("backs off on a 429 under a wait tier", () => {
+    const h = harness();
+    h.limiter.observe(P, resp(429, { "x-ratelimit-reset": "5" }));
+
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: true, delay: 5_000 });
     expect(eventNames(h.logger.warn)).toContain("ratelimit_429_backoff");
   });
 
-  it("gives up after maxRetries and returns the final 429", async () => {
+  it("gives up once attempt reaches maxRetries", () => {
     const h = harness(makeOpts({ maxRetries: 2 }));
-    h.fetchImpl.mockResolvedValue(res(429, { "x-ratelimit-reset": "5" }));
+    h.limiter.observe(P, resp(429, { "x-ratelimit-reset": "5" }));
 
-    const response = await h.fetch("https://api.test");
-
-    expect(response.status).toBe(429);
-    expect(h.fetchImpl).toHaveBeenCalledTimes(3); // initial + 2 retries
-    expect(h.clock.sleep).toHaveBeenCalledTimes(2);
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0).retry).toBe(true);
+    expect(h.limiter.decideRetry(P, { status: 429 }, 1).retry).toBe(true);
+    expect(h.limiter.decideRetry(P, { status: 429 }, 2)).toEqual({ retry: false });
     expect(eventNames(h.logger.error)).toContain("ratelimit_giveup");
   });
 
-  it("falls back to Retry-After when no x-ratelimit-reset is present", async () => {
+  it("falls back to Retry-After when no x-ratelimit-reset is present", () => {
     const h = harness();
-    h.fetchImpl
-      .mockResolvedValueOnce(res(429, { "retry-after": "5" }))
-      .mockResolvedValueOnce(res(200));
+    h.limiter.observe(P, resp(429, { "retry-after": "5" }));
 
-    await h.fetch("https://api.test");
-
-    expect(h.clock.sleep).toHaveBeenCalledWith(5_000);
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: true, delay: 5_000 });
   });
 
-  it("caps a long wait at maxWaitMs", async () => {
+  it("falls back to the error's retryAfterMs when no response was observed", () => {
+    const h = harness();
+    expect(h.limiter.decideRetry(P, { status: 429, retryAfterMs: 7_000 }, 0)).toEqual({
+      retry: true,
+      delay: 7_000
+    });
+  });
+
+  it("uses the default backoff when nothing says how long to wait", () => {
+    const h = harness();
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: true, delay: 1_000 });
+  });
+
+  it("caps a long wait at maxWaitMs", () => {
     const h = harness(makeOpts({ maxWaitMs: 1_000 }));
-    h.fetchImpl
-      .mockResolvedValueOnce(res(429, { "x-ratelimit-reset": "60" }))
-      .mockResolvedValueOnce(res(200));
+    h.limiter.observe(P, resp(429, { "x-ratelimit-reset": "60" }));
 
-    await h.fetch("https://api.test");
-
-    expect(h.clock.sleep).toHaveBeenCalledWith(1_000);
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: true, delay: 1_000 });
   });
 
-  it("returns the same Response instance (no body clone)", async () => {
+  it("treats maxWaitMs of 0 as unlimited", () => {
+    const h = harness(makeOpts({ maxWaitMs: 0 }));
+    h.limiter.observe(P, resp(429, { "x-ratelimit-reset": "60" }));
+
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: true, delay: 60_000 });
+  });
+
+  it("declines a non-429 status", () => {
     const h = harness();
-    const original = res(200, { "x-ratelimit-remaining": "9" }, "hello");
-    h.fetchImpl.mockResolvedValueOnce(original);
-
-    const response = await h.fetch("https://api.test");
-
-    expect(response).toBe(original);
-    expect(await response.text()).toBe("hello");
+    expect(h.limiter.decideRetry(P, { status: 500 }, 0)).toEqual({ retry: false });
+    expect(h.limiter.decideRetry(P, {}, 0)).toEqual({ retry: false });
   });
 
-  describe("tiers", () => {
-    const tiered = () =>
-      makeOpts({
-        tiers: [
-          { maxResetSeconds: 120, action: "wait", maxWaitMs: 0, maxRetries: 3 }, // burst → wait
-          { maxResetSeconds: null, action: "error", maxWaitMs: 0, maxRetries: 0 } // long → fail fast
-        ]
-      });
-
-    it("waits + retries on a 429 whose reset falls in a wait tier", async () => {
-      const h = harness(tiered());
-      h.fetchImpl
-        .mockResolvedValueOnce(res(429, { "x-ratelimit-reset": "60" })) // ≤120 → wait tier
-        .mockResolvedValueOnce(res(200, { "x-ratelimit-remaining": "5" }));
-
-      const response = await h.fetch("https://api.test");
-
-      expect(response.status).toBe(200);
-      expect(h.clock.sleep).toHaveBeenCalledWith(60_000);
-      expect(eventNames(h.logger.warn)).toContain("ratelimit_429_backoff");
+  it("declines for an unmanaged provider", () => {
+    const h = harness();
+    expect(h.limiter.decideRetry({ providerId: "other" }, { status: 429 }, 0)).toEqual({
+      retry: false
     });
+  });
+});
 
-    it("fails fast on a 429 whose reset falls in an error tier (no wait, no retry)", async () => {
-      const h = harness(tiered());
-      h.fetchImpl.mockResolvedValueOnce(res(429, { "x-ratelimit-reset": "2592000" })); // 30d → error tier
+describe("tiers", () => {
+  it("waits + retries on a 429 whose reset falls in a wait tier", () => {
+    const h = harness(tiered());
+    h.limiter.observe(P, resp(429, { "x-ratelimit-reset": "60" })); // ≤120 → wait tier
 
-      const response = await h.fetch("https://api.test");
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: true, delay: 60_000 });
+    expect(eventNames(h.logger.warn)).toContain("ratelimit_429_backoff");
+  });
 
-      expect(response.status).toBe(429);
-      expect(h.fetchImpl).toHaveBeenCalledTimes(1); // surfaced immediately, no retry
-      expect(h.clock.sleep).not.toHaveBeenCalled(); // no wait
-      expect(eventNames(h.logger.warn)).toContain("ratelimit_failfast");
-    });
+  it("fails fast on a 429 whose reset falls in an error tier", async () => {
+    const h = harness(tiered());
+    h.limiter.observe(P, resp(429, { "x-ratelimit-reset": "2592000" })); // 30d → error tier
 
-    it("does not arm the gate on remaining:0 when the reset is in an error tier", async () => {
-      const h = harness(tiered());
-      h.fetchImpl.mockResolvedValueOnce(
-        res(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2592000" })
-      );
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: false });
+    expect(eventNames(h.logger.warn)).toContain("ratelimit_failfast");
+    await h.limiter.acquire(P);
+    expect(h.clock.sleep).not.toHaveBeenCalled(); // no wait either
+  });
 
-      await h.fetch("https://api.test");
+  it("does not arm the gate on remaining:0 when the reset is in an error tier", async () => {
+    const h = harness(tiered());
+    h.limiter.observe(
+      P,
+      resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2592000" })
+    );
 
-      expect(h.state.cooldownUntilMs).toBe(0); // error tier → next request will hit a real 429
-    });
+    await h.limiter.acquire(P);
 
-    it("handles a real Envoy header set (multi-policy limit, 429 reset=11)", async () => {
-      // Exact headers observed from the live gateway.
-      const REAL = {
-        "x-envoy-upstream-service-time": "8266",
-        "x-ratelimit-limit": "200, 200;w=60, 200000;w=60, 50000000;w=2592000",
-        "x-ratelimit-remaining": "199",
-        "x-ratelimit-reset": "11"
-      };
-      const h = harness(tiered());
-      h.fetchImpl
-        .mockResolvedValueOnce(res(429, REAL)) // reset 11 ≤ 120 → wait tier
-        .mockResolvedValueOnce(res(200, { ...REAL, "x-ratelimit-remaining": "198" }));
+    expect(h.clock.sleep).not.toHaveBeenCalled(); // next request will hit a real 429
+  });
 
-      const response = await h.fetch("https://api.test");
+  it("handles a real Envoy header set (multi-policy limit, 429 reset=11)", () => {
+    // Exact headers observed from the live gateway.
+    const REAL = {
+      "x-envoy-upstream-service-time": "8266",
+      "x-ratelimit-limit": "200, 200;w=60, 200000;w=60, 50000000;w=2592000",
+      "x-ratelimit-remaining": "199",
+      "x-ratelimit-reset": "11"
+    };
+    const h = harness(tiered());
+    h.limiter.observe(P, resp(429, REAL)); // reset 11 ≤ 120 → wait tier
 
-      expect(response.status).toBe(200);
-      expect(h.clock.sleep).toHaveBeenCalledWith(11_000); // reset seconds → 11s wait
-      expect(h.logger.debug).toHaveBeenCalledWith(
-        "ratelimit_quota",
-        expect.objectContaining({ limit: 200, remaining: 199, resetSeconds: 11 })
-      );
-    });
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: true, delay: 11_000 });
+    expect(h.logger.debug).toHaveBeenCalledWith(
+      "ratelimit_quota",
+      expect.objectContaining({ limit: 200, remaining: 199, resetSeconds: 11 })
+    );
+  });
 
-    it("classifies a Retry-After-only 429 by its delay (long → error tier)", async () => {
-      const h = harness(tiered());
-      // No x-ratelimit-reset; a multi-day Retry-After must still hit the error tier.
-      h.fetchImpl.mockResolvedValueOnce(res(429, { "retry-after": "2592000" }));
+  it("classifies a Retry-After-only 429 by its delay (long → error tier)", () => {
+    const h = harness(tiered());
+    h.limiter.observe(P, resp(429, { "retry-after": "2592000" }));
 
-      const response = await h.fetch("https://api.test");
+    expect(h.limiter.decideRetry(P, { status: 429 }, 0)).toEqual({ retry: false });
+    expect(eventNames(h.logger.warn)).toContain("ratelimit_failfast");
+  });
 
-      expect(response.status).toBe(429);
-      expect(h.fetchImpl).toHaveBeenCalledTimes(1); // fail fast, no retry
-      expect(h.clock.sleep).not.toHaveBeenCalled();
-      expect(eventNames(h.logger.warn)).toContain("ratelimit_failfast");
-    });
-
-    it("clears a stale wait cooldown when failing fast on an error-tier 429", async () => {
-      const h = harness(
-        makeOpts({
-          tiers: [
-            { maxResetSeconds: 120, action: "wait", maxWaitMs: 1_000, maxRetries: 3 },
-            { maxResetSeconds: null, action: "error", maxWaitMs: 0, maxRetries: 0 }
-          ]
-        })
-      );
-      // A prior short-window response armed a capped wait cooldown still in the future.
-      h.state.cooldownUntilMs = h.clock.now() + 60_000;
-      h.state.cooldownMaxWaitMs = 1_000;
-      h.fetchImpl.mockResolvedValueOnce(res(429, { "x-ratelimit-reset": "2592000" }));
-
-      const response = await h.fetch("https://api.test");
-
-      expect(response.status).toBe(429);
-      expect(h.state.cooldownUntilMs).toBe(0); // stale cooldown dropped → next call won't sleep
-    });
-
-    it("clears a stale wait cooldown on a non-429 error-tier remaining:0", async () => {
-      const h = harness(
-        makeOpts({
-          tiers: [
-            { maxResetSeconds: 120, action: "wait", maxWaitMs: 1_000, maxRetries: 3 },
-            { maxResetSeconds: null, action: "error", maxWaitMs: 0, maxRetries: 0 }
-          ]
-        })
-      );
-      h.state.cooldownUntilMs = h.clock.now() + 60_000; // stale short cooldown
-      h.state.cooldownMaxWaitMs = 1_000;
-      // A healthy-status response that reports remaining:0 with a long reset → error tier.
-      h.fetchImpl.mockResolvedValueOnce(
-        res(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2592000" })
-      );
-
-      await h.fetch("https://api.test");
-
-      expect(h.state.cooldownUntilMs).toBe(0); // error tier must not leave the gate armed
+  it("classifies an unobserved error.retryAfterMs by its delay too", () => {
+    const h = harness(tiered());
+    expect(h.limiter.decideRetry(P, { status: 429, retryAfterMs: 2_592_000_000 }, 0)).toEqual({
+      retry: false
     });
   });
 
-  describe("scope: model", () => {
-    function modelHarness() {
-      const logger = silentLogger();
-      const clock = fakeClock();
-      const fetchImpl = vi.fn();
-      const store: RateStateStore = new Map();
-      const fetch = makeRateLimitFetch("prov", makeOpts({ scope: "model" }), store, {
-        logger,
-        now: clock.now,
-        sleep: clock.sleep,
-        fetchImpl
-      });
-      const call = (model: string) =>
-        fetch("https://api.test", { method: "POST", body: JSON.stringify({ model }) });
-      return { logger, clock, fetchImpl, store, call, fetch };
-    }
+  it("clears a stale wait cooldown when failing fast on an error-tier 429", async () => {
+    // Two identical providers: arm both, fail fast on one, and compare.
+    const h = harness(cappedTiered(), ["a", "b"]);
+    const arm = { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "60" };
+    h.limiter.observe({ providerId: "a" }, resp(200, arm));
+    h.limiter.observe({ providerId: "b" }, resp(200, arm));
 
-    it("gates only the exhausted model, not its siblings", async () => {
-      const h = modelHarness();
-      h.fetchImpl
-        // model A exhausts its bucket
-        .mockResolvedValueOnce(
-          res(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" })
-        )
-        // model B still has quota
-        .mockResolvedValueOnce(res(200, { "x-ratelimit-remaining": "5" }))
-        // model A again (gated, then served)
-        .mockResolvedValueOnce(res(200, { "x-ratelimit-remaining": "5" }));
+    h.limiter.observe({ providerId: "a" }, resp(429, { "x-ratelimit-reset": "2592000" }));
 
-      await h.call("model-a"); // arms cooldown for bucket A only
-      await h.call("model-b"); // different bucket → not gated
-      expect(h.clock.sleep).not.toHaveBeenCalled();
-
-      await h.call("model-a"); // bucket A is in cooldown → waits
-      expect(h.clock.sleep).toHaveBeenCalledTimes(1);
-      expect(h.clock.sleep).toHaveBeenCalledWith(48_000);
-      expect(h.store.size).toBe(2); // separate state per model
-    });
-
-    it("falls back to the provider bucket when the model can't be parsed", async () => {
-      const h = modelHarness();
-      h.fetchImpl.mockResolvedValue(res(200, { "x-ratelimit-remaining": "5" }));
-
-      await h.fetch("https://api.test"); // no body → model underivable
-
-      expect(h.store.has("prov")).toBe(true); // keyed by the bare provider id
-      expect([...h.store.keys()]).toEqual(["prov"]);
-    });
-
-    it("derives the model from a Request input, not just init.body", async () => {
-      const h = modelHarness();
-      h.fetchImpl.mockResolvedValue(res(200, { "x-ratelimit-remaining": "5" }));
-
-      await h.fetch(
-        new Request("https://api.test", {
-          method: "POST",
-          body: JSON.stringify({ model: "kimi-k2.6" })
-        })
-      );
-
-      const keys = [...h.store.keys()];
-      expect(keys).toHaveLength(1);
-      expect(keys[0]).not.toBe("prov"); // a per-model bucket, not the provider fallback
-      expect(keys[0]).toContain("kimi-k2.6");
-    });
-
-    it("clones a Request input per attempt so a wait-tier retry works", async () => {
-      const h = modelHarness();
-      h.fetchImpl
-        .mockResolvedValueOnce(res(429, { "x-ratelimit-reset": "5" }))
-        .mockResolvedValueOnce(res(200, { "x-ratelimit-remaining": "5" }));
-      const original = new Request("https://api.test", {
-        method: "POST",
-        body: JSON.stringify({ model: "gemma-4" })
-      });
-
-      const response = await h.fetch(original);
-
-      expect(response.status).toBe(200);
-      expect(h.fetchImpl).toHaveBeenCalledTimes(2);
-      const inputs = h.fetchImpl.mock.calls.map((c) => c[0] as Request);
-      expect(inputs[0]).not.toBe(original); // fresh clone, not the original
-      expect(inputs[0]).not.toBe(inputs[1]); // distinct clone per attempt
-      expect(original.bodyUsed).toBe(false); // original never consumed
-    });
-
-    it("honors an abort signal carried on a Request input", async () => {
-      const h = modelHarness();
-      h.fetchImpl.mockResolvedValueOnce(
-        res(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" })
-      );
-      await h.call("model-a"); // arms cooldown for model-a's bucket
-      h.fetchImpl.mockClear();
-
-      const req = new Request("https://api.test", {
-        method: "POST",
-        body: JSON.stringify({ model: "model-a" }),
-        signal: AbortSignal.abort()
-      });
-      const error = await h.fetch(req).then(
-        () => null,
-        (e: unknown) => e
-      );
-
-      expect((error as Error)?.name).toBe("AbortError");
-      expect(h.fetchImpl).not.toHaveBeenCalled(); // aborted during the pre-request gate
-    });
+    await h.limiter.acquire({ providerId: "a" });
+    expect(h.clock.sleep).not.toHaveBeenCalled(); // stale cooldown dropped
+    await h.limiter.acquire({ providerId: "b" });
+    expect(h.clock.sleep).toHaveBeenCalledWith(1_000); // control: still armed (capped)
   });
+
+  it("clears a stale wait cooldown on a non-429 error-tier remaining:0", async () => {
+    const h = harness(cappedTiered(), ["a", "b"]);
+    const arm = { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "60" };
+    h.limiter.observe({ providerId: "a" }, resp(200, arm));
+    h.limiter.observe({ providerId: "b" }, resp(200, arm));
+
+    h.limiter.observe(
+      { providerId: "a" },
+      resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2592000" })
+    );
+
+    await h.limiter.acquire({ providerId: "a" });
+    expect(h.clock.sleep).not.toHaveBeenCalled(); // error tier must not leave the gate armed
+    await h.limiter.acquire({ providerId: "b" });
+    expect(h.clock.sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("a wait-tier 429 arms the gate for other callers", async () => {
+    const h = harness(tiered());
+    h.limiter.observe(P, resp(429, { "x-ratelimit-reset": "30" }));
+
+    await h.limiter.acquire(P);
+
+    expect(h.clock.sleep).toHaveBeenCalledWith(30_000);
+  });
+});
+
+describe("scope", () => {
+  const exhausted = { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" };
+
+  it("model: gates only the exhausted model, not its siblings", async () => {
+    const h = harness(makeOpts({ scope: "model" }));
+    const a = { providerId: "p", modelID: "model-a" };
+    const b = { providerId: "p", modelID: "model-b" };
+
+    h.limiter.observe(a, resp(200, exhausted));
+    await h.limiter.acquire(b); // different bucket → not gated
+    expect(h.clock.sleep).not.toHaveBeenCalled();
+
+    await h.limiter.acquire(a); // bucket A is in cooldown → waits
+    expect(h.clock.sleep).toHaveBeenCalledTimes(1);
+    expect(h.clock.sleep).toHaveBeenCalledWith(48_000);
+  });
+
+  it("model: falls back to the provider bucket when no model id is given", async () => {
+    const h = harness(makeOpts({ scope: "model" }));
+    h.limiter.observe(P, resp(200, exhausted));
+    await h.limiter.acquire(P);
+    expect(h.clock.sleep).toHaveBeenCalledWith(48_000);
+  });
+
+  it("provider: shares one bucket across models", async () => {
+    const h = harness(makeOpts({ scope: "provider" }));
+    h.limiter.observe({ providerId: "p", modelID: "model-a" }, resp(200, exhausted));
+
+    await h.limiter.acquire({ providerId: "p", modelID: "model-b" });
+
+    expect(h.clock.sleep).toHaveBeenCalledWith(48_000);
+  });
+});
+
+describe("gate concurrency", () => {
+  /** Manually-resolved sleeps, recorded in call order. */
+  function manualSleep() {
+    const sleptMs: number[] = [];
+    const resolvers: Array<() => void> = [];
+    const sleep = vi.fn((ms: number) => {
+      sleptMs.push(ms);
+      return new Promise<void>((resolve) => {
+        resolvers.push(resolve);
+      });
+    });
+    return { sleptMs, resolvers, sleep };
+  }
+
+  function manualHarness() {
+    const clock = fakeClock();
+    const ms = manualSleep();
+    const limiter = createRateLimiter({
+      logger: silentLogger(),
+      now: clock.now,
+      sleep: ms.sleep
+    });
+    limiter.configure(new Map([["p", makeOpts()]]));
+    return { clock, limiter, ...ms };
+  }
 
   it("shares a single timer across a concurrent burst during cooldown", async () => {
-    const logger = silentLogger();
-    const clock = fakeClock();
-    let release: (() => void) | undefined;
-    const sleep = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          release = resolve;
-        })
-    );
-    const fetchImpl = vi.fn();
-    fetchImpl.mockResolvedValueOnce(
-      res(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" })
-    );
-    fetchImpl.mockImplementation(async () => res(200, { "x-ratelimit-remaining": "5" }));
-
-    const store: RateStateStore = new Map();
-    const fetch = makeRateLimitFetch("p", makeOpts(), store, {
-      logger,
-      now: clock.now,
-      sleep,
-      fetchImpl
-    });
-
-    await fetch("https://api.test"); // arms cooldown, no sleep yet
-    expect(sleep).not.toHaveBeenCalled();
+    const h = manualHarness();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" }));
+    expect(h.sleep).not.toHaveBeenCalled(); // arming does not sleep
 
     const burst = Promise.all([
-      fetch("https://api.test"),
-      fetch("https://api.test"),
-      fetch("https://api.test"),
-      fetch("https://api.test"),
-      fetch("https://api.test")
+      h.limiter.acquire(P),
+      h.limiter.acquire(P),
+      h.limiter.acquire(P),
+      h.limiter.acquire(P),
+      h.limiter.acquire(P)
     ]);
 
-    expect(sleep).toHaveBeenCalledTimes(1); // ONE shared timer for all 5
+    expect(h.sleep).toHaveBeenCalledTimes(1); // ONE shared timer for all 5
 
-    clock.advance(48_000); // window elapses, so the re-check loop exits on resume
-    release?.();
-    const responses = await burst;
+    h.clock.advance(48_000); // window elapses, so the re-check loop exits on resume
+    h.resolvers[0]?.();
+    await burst;
 
-    expect(sleep).toHaveBeenCalledTimes(1); // still one — no extra timer on re-check
-    expect(responses).toHaveLength(5);
-    for (const r of responses) {
-      expect(r.status).toBe(200);
-    }
+    expect(h.sleep).toHaveBeenCalledTimes(1); // no extra timer on re-check
   });
 
   it("re-waits when the cooldown window is extended mid-wait (longest wins)", async () => {
-    const logger = silentLogger();
-    const clock = fakeClock();
-    const sleptMs: number[] = [];
-    const resolvers: Array<() => void> = [];
-    const sleep = vi.fn((ms: number) => {
-      sleptMs.push(ms);
-      return new Promise<void>((resolve) => {
-        resolvers.push(resolve);
-      });
-    });
-    const fetchImpl = vi.fn().mockResolvedValue(res(200, { "x-ratelimit-remaining": "5" }));
-    const store: RateStateStore = new Map();
-    const state = createProviderState();
-    state.cooldownUntilMs = clock.now() + 3_000; // armed for a short window
-    store.set("p", state);
-    const fetch = makeRateLimitFetch("p", makeOpts(), store, {
-      logger,
-      now: clock.now,
-      sleep,
-      fetchImpl
-    });
+    const h = manualHarness();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "3" }));
 
-    const pending = fetch("https://api.test");
+    const pending = h.limiter.acquire(P);
     await flush();
-    expect(sleptMs).toEqual([3_000]); // first wait sized to the initial window
+    expect(h.sleptMs).toEqual([3_000]); // first wait sized to the initial window
 
     // While the caller is parked on the first timer, another response extends
     // the window. The loop must re-check and wait the remainder, not return early.
-    state.cooldownUntilMs = clock.now() + 8_000;
-    clock.advance(3_000);
-    resolvers[0]?.();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "8" }));
+    h.clock.advance(3_000);
+    h.resolvers[0]?.();
     await flush();
-    expect(sleptMs).toEqual([3_000, 5_000]); // re-checked → waited the extra 5s
+    expect(h.sleptMs).toEqual([3_000, 5_000]); // re-checked → waited the extra 5s
 
-    clock.advance(5_000);
-    resolvers[1]?.();
-    const response = await pending;
-    expect(response.status).toBe(200);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    h.clock.advance(5_000);
+    h.resolvers[1]?.();
+    await pending;
   });
 
   it("does not hold a shorter-wait caller behind a longer in-flight shared timer", async () => {
-    const logger = silentLogger();
-    const clock = fakeClock();
-    const sleptMs: number[] = [];
-    const resolvers: Array<() => void> = [];
-    const sleep = vi.fn((ms: number) => {
-      sleptMs.push(ms);
-      return new Promise<void>((resolve) => {
-        resolvers.push(resolve);
-      });
-    });
-    const fetchImpl = vi.fn().mockResolvedValue(res(200, { "x-ratelimit-remaining": "5" }));
-    const store: RateStateStore = new Map();
-    const state = createProviderState();
-    state.cooldownUntilMs = clock.now() + 100_000; // long window
-    store.set("p", state);
-    const fetch = makeRateLimitFetch("p", makeOpts(), store, {
-      logger,
-      now: clock.now,
-      sleep,
-      fetchImpl
-    });
+    const h = manualHarness();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "100" }));
 
-    const longCaller = fetch("https://api.test"); // creates the 100s shared timer
+    const longCaller = h.limiter.acquire(P); // creates the 100s shared timer
     await flush();
-    expect(sleptMs).toEqual([100_000]);
+    expect(h.sleptMs).toEqual([100_000]);
 
     // The window shrinks; a caller that joins now only needs 2s and must NOT be
     // forced to await the in-flight 100s shared timer.
-    state.cooldownUntilMs = clock.now() + 2_000;
-    const shortCaller = fetch("https://api.test");
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2" }));
+    const shortCaller = h.limiter.acquire(P);
     await flush();
-    expect(sleptMs).toEqual([100_000, 2_000]); // its own 2s sleep, not the 100s one
+    expect(h.sleptMs).toEqual([100_000, 2_000]); // its own 2s sleep, not the 100s one
 
-    clock.advance(2_000);
-    resolvers[1]?.(); // resolve the short caller's private timer
-    expect((await shortCaller).status).toBe(200); // completes without waiting 100s
+    h.clock.advance(2_000);
+    h.resolvers[1]?.(); // resolve the short caller's private timer
+    await shortCaller; // completes without waiting 100s
 
-    clock.advance(98_000);
-    resolvers[0]?.();
+    h.clock.advance(98_000);
+    h.resolvers[0]?.();
     await longCaller;
   });
 
-  it("aborts a wait cleanly when the request signal is already aborted", async () => {
+  it("aborts a wait cleanly when the signal is already aborted", async () => {
     const h = harness();
-    h.fetchImpl.mockResolvedValueOnce(
-      res(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" })
-    );
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" }));
 
-    await h.fetch("https://api.test"); // arms cooldown
-    h.fetchImpl.mockClear();
-
-    const signal = AbortSignal.abort();
-    const error = await h.fetch("https://api.test", { signal }).then(
+    const error = await h.limiter.acquire(P, AbortSignal.abort()).then(
       () => null,
       (e: unknown) => e
     );
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).name).toBe("AbortError");
-    expect(h.fetchImpl).not.toHaveBeenCalled();
     expect(eventNames(h.logger.warn)).toContain("ratelimit_wait_aborted");
   });
 
-  it("delegates to a pre-existing fetch instead of the global", async () => {
-    const logger = silentLogger();
-    const clock = fakeClock();
-    const fetchImpl = vi.fn();
-    const delegate = vi.fn(async () => res(200, { "x-ratelimit-remaining": "5" }));
-    const fetch = makeRateLimitFetch(
-      "p",
-      makeOpts(),
-      new Map(),
-      { logger, now: clock.now, sleep: clock.sleep, fetchImpl },
-      delegate
+  it("aborts a wait that is aborted while parked on the timer", async () => {
+    const h = manualHarness();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" }));
+    const controller = new AbortController();
+
+    const pending = h.limiter.acquire(P, controller.signal).then(
+      () => null,
+      (e: unknown) => e
     );
+    await flush();
+    controller.abort();
 
-    await fetch("https://api.test");
+    expect(((await pending) as Error).name).toBe("AbortError");
+  });
 
-    expect(delegate).toHaveBeenCalledTimes(1);
-    expect(fetchImpl).not.toHaveBeenCalled();
+  it("completes a signal-carrying wait when the timer resolves first", async () => {
+    const h = manualHarness();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "5" }));
+    const pending = h.limiter.acquire(P, new AbortController().signal);
+    await flush();
+    h.clock.advance(5_000);
+    h.resolvers[0]?.();
+    await pending;
   });
 });
 
-describe("installRateLimiter", () => {
-  function deps(): RateLimitDeps {
-    return { logger: silentLogger(), fetchImpl: vi.fn() };
-  }
+describe("default sleep (real timers)", () => {
+  const exhausted = (): Headers =>
+    new Headers({ "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1" });
 
-  it("wraps options.fetch for an opted-in provider and logs", () => {
-    const d = deps();
-    const config: InstallConfigInput = {
-      provider: { p: { options: { baseURL: "https://x.test", meta: { rateLimit: {} } } } }
-    };
+  it("honours an abort signal already aborted or fired mid-sleep", async () => {
+    const limiter = createRateLimiter({ logger: silentLogger() });
+    limiter.configure(new Map([["p", makeOpts()]]));
+    limiter.observe(P, { status: 200, headers: exhausted() });
 
-    installRateLimiter(config, d);
+    await expect(limiter.acquire(P, AbortSignal.abort())).rejects.toMatchObject({
+      name: "AbortError"
+    });
 
-    expect(typeof config.provider?.p?.options?.fetch).toBe("function");
-    expect(eventNames(d.logger.info)).toContain("ratelimit_provider_enabled");
-    expect(eventNames(d.logger.info)).toContain("ratelimit_plugin_initialized");
+    const controller = new AbortController();
+    const pending = limiter.acquire(P, controller.signal);
+    setTimeout(() => controller.abort(), 5);
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  it("leaves non-opted-in providers untouched", () => {
-    const d = deps();
-    const config: InstallConfigInput = {
-      provider: { p: { options: { baseURL: "https://x.test" } } }
-    };
+  it("resolves after the real cooldown elapses", async () => {
+    const limiter = createRateLimiter({ logger: silentLogger() });
+    limiter.configure(new Map([["p", makeOpts()]]));
+    limiter.observe(P, { status: 200, headers: exhausted() });
+    const started = Date.now();
 
-    installRateLimiter(config, d);
+    await limiter.acquire(P);
 
-    expect(config.provider?.p?.options?.fetch).toBeUndefined();
-    expect(eventNames(d.logger.debug)).toContain("ratelimit_provider_skipped");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+  });
+});
+
+describe("configure", () => {
+  it("drops state for providers that are no longer opted in", async () => {
+    const h = harness();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" }));
+
+    h.limiter.configure(new Map()); // p dropped
+    h.limiter.configure(new Map([["p", makeOpts()]])); // re-opted in, fresh state
+
+    await h.limiter.acquire(P);
+    expect(h.clock.sleep).not.toHaveBeenCalled();
   });
 
-  it("captures a pre-existing fetch as the delegate", async () => {
-    const d = deps();
-    const delegate = vi.fn(async () => res(200, { "x-ratelimit-remaining": "5" }));
-    const config: InstallConfigInput = {
-      provider: { p: { options: { meta: { rateLimit: {} }, fetch: delegate } } }
-    };
+  it("keeps state for providers that stay opted in", async () => {
+    const h = harness();
+    h.limiter.observe(P, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" }));
 
-    installRateLimiter(config, d);
-    const wrapped = config.provider?.p?.options?.fetch as typeof fetch;
-    await wrapped("https://api.test");
+    h.limiter.configure(new Map([["p", makeOpts()]]));
 
-    expect(delegate).toHaveBeenCalledTimes(1);
-    expect(d.fetchImpl).not.toHaveBeenCalled();
+    await h.limiter.acquire(P);
+    expect(h.clock.sleep).toHaveBeenCalledWith(48_000);
+  });
+
+  it("drops per-model buckets along with their provider", async () => {
+    const h = harness(makeOpts({ scope: "model" }));
+    const a = { providerId: "p", modelID: "m" };
+    h.limiter.observe(a, resp(200, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "48" }));
+
+    h.limiter.configure(new Map());
+    h.limiter.configure(new Map([["p", makeOpts({ scope: "model" })]]));
+
+    await h.limiter.acquire(a);
+    expect(h.clock.sleep).not.toHaveBeenCalled();
+  });
+});
+
+describe("collectOptIns", () => {
+  it("enables opted-in providers, skips the rest, and logs both", () => {
+    const logger = silentLogger();
+
+    const out = collectOptIns(
+      [
+        { id: "yes", settings: { rateLimit: {} } },
+        { id: "no", settings: { baseURL: "https://x.test" } },
+        { id: "bare" },
+        { id: "off", settings: { rateLimit: { enabled: false } } }
+      ],
+      logger
+    );
+
+    expect([...out.keys()]).toEqual(["yes"]);
+    expect(out.get("yes")?.scope).toBe("model");
+    expect(eventNames(logger.info)).toContain("ratelimit_provider_enabled");
+    expect(logger.info).toHaveBeenCalledWith("ratelimit_plugin_initialized", { providerCount: 1 });
+    expect(eventNames(logger.debug).filter((e) => e === "ratelimit_provider_skipped")).toHaveLength(
+      3
+    );
   });
 });
