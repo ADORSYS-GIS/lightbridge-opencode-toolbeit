@@ -293,55 +293,7 @@ describe("tools", () => {
   });
 });
 
-describe("diffs", () => {
-  it("counts only the delta of a cumulative session diff", async () => {
-    startSession();
-    emit({
-      type: "session.diff",
-      properties: {
-        sessionID: "ses_1",
-        diff: [{ file: "/repo/src/a.ts", additions: 10, deletions: 2 }]
-      }
-    });
-    emit({
-      type: "session.diff",
-      properties: {
-        sessionID: "ses_1",
-        diff: [{ file: "/repo/src/a.ts", additions: 14, deletions: 2 }]
-      }
-    });
-
-    const byType = new Map(
-      points(metricNamed(await env.metrics(), "opencode.lines_of_code.count")).map(
-        ([value, attributes]) => [attributes["opencode.change.type"] as string, value]
-      )
-    );
-    expect(byType.get("added")).toBe(14);
-    expect(byType.get("removed")).toBe(2);
-  });
-
-  it("tags the detected language and skips unknown extensions", async () => {
-    startSession();
-    emit({
-      type: "session.diff",
-      properties: {
-        sessionID: "ses_1",
-        diff: [
-          { file: "/repo/main.rs", additions: 3, deletions: 0 },
-          { file: "/repo/LICENSE", additions: 1, deletions: 0 }
-        ]
-      }
-    });
-
-    const languages = points(metricNamed(await env.metrics(), "opencode.lines_of_code.count")).map(
-      ([, attributes]) => attributes["code.language"]
-    );
-    expect(languages).toContain("rust");
-    expect(languages).toContain(undefined);
-  });
-});
-
-describe("permissions and commands", () => {
+describe("permissions and compactions", () => {
   it("names the tool a decision resolved", async () => {
     startSession();
     emit({
@@ -376,17 +328,6 @@ describe("permissions and commands", () => {
     });
     expect(points(metricNamed(await env.metrics(), "opencode.permission.decision.count"))).toEqual([
       [1, { "opencode.permission.decision": "deny", "opencode.permission.source": "user" }]
-    ]);
-  });
-
-  it("counts slash commands", async () => {
-    startSession();
-    emit({
-      type: "command.executed",
-      properties: { name: "review", sessionID: "ses_1", arguments: "", messageID: "m" }
-    });
-    expect(points(metricNamed(await env.metrics(), "opencode.command.executed.count"))).toEqual([
-      [1, { "opencode.command.name": "review" }]
     ]);
   });
 
@@ -443,9 +384,7 @@ describe("cardinality", () => {
 
 describe("resilience", () => {
   it("swallows a malformed event instead of throwing into the host", () => {
-    expect(() =>
-      emit({ type: "session.diff", properties: { sessionID: "ses_1", diff: null } })
-    ).not.toThrow();
+    expect(() => emit({ type: "message.updated", properties: { info: null } })).not.toThrow();
     expect(env.logger.events.some(([name]) => name === "warn:otel_event_failed")).toBe(true);
   });
 
@@ -516,24 +455,6 @@ describe("partial payloads", () => {
   it("ignores idle for a session it never saw", async () => {
     emit({ type: "session.idle", properties: { sessionID: "ghost" } });
     expect(logsNamed(await env.logs(), "opencode.session_idle")).toHaveLength(0);
-  });
-
-  it("records a session diff for a session it never saw created", async () => {
-    emit({
-      type: "session.diff",
-      properties: { sessionID: "late", diff: [{ file: "a.ts", additions: 4, deletions: 0 }] }
-    });
-    expect(points(metricNamed(await env.metrics(), "opencode.lines_of_code.count"))).toHaveLength(
-      1
-    );
-  });
-
-  it("skips a diff entry that has not changed", async () => {
-    startSession();
-    const diff = [{ file: "a.ts", additions: 3, deletions: 1 }];
-    emit({ type: "session.diff", properties: { sessionID: "ses_1", diff } });
-    emit({ type: "session.diff", properties: { sessionID: "ses_1", diff } });
-    expect(logsNamed(await env.logs(), "opencode.file_edited")).toHaveLength(1);
   });
 
   it("omits output size when the tool returned no string", async () => {
@@ -821,60 +742,6 @@ describe("auto-resolved permissions", () => {
   });
 });
 
-describe("todos", () => {
-  it("records counts by status, never the todo text", async () => {
-    startSession();
-    emit({
-      type: "todo.updated",
-      properties: {
-        sessionID: "ses_1",
-        todos: [
-          { id: "1", content: "secret plan", status: "completed", priority: "high" },
-          { id: "2", content: "other", status: "pending", priority: "low" },
-          { id: "3", content: "third", status: "pending", priority: "low" }
-        ]
-      }
-    });
-    const [record] = logsNamed(await env.logs(), "opencode.todo_updated");
-    expect(record?.attributes["opencode.todo.total"]).toBe(3);
-    expect(record?.attributes["opencode.todo.pending"]).toBe(2);
-    expect(record?.attributes["opencode.todo.completed"]).toBe(1);
-    expect(JSON.stringify(record?.attributes)).not.toContain("secret plan");
-  });
-
-  it("handles a todo with no status", async () => {
-    startSession();
-    emit({ type: "todo.updated", properties: { sessionID: "ses_1", todos: [{ id: "1" }] } });
-    const [record] = logsNamed(await env.logs(), "opencode.todo_updated");
-    expect(record?.attributes["opencode.todo.unknown"]).toBe(1);
-  });
-});
-
-describe("commands", () => {
-  it("reports whether arguments were passed, not what they were", async () => {
-    startSession();
-    emit({
-      type: "command.executed",
-      properties: {
-        name: "review",
-        sessionID: "ses_1",
-        arguments: "--secret token",
-        messageID: "m"
-      }
-    });
-    const [record] = logsNamed(await env.logs(), "opencode.command_executed");
-    expect(record?.attributes["opencode.command.has_arguments"]).toBe(true);
-    expect(JSON.stringify(record?.attributes)).not.toContain("secret");
-
-    emit({
-      type: "command.executed",
-      properties: { name: "plain", sessionID: "ses_1", arguments: "  ", messageID: "m2" }
-    });
-    const blank = logsNamed(await env.logs(), "opencode.command_executed")[1];
-    expect(blank?.attributes["opencode.command.has_arguments"]).toBe(false);
-  });
-});
-
 describe("state pruning", () => {
   it("drops finished-message and tool bookkeeping when a turn ends", async () => {
     startSession();
@@ -886,21 +753,10 @@ describe("state pruning", () => {
     expect(recorder.pendingStateSize()).toEqual(
       expect.objectContaining({ finalizedMessages: 0, finishedTools: 0, sessions: 0 })
     );
-    // The cumulative-diff memory deliberately survives an idle.
-    emit({
-      type: "session.diff",
-      properties: { sessionID: "ses_1", diff: [{ file: "a.ts", additions: 5, deletions: 0 }] }
-    });
-    emit({ type: "session.idle", properties: { sessionID: "ses_1" } });
-    expect(recorder.pendingStateSize().diffs).toBe(1);
   });
 
-  it("forgets a deleted session entirely, diffs included", () => {
+  it("forgets a deleted session entirely", () => {
     startSession();
-    emit({
-      type: "session.diff",
-      properties: { sessionID: "ses_1", diff: [{ file: "a.ts", additions: 5, deletions: 0 }] }
-    });
     recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", id: "c1" });
     emit({
       type: "permission.updated",
@@ -915,20 +771,8 @@ describe("state pruning", () => {
       tools: 0,
       finalizedMessages: 0,
       finishedTools: 0,
-      permissions: 0,
-      diffs: 0
+      permissions: 0
     });
-  });
-
-  it("does not re-count a diff for a session that resumes after idle", async () => {
-    startSession();
-    const diff = [{ file: "a.ts", additions: 7, deletions: 0 }];
-    emit({ type: "session.diff", properties: { sessionID: "ses_1", diff } });
-    emit({ type: "session.idle", properties: { sessionID: "ses_1" } });
-    emit({ type: "session.diff", properties: { sessionID: "ses_1", diff } });
-
-    const [[value]] = points(metricNamed(await env.metrics(), "opencode.lines_of_code.count"));
-    expect(value).toBe(7);
   });
 });
 
