@@ -4,11 +4,11 @@ import type {
   SubjectTokenSource
 } from "@vymalo/opencode-auth-core/lib";
 
-export const REPO_AUTH_META_KEY = "repoAuth";
+export const REPO_AUTH_SETTINGS_KEY = "repoAuth";
 
 /**
- * Parsed outcome of inspecting one provider's `options.meta.repoAuth`:
- *   - `not_opted_in`        — no `meta.repoAuth` block at all (skip silently).
+ * Parsed outcome of inspecting one provider's `settings.repoAuth`:
+ *   - `not_opted_in`        — no `settings.repoAuth` block at all (skip silently).
  *   - `missing_project_id`  — block present but no `projectId` (warn; never
  *                             crash — the no-op matrix in docs/repo-auth.md).
  *   - `opted_in`            — a valid, self-contained config to manage.
@@ -114,26 +114,18 @@ function asSubjectTokenSource(value: unknown): SubjectTokenSource | undefined {
 }
 
 /**
- * Parse a provider's `options.meta.repoAuth` opt-in block (mirrors models-info's
- * `options.meta.modelsInfoUrl` pattern). Throws malformed-field errors with the
- * canonical config path (`provider.options.meta.repoAuth`) so a typo is
- * debuggable; the missing-`projectId` case is a distinct sentinel, not an
- * error, because the no-op matrix requires it to warn-and-skip rather than
- * crash.
+ * Parse a provider's `settings.repoAuth` opt-in block. v1 read this from
+ * `options.meta.repoAuth`; v2's `Provider.Info` has no `options`, but its
+ * `settings` is an open struct, so the block moves up one level. Throws
+ * malformed-field errors with the canonical config path
+ * (`provider.settings.repoAuth`) so a typo is debuggable; the missing-`projectId`
+ * case is a distinct sentinel, not an error, because the no-op matrix requires
+ * it to warn-and-skip rather than crash.
  */
-export function parseRepoAuthOptions(
-  providerOptions: Record<string, unknown> | undefined
+export function parseRepoAuthSettings(
+  providerSettings: Record<string, unknown> | undefined
 ): RepoAuthParseResult {
-  if (!providerOptions) {
-    return { kind: "not_opted_in" };
-  }
-
-  const meta = asRecord(providerOptions.meta);
-  if (!meta) {
-    return { kind: "not_opted_in" };
-  }
-
-  const raw = asRecord(meta[REPO_AUTH_META_KEY]);
+  const raw = asRecord(providerSettings?.[REPO_AUTH_SETTINGS_KEY]);
   if (!raw) {
     return { kind: "not_opted_in" };
   }
@@ -143,7 +135,7 @@ export function parseRepoAuthOptions(
     return { kind: "missing_project_id" };
   }
 
-  const source = "provider.options.meta.repoAuth";
+  const source = "provider.settings.repoAuth";
   const issuer = asString(raw.issuer);
   const clientId = asString(raw.clientId);
   const scopes = asStringArray(raw.scopes);
@@ -159,7 +151,7 @@ export function parseRepoAuthOptions(
     config: {
       projectId,
       auth: {
-        id: REPO_AUTH_META_KEY,
+        id: REPO_AUTH_SETTINGS_KEY,
         issuer,
         clientId,
         clientSecret: asClientSecret(raw.clientSecret, source),
@@ -179,54 +171,38 @@ export function parseRepoAuthOptions(
 
 const OAUTH2_CONFLICT_KEYS = ["oauth2", "oauth2ModelSync"] as const;
 
-type OpenCodeConfigLike = {
-  provider?: unknown;
-  pluginConfig?: unknown;
-};
-
-/**
- * Provider ids managed by `@vymalo/opencode-oauth2` via the
- * `pluginConfig.oauth2ModelSync.servers` channel. oauth2 registers those
- * providers under their server `id` without touching `options` at all, so a
- * per-`options` scan alone would miss them.
- */
-export function oauth2ManagedProviderIds(config: OpenCodeConfigLike): Set<string> {
-  const ids = new Set<string>();
-  const pluginConfig = asRecord(config.pluginConfig);
-  const oauth2ModelSync = asRecord(pluginConfig?.oauth2ModelSync);
-  const servers = asRecord(oauth2ModelSync)?.servers;
-  if (Array.isArray(servers)) {
-    for (const rawServer of servers) {
-      const entry = asRecord(rawServer);
-      const id = asString(entry?.id);
-      if (id) {
-        ids.add(id);
-      }
-    }
-  }
-  return ids;
+/** The slice of a v2 `Provider.Info` the collision guard looks at. */
+export interface ProviderOwnership {
+  settings?: Record<string, unknown>;
+  /** Set when the provider is owned by a v2 Integration (OAuth-backed). */
+  integrationID?: string;
 }
 
 /**
- * Detect whether a provider is (also) managed by `@vymalo/opencode-oauth2` —
- * either via the provider's own `options.oauth2` / `options.oauth2ModelSync`
- * blocks, or via the `pluginConfig.oauth2ModelSync.servers` channel (whose
- * provider ids are the server ids). The two plugins must never manage the same
- * provider — repo-auth skips (warn) rather than fight over headers.
+ * Detect whether a provider is (also) managed by `@vymalo/opencode-oauth2`. The
+ * two plugins must never manage the same provider — repo-auth skips (warn)
+ * rather than fight over `Authorization`.
+ *
+ * v1 had two channels: the provider's own `options.oauth2` /
+ * `options.oauth2ModelSync` blocks, and the `pluginConfig.oauth2ModelSync
+ * .servers` id list. v2 has no `pluginConfig`, and another plugin's
+ * `ctx.options` is private, so only what is visible on the provider record
+ * survives:
+ *
+ *   - `settings.oauth2` / `settings.oauth2ModelSync` — the v1 per-provider
+ *     blocks, moved to `settings` like every other opt-in; and
+ *   - `integrationID` — in v2 an OAuth-backed provider is owned by an
+ *     Integration, which supplies its own credentials.
+ *
+ * The `servers`-id channel cannot be re-derived: it is a gap, closed only if
+ * oauth2's v2 port marks the providers it registers with one of the above.
  */
-export function hasOAuth2Conflict(
-  config: OpenCodeConfigLike,
-  providerOptions: Record<string, unknown> | undefined,
-  providerId?: string
-): boolean {
-  if (
-    providerOptions &&
-    OAUTH2_CONFLICT_KEYS.some((key) => asRecord(providerOptions[key]) !== undefined)
-  ) {
+export function hasOAuth2Conflict(provider: ProviderOwnership): boolean {
+  if (provider.integrationID) {
     return true;
   }
-  if (providerId && oauth2ManagedProviderIds(config).has(providerId)) {
-    return true;
-  }
-  return false;
+  const settings = provider.settings;
+  return Boolean(
+    settings && OAUTH2_CONFLICT_KEYS.some((key) => asRecord(settings[key]) !== undefined)
+  );
 }

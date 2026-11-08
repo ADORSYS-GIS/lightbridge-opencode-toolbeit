@@ -1,7 +1,11 @@
 export {
   OpencodeRepoAuthPlugin,
+  PLUGIN_ID,
+  collectManagedProviders,
   createOpencodeRepoAuthPlugin,
-  type OpenCodePluginFactoryOptions
+  type ManagedProvider,
+  type OpenCodePluginFactoryOptions,
+  type ProviderView
 } from "./opencode.js";
 export {
   RepoAuthPlugin,
@@ -12,9 +16,10 @@ export {
   type RepoAuthPluginOptions
 } from "./plugin.js";
 export {
-  REPO_AUTH_META_KEY,
-  parseRepoAuthOptions,
+  REPO_AUTH_SETTINGS_KEY,
+  parseRepoAuthSettings,
   hasOAuth2Conflict,
+  type ProviderOwnership,
   type RepoAuthConfig,
   type RepoAuthParseResult
 } from "./config.js";
