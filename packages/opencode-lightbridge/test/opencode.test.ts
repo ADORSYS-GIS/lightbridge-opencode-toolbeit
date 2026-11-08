@@ -233,7 +233,6 @@ describe("createLightbridgePlugin — otel module", () => {
     expect(hooks["chat.params"]).toBeDefined();
     expect(hooks["permission.ask"]).toBeDefined();
     expect(hooks["experimental.text.complete"]).toBeDefined();
-    expect(hooks["experimental.compaction.autocontinue"]).toBeDefined();
     expect(capturedTokenSource).toBeDefined();
   });
 
@@ -396,10 +395,6 @@ describe("createLightbridgePlugin — full otel hook surface", () => {
     await hooks["experimental.text.complete"]?.(
       { sessionID: "ses_1", messageID: "msg_1", partID: "p1" } as never,
       { text: "abcd" } as never
-    );
-    await hooks["experimental.compaction.autocontinue"]?.(
-      { sessionID: "ses_1", overflow: true } as never,
-      { enabled: true } as never
     );
     await hooks.event?.({
       event: { type: "session.idle", properties: { sessionID: "ses_1" } }

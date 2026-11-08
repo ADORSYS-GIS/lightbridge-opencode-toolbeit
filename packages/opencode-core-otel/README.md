@@ -13,6 +13,10 @@ token-source seam in **one place** so [`@vymalo/opencode-otel`](../opencode-otel
 - `providers.ts` — `createProviders` / `buildResource`, the OTLP exporter and
   SDK provider wiring for traces, metrics and logs.
 - `recorder.ts` — `TelemetryRecorder`, the OpenCode-hook-to-OTEL-signal mapper.
+- `recorder-input.ts` — the recorder's own structural input types (hook payloads and
+  the `RecorderEvent` vocabulary). The engine imports **no** OpenCode plugin API; the
+  plugin that feeds it adapts the host's payloads to these types. See
+  [`docs/otel.md`](../../docs/otel.md#recorder-input-contract).
 - `instruments.ts` — the counters/histograms the recorder writes through.
 - `token-source.ts` — bearer-token injection for authenticated OTLP exporters.
 - `export-logging.ts` — failure-logging wrapper around exporters.

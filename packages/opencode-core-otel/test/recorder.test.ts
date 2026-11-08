@@ -202,11 +202,11 @@ describe("assistant messages", () => {
 describe("tools", () => {
   it("spans a tool call and counts it once", async () => {
     startSession();
-    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", callID: "call_1" });
+    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", id: "call_1" });
     clock += 120;
     recorder.onToolAfter(
-      { tool: "edit", sessionID: "ses_1", callID: "call_1", args: {} },
-      { output: "done" }
+      { tool: "edit", sessionID: "ses_1", id: "call_1", status: "completed" },
+      { content: "done" }
     );
 
     const span = (await env.spans()).find((s) => s.name === "execute_tool edit");
@@ -220,7 +220,7 @@ describe("tools", () => {
 
   it("counts a failing tool, which never reaches the after hook", async () => {
     startSession();
-    recorder.onToolBefore({ tool: "bash", sessionID: "ses_1", callID: "call_2" });
+    recorder.onToolBefore({ tool: "bash", sessionID: "ses_1", id: "call_2" });
     emit({
       type: "message.part.updated",
       properties: {
@@ -244,10 +244,10 @@ describe("tools", () => {
 
   it("does not double-count when both the hook and the part report a terminal state", async () => {
     startSession();
-    recorder.onToolBefore({ tool: "read", sessionID: "ses_1", callID: "call_3" });
+    recorder.onToolBefore({ tool: "read", sessionID: "ses_1", id: "call_3" });
     recorder.onToolAfter(
-      { tool: "read", sessionID: "ses_1", callID: "call_3", args: {} },
-      { output: "x" }
+      { tool: "read", sessionID: "ses_1", id: "call_3", status: "completed" },
+      { content: "x" }
     );
     emit({
       type: "message.part.updated",
@@ -282,10 +282,10 @@ describe("tools", () => {
   it("suppresses the span for a filtered tool but keeps the metric", async () => {
     build({ filteredTools: ["read"] });
     startSession();
-    recorder.onToolBefore({ tool: "read", sessionID: "ses_1", callID: "call_5" });
+    recorder.onToolBefore({ tool: "read", sessionID: "ses_1", id: "call_5" });
     recorder.onToolAfter(
-      { tool: "read", sessionID: "ses_1", callID: "call_5", args: {} },
-      { output: "x" }
+      { tool: "read", sessionID: "ses_1", id: "call_5", status: "completed" },
+      { content: "x" }
     );
 
     expect((await env.spans()).some((s) => s.name.startsWith("execute_tool"))).toBe(false);
@@ -407,7 +407,7 @@ describe("prompts", () => {
       {
         sessionID: "ses_1",
         agent: "build",
-        model: { providerID: "camer-digital", modelID: "kimi-k2.6" }
+        model: { providerID: "camer-digital", id: "kimi-k2.6" }
       },
       {
         message: {} as never,
@@ -464,7 +464,7 @@ describe("resilience", () => {
       now: () => clock
     });
     startSession();
-    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", callID: "open" });
+    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", id: "open" });
     await recorder.shutdown();
 
     const names = (await env.spans()).map((span) => span.name);
@@ -538,17 +538,45 @@ describe("partial payloads", () => {
 
   it("omits output size when the tool returned no string", async () => {
     startSession();
-    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", callID: "c" });
-    recorder.onToolAfter({ tool: "edit", sessionID: "ses_1", callID: "c", args: {} }, {});
+    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", id: "c" });
+    recorder.onToolAfter({ tool: "edit", sessionID: "ses_1", id: "c", status: "completed" }, {});
     const [record] = logsNamed(await env.logs(), "opencode.tool_result");
     expect(record?.attributes["opencode.tool.output.size"]).toBeUndefined();
+  });
+
+  it("counts a failing tool reported through the after hook's error status", async () => {
+    startSession();
+    recorder.onToolBefore({ tool: "bash", sessionID: "ses_1", id: "e1" });
+    recorder.onToolAfter({ tool: "bash", sessionID: "ses_1", id: "e1", status: "error" });
+    expect(points(metricNamed(await env.metrics(), "opencode.tool.invocations"))).toEqual([
+      [1, { "gen_ai.tool.name": "bash", "opencode.tool.status": "error" }]
+    ]);
+    expect((await env.spans()).find((s) => s.name === "execute_tool bash")?.status.code).toBe(2);
+  });
+
+  it("sizes a structured result by its text parts only", async () => {
+    startSession();
+    recorder.onToolAfter(
+      { tool: "read", sessionID: "ses_1", id: "s1", status: "completed" },
+      { content: [{ type: "text", text: "abc" }, { type: "file" }, { type: "text", text: "de" }] }
+    );
+    recorder.onToolAfter(
+      { tool: "read", sessionID: "ses_1", id: "s2", status: "completed" },
+      { content: [{ type: "file" }] }
+    );
+    const records = logsNamed(await env.logs(), "opencode.tool_result");
+    const byCall = Object.fromEntries(
+      records.map((r) => [r.attributes["gen_ai.tool.call.id"], r.attributes])
+    );
+    expect(byCall.s1?.["opencode.tool.output.size"]).toBe(5);
+    expect(byCall.s2?.["opencode.tool.output.size"]).toBeUndefined();
   });
 
   it("records a tool result for a call it never saw start", async () => {
     startSession();
     recorder.onToolAfter(
-      { tool: "grep", sessionID: "ses_1", callID: "unseen", args: {} },
-      { output: "x" }
+      { tool: "grep", sessionID: "ses_1", id: "unseen", status: "completed" },
+      { content: "x" }
     );
     expect(points(metricNamed(await env.metrics(), "opencode.tool.invocations"))).toEqual([
       [1, { "gen_ai.tool.name": "grep", "opencode.tool.status": "ok" }]
@@ -575,9 +603,9 @@ describe("no-signal mode", () => {
     build({ exporters: { traces: "none", metrics: "none", logs: "none" } });
     startSession();
     emit({ type: "message.updated", properties: { info: assistantMessage() } });
-    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", callID: "c" });
+    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", id: "c" });
     recorder.onToolAfter(
-      { tool: "edit", sessionID: "ses_1", callID: "c", args: {} },
+      { tool: "edit", sessionID: "ses_1", id: "c", status: "completed" },
       { output: "" }
     );
     emit({ type: "session.idle", properties: { sessionID: "ses_1" } });
@@ -659,7 +687,7 @@ describe("chat.params", () => {
 
     recorder.onChatParams(
       { sessionID: "ses_1", agent: "build", model: { id: "kimi-k2.6" } } as never,
-      { temperature: 0.2, topP: 0.9, topK: 40, maxOutputTokens: 8192 } as never
+      { temperature: 0.2, topP: 0.9, topK: 40, maxTokens: 8192 } as never
     );
     // This is the window in which the provider request actually goes out.
     expect(recorder.currentChatContext()).toBeDefined();
@@ -669,7 +697,7 @@ describe("chat.params", () => {
     startSession();
     recorder.onChatParams(
       { sessionID: "ses_1", agent: "build", model: { id: "kimi-k2.6" } } as never,
-      { temperature: 0.2, topP: 0.9, topK: 40, maxOutputTokens: 8192 } as never
+      { temperature: 0.2, topP: 0.9, topK: 40, maxTokens: 8192 } as never
     );
     emit({ type: "message.updated", properties: { info: assistantMessage() } });
 
@@ -694,7 +722,7 @@ describe("chat.params", () => {
     startSession();
     recorder.onChatParams(
       { sessionID: "ses_1", model: { id: "kimi-k2.6" } } as never,
-      { temperature: Number.NaN, maxOutputTokens: undefined } as never
+      { temperature: Number.NaN, maxTokens: undefined } as never
     );
     emit({ type: "message.updated", properties: { info: assistantMessage() } });
     const chat = (await env.spans()).find((span) => span.name === "chat kimi-k2.6");
@@ -716,12 +744,8 @@ describe("chat.params", () => {
 describe("response size", () => {
   it("records assistant text length without the text", async () => {
     startSession();
-    recorder.onTextComplete({ sessionID: "ses_1", messageID: "msg_1" } as never, {
-      text: "hello"
-    });
-    recorder.onTextComplete({ sessionID: "ses_1", messageID: "msg_1" } as never, {
-      text: " world"
-    });
+    recorder.onTextComplete("msg_1", "hello");
+    recorder.onTextComplete("msg_1", " world");
     emit({ type: "message.updated", properties: { info: assistantMessage() } });
 
     const [record] = logsNamed(await env.logs(), "opencode.assistant_response");
@@ -729,9 +753,8 @@ describe("response size", () => {
     expect(JSON.stringify(record?.attributes)).not.toContain("hello");
   });
 
-  it("ignores a non-string payload", async () => {
+  it("reports no length for a message whose text never completed", async () => {
     startSession();
-    recorder.onTextComplete({ sessionID: "ses_1", messageID: "msg_1" } as never, {});
     emit({ type: "message.updated", properties: { info: assistantMessage() } });
     const [record] = logsNamed(await env.logs(), "opencode.assistant_response");
     expect(record?.attributes["opencode.response.length"]).toBeUndefined();
@@ -757,6 +780,24 @@ describe("auto-resolved permissions", () => {
     ]);
   });
 
+  it("counts an auto-decision that carries no request id", async () => {
+    startSession();
+    recorder.onPermissionAsk({ sessionID: "ses_1", type: "bash" }, { status: "deny" });
+
+    expect(points(metricNamed(await env.metrics(), "opencode.permission.decision.count"))).toEqual([
+      [
+        1,
+        {
+          "opencode.permission.decision": "deny",
+          "opencode.permission.source": "auto",
+          "gen_ai.tool.name": "bash"
+        }
+      ]
+    ]);
+    const [record] = logsNamed(await env.logs(), "opencode.tool_decision");
+    expect(record?.attributes["opencode.permission.id"]).toBeUndefined();
+  });
+
   it("stays silent for a prompt the user still has to answer", async () => {
     startSession();
     recorder.onPermissionAsk({ id: "perm_b", sessionID: "ses_1", type: "bash" } as never, {
@@ -777,29 +818,6 @@ describe("auto-resolved permissions", () => {
     expect(
       points(metricNamed(await env.metrics(), "opencode.permission.decision.count"))
     ).toHaveLength(1);
-  });
-});
-
-describe("compaction trigger", () => {
-  it("reports whether the context forced the compaction", async () => {
-    startSession();
-    recorder.onCompactionAutocontinue(
-      { sessionID: "ses_1", agent: "build", overflow: true } as never,
-      { enabled: true }
-    );
-    const [record] = logsNamed(await env.logs(), "opencode.compaction_autocontinue");
-    expect(record?.attributes["opencode.compaction.overflow"]).toBe(true);
-    expect(record?.attributes["opencode.compaction.autocontinue_enabled"]).toBe(true);
-  });
-
-  it("reports a manual compaction and a disabled autocontinue", async () => {
-    startSession();
-    recorder.onCompactionAutocontinue({ sessionID: "ses_1", overflow: false } as never, {
-      enabled: false
-    });
-    const [record] = logsNamed(await env.logs(), "opencode.compaction_autocontinue");
-    expect(record?.attributes["opencode.compaction.overflow"]).toBe(false);
-    expect(record?.attributes["opencode.compaction.autocontinue_enabled"]).toBe(false);
   });
 });
 
@@ -861,8 +879,8 @@ describe("state pruning", () => {
   it("drops finished-message and tool bookkeeping when a turn ends", async () => {
     startSession();
     emit({ type: "message.updated", properties: { info: assistantMessage() } });
-    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", callID: "c1" });
-    recorder.onToolAfter({ tool: "edit", sessionID: "ses_1", callID: "c1", args: {} }, {});
+    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", id: "c1" });
+    recorder.onToolAfter({ tool: "edit", sessionID: "ses_1", id: "c1", status: "completed" }, {});
     emit({ type: "session.idle", properties: { sessionID: "ses_1" } });
 
     expect(recorder.pendingStateSize()).toEqual(
@@ -883,7 +901,7 @@ describe("state pruning", () => {
       type: "session.diff",
       properties: { sessionID: "ses_1", diff: [{ file: "a.ts", additions: 5, deletions: 0 }] }
     });
-    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", callID: "c1" });
+    recorder.onToolBefore({ tool: "edit", sessionID: "ses_1", id: "c1" });
     emit({
       type: "permission.updated",
       properties: { id: "p1", type: "edit", sessionID: "ses_1", messageID: "m", title: "t" }

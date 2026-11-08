@@ -135,9 +135,6 @@ importers:
 
   packages/opencode-core-otel:
     dependencies:
-      '@opencode-ai/plugin':
-        specifier: 1.18.32
-        version: 1.18.32
       '@opentelemetry/api':
         specifier: ^1.9.1
         version: 1.9.1
