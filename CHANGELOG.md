@@ -10,7 +10,7 @@ All seventeen workspace packages move on **one version line** and are released t
 
 ### Changed
 
-- **provider-sync, lightbridge:** `upsertManagedProvider` (add the provider as `activation: "enabled"` if absent, otherwise update `package`/`name`/`settings` in place) is now exported from `@vymalo/opencode-provider-sync/lib` and is the single implementation; lightbridge's `register` module calls it instead of carrying its own copy. No behaviour change, and the shared root-token cache path is untouched. ([#128](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/128))
+- **provider-sync, lightbridge:** `upsertManagedProvider` (add the provider as `activation: "enabled"` if absent, otherwise update `package`/`name`/`settings` in place) is now exported from `@vymalo/opencode-provider-sync/lib` and is the single implementation; lightbridge's `register` module calls it instead of carrying its own copy. No behaviour change, and the shared root-token cache path is untouched. ([#141](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/141))
 
 ## [0.17.1] — 2026-09-18
 
