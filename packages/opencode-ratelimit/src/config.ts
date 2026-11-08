@@ -5,7 +5,6 @@ export const DEFAULT_MAX_RETRIES = 5;
 export const DEFAULT_HEADER_PREFIX = "x-ratelimit";
 export const DEFAULT_SCOPE: RateLimitScope = "model";
 
-const META_KEY = "meta";
 const RATE_LIMIT_KEY = "rateLimit";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -99,18 +98,15 @@ function normalizeTiers(tiers: RateLimitTier[]): RateLimitTier[] {
  *    maxWaitMs?, maxRetries? }`, matched by reset magnitude.
  */
 export function parseRateLimitOptions(
-  providerOptions: Record<string, unknown> | undefined
+  providerSettings: Record<string, unknown> | undefined
 ): RateLimitOptions | null {
-  if (!providerOptions) {
+  if (!providerSettings) {
     return null;
   }
 
-  const meta = asRecord(providerOptions[META_KEY]);
-  if (!meta) {
-    return null;
-  }
-
-  const rateLimit = asRecord(meta[RATE_LIMIT_KEY]);
+  // v2 providers have no free-form `options.meta`; `Provider.Settings` is an
+  // open struct, so the opt-in lives directly at `settings.rateLimit`.
+  const rateLimit = asRecord(providerSettings[RATE_LIMIT_KEY]);
   if (!rateLimit) {
     return null;
   }

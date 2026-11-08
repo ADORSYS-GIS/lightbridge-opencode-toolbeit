@@ -1,6 +1,8 @@
 # Rate-limit awareness
 
-How `@vymalo/opencode-ratelimit` runs inside OpenCode: the single hook it registers, the one interception point it relies on, how it composes with any auth scheme, and — most importantly — how its waits interact with OpenCode's own request timeouts.
+How `@vymalo/opencode-ratelimit` runs inside OpenCode: the three request-lifecycle hooks it registers, how it composes with any auth scheme, and — most importantly — how its waits interact with OpenCode's own request timeouts.
+
+> **OpenCode v2.** This plugin targets the v2 plugin API ([ADR-0019](adr/0019-opencode-v2-cutover.md)). It does not run on OpenCode v1. The per-provider opt-in moved from `options.meta.rateLimit` to `settings.rateLimit`, and the plugin's own options now come from its `plugins` entry rather than `pluginConfig`.
 
 For the copy-paste config reference (every option, the event table), see the package README: [`packages/opencode-ratelimit/README.md`](../packages/opencode-ratelimit/README.md). This page is for the adopter who needs to reason about the mechanism and its failure modes.
 
@@ -23,43 +25,59 @@ Two things observed against a real deployment, worth knowing when you debug:
 - **The headers ride the throttled route, usually `/v1/chat/completions` — not `/v1/models`.** Envoy attaches the `BackendTrafficPolicy` per route, so a `curl` of `/v1/models` can come back with no `x-ratelimit-*` even though the chat endpoint is fully instrumented. Probe the chat endpoint (with a valid bearer) when verifying the gateway side.
 - **`x-ratelimit-limit` is often multi-policy**, e.g. `200, 200;w=60, 200000;w=60, 50000000;w=2592000` (a per-window request cap, a token cap, a monthly cap…). The parser takes the first token as the displayed `limit`; `remaining` and `reset` are single values Envoy sets for whichever bucket is closest to its cap — which is exactly what the throttle decision keys on, so the multiple policies need no special handling.
 
-## The one interception point
+## Three hooks, not one fetch wrapper
 
-OpenCode's plugin `Hooks` API has **no post-response hook** — nothing fires after an HTTP response, and nothing exposes response headers. The only place a plugin can observe a response's status and headers is a **custom `fetch`** on the provider.
+Under the v1 plugin API this plugin had no choice but to inject a custom `fetch` into
+`provider.options.fetch`: `Hooks` had **no post-response hook**, so a wrapper around the transport
+was the only place a plugin could ever see a response's status and headers.
 
-OpenCode's provider loader extracts `options.fetch`, then re-wraps it with its own timeout logic and calls it for every request to that provider. So during its `config` hook this plugin sets `provider.options.fetch` to a wrapper. (Function values survive because the hook mutates the in-memory config object, not JSON — a `fetch` set in `opencode.json` could never be a function.)
+V2 removes that constraint. `Provider.Info` has no `options` and no `fetch` field at all, and the
+HTTP exchange is hooked natively. The plugin now registers three things on `ctx.session`, plus one
+provider transform that reads the opt-in set:
 
-The wrapper, per request:
+| Hook | Job |
+| --- | --- |
+| `provider.transform` | Read each provider's `settings.rateLimit`. Reads only — it never mutates a provider. Reruns on every provider reload, so the opt-in set stays current. |
+| `http.request` | **Pre-request gate.** If the last response reported `remaining: 0`, hold the request until `x-ratelimit-reset` elapses. |
+| `http.response` | **Read** the rate-limit headers, update per-bucket state, emit `ratelimit_quota`, and arm or clear the gate for the *next* callers. |
+| `retry` | **Decide a `429`.** A `wait` tier returns `{ retry: true, delay }`; an `error` tier returns `{ retry: false }` so the `429` surfaces immediately. |
 
-1. **Pre-request gate** — if the last response reported `remaining: 0`, hold until `x-ratelimit-reset` elapses.
-2. **Send** through the underlying fetch (or a fetch a prior plugin installed — it composes).
-3. **Read** the rate-limit headers, update per-provider state, emit `ratelimit_quota`.
-4. **On `429`** — wait `x-ratelimit-reset` (or the `Retry-After` fallback, or a 1s default), retry up to `maxRetries`, then return the `429` as-is.
+Two consequences worth knowing:
 
-The `Response` is returned **untouched** — we only read `status` and `headers`, never the body, so no `.clone()` is needed and the streaming body reaches OpenCode intact.
+- **The plugin no longer owns the retry loop.** On a `429` it returns a delay and *OpenCode* sleeps,
+  cancellably, and counts the attempts (`event.attempt`). V1 slept inside the wrapper and counted
+  its own retries. The observable policy is the same; who does the waiting is not.
+- **The model no longer comes from the request body.** V1 sniffed `model` out of the JSON body to
+  support `scope: "model"`. V2 hands it over as `event.model`, so that parsing — and its
+  provider-wide fallback for unparseable bodies — is gone.
+
+The response is never read, only its `status` and `headers`, so the streaming body reaches OpenCode
+untouched.
 
 ## Auth composition
 
-The wrapper never reads or sets `Authorization`. OpenCode's per-request `chat.headers` hook (which `@vymalo/opencode-oauth2` uses to inject a fresh bearer) and the provider's own `options.headers` handle auth; our wrapper just passes `init` through. So this plugin is **auth-agnostic** and works with oauth2, a static API key, or no auth.
+None of the four hooks reads or sets `Authorization`. OpenCode's per-request `model.request` hook (which `@vymalo/opencode-oauth2` uses to inject a fresh bearer) and the provider's own `headers` handle auth. So this plugin is **auth-agnostic** and works with oauth2, a static API key, or no auth.
 
-One ordering note: config hooks run in plugin-registration order, so list `@vymalo/opencode-oauth2` **before** `@vymalo/opencode-ratelimit` if you use both. This is a soft recommendation for tidiness — because the wrapper does not touch auth, the order does not actually affect correctness (unlike the oauth2 → models-info coupling, which does).
+Ordering is now cosmetic. Under v1 the `config` hooks ran in registration order and this plugin had to compose with any `fetch` a prior plugin had installed. In v2 each plugin registers against a different domain, and this plugin touches neither auth nor the provider definition — so its position in `plugins` cannot affect correctness (unlike the oauth2 → models-info coupling, which still can).
 
 ## The timeout interaction (the important part)
 
-Because the wait happens **inside** our fetch, and OpenCode wraps our fetch with its own `headerTimeout` / `chunkTimeout`, a long wait competes with those timeouts. With the default `maxWaitMs: 0` (unlimited), a 55-second reset window is a 55-second wait — and if that exceeds OpenCode's header timeout, OpenCode aborts the request mid-wait.
+The pre-request gate delays the request **before** it is sent, inside OpenCode's own request path, so a long hold still competes with the provider's `headerTimeout` / `chunkTimeout`. With the default `maxWaitMs: 0` (unlimited), a 55-second reset window is a 55-second hold — and if that exceeds the header timeout, OpenCode aborts the request mid-wait.
+
+The `429` backoff no longer has this problem: it is the host's own retry delay now, not a wait inside a transport call.
 
 The plugin handles this defensively rather than hanging:
 
-- Every wait honors the incoming `init.signal`. A single shared cooldown timer serves all concurrent waiters, but each waiter races it against its **own** signal — so one request's cancellation never aborts the others.
+- Every wait honors the request's own `AbortSignal` (`event.request.signal`). A single shared cooldown timer serves all concurrent waiters, but each waiter races it against its **own** signal — so one request's cancellation never aborts the others.
 - On an aborted wait it logs `ratelimit_wait_aborted` (warn) and re-throws the `AbortError`, which OpenCode treats as a normal cancellation.
 
 If you genuinely want to wait out long windows, raise the provider's timeouts above your largest expected reset:
 
 ```json
-"options": { "headerTimeout": 90000, "chunkTimeout": 90000 }
+"settings": { "headerTimeout": 90000, "chunkTimeout": 90000 }
 ```
 
-These are the same option keys OpenCode consumes, so they belong in the provider's `options` next to `baseURL`.
+These are the same keys OpenCode consumes, so they belong in the provider's `settings` next to `baseURL`.
 
 Two knobs trade off against this:
 
@@ -71,12 +89,13 @@ Two knobs trade off against this:
 A single `maxWaitMs`/`maxRetries` pair can't distinguish a **per-minute burst reset** (≤60s, worth waiting through) from a **monthly-budget reset** (days away, should error fast) — Envoy reports both as the same `x-ratelimit-reset` for whichever bucket is binding, and never labels which window it is. The reset's **magnitude** is the one reliable signal, so the `tiers` array maps reset-duration bands to behavior:
 
 ```jsonc
-"meta": { "rateLimit": {
+// providers.<id>.settings
+"rateLimit": {
   "tiers": [
     { "maxResetSeconds": 120, "action": "wait", "maxWaitMs": 0, "maxRetries": 3 },
     { "action": "error" }
   ]
-} }
+}
 ```
 
 On every `remaining: 0` or `429`, the plugin reads the reset, selects the first tier whose `maxResetSeconds` covers it (ascending, catch-all last), and either **waits** (throttle + bounded retry) or **errors** (surface the `429` immediately — no wait, no retry). The flat form is just sugar for a single catch-all `wait` tier. An auto-appended catch-all defaults to `wait` (the safe direction); add an explicit `{ "action": "error" }` to fail fast on anything longer than your wait bands. This is what lets "≤2min → pause; days → error now" be expressed without `maxRetries` gymnastics.
@@ -85,7 +104,7 @@ On every `remaining: 0` or `429`, the plugin reads the reset, selects the first 
 
 `scope` (default `"model"`) controls how cooldown state is partitioned:
 
-- **`"model"`** keys state per `(provider, model)`. The model is read from the request body (`@ai-sdk/openai-compatible` sends a JSON body with `model`; non-parseable → provider-wide fallback). Use this when the gateway buckets per model — e.g. an Envoy `BackendTrafficPolicy` whose selector includes the model — so exhausting one model's bucket doesn't gate its siblings.
+- **`"model"`** keys state per `(provider, model)`. The model comes straight off the hook event (`event.model`) — v2 supplies it, so there is no body parsing and no fallback case. Use this when the gateway buckets per model — e.g. an Envoy `BackendTrafficPolicy` whose selector includes the model — so exhausting one model's bucket doesn't gate its siblings.
 - **`"provider"`** shares one cooldown across the whole provider. Use it when the gateway buckets per provider/account.
 
 Getting this wrong is a real symptom, not just a nicety: with `"provider"` against per-model buckets, a 429 on model A needlessly blocks models B/C that still have quota.
@@ -102,8 +121,8 @@ In-memory, per process, per bucket (`cooldownUntilMs` + the shared-timer bookkee
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Requests never throttle | Provider didn't opt in, or gateway emits no `x-ratelimit-*` | Add `options.meta.rateLimit`; confirm the gateway sends the draft-03 triple (check `headerPrefix`). |
-| `ratelimit_wait_aborted` during long waits | Wait exceeded OpenCode's `headerTimeout` | Raise `options.headerTimeout` / `chunkTimeout`, or set a smaller `maxWaitMs`. |
+| Requests never throttle | Provider didn't opt in, or gateway emits no `x-ratelimit-*` | Add `settings.rateLimit` to the provider; confirm the gateway sends the draft-03 triple (check `headerPrefix`). |
+| `ratelimit_wait_aborted` during long waits | Gate hold exceeded OpenCode's `headerTimeout` | Raise `settings.headerTimeout` / `chunkTimeout`, or set a smaller `maxWaitMs`. |
 | `ratelimit_giveup` then a `429` surfaces | `maxRetries` exhausted while still limited | Raise `maxRetries`, or accept the host-level `429`. |
 | UI freezes for a long time on a monthly/budget exhaustion | One `wait` tier (or flat config) treats the multi-day reset as waitable | Add a `tiers` entry with `{ "action": "error" }` for the long band (see [Tiered policies](#tiered-policies-burst-vs-budget)). |
 | Exhausting one model blocks other models | `scope: "provider"` against per-model gateway buckets | Set `scope: "model"` (the default). |

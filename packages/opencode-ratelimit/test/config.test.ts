@@ -10,7 +10,7 @@ import {
 } from "../src/config.js";
 
 function rl(rateLimit: Record<string, unknown>) {
-  return parseRateLimitOptions({ meta: { rateLimit } });
+  return parseRateLimitOptions({ rateLimit });
 }
 
 describe("parseRateLimitOptions", () => {
@@ -18,12 +18,12 @@ describe("parseRateLimitOptions", () => {
     expect(parseRateLimitOptions(undefined)).toBeNull();
   });
 
-  it("returns null when there is no meta block", () => {
+  it("returns null when the settings have no rateLimit block", () => {
     expect(parseRateLimitOptions({ baseURL: "https://x.test" })).toBeNull();
   });
 
-  it("returns null when meta has no rateLimit block", () => {
-    expect(parseRateLimitOptions({ meta: { modelsInfoUrl: "/models" } })).toBeNull();
+  it("does not read the v1 options.meta.rateLimit location", () => {
+    expect(parseRateLimitOptions({ meta: { rateLimit: {} } })).toBeNull();
   });
 
   it("returns null when rateLimit is explicitly disabled", () => {
@@ -130,13 +130,11 @@ describe("parseRateLimitOptions", () => {
 
 describe("selectTier", () => {
   const tiers = parseRateLimitOptions({
-    meta: {
-      rateLimit: {
-        tiers: [
-          { maxResetSeconds: 120, action: "wait", maxWaitMs: 0, maxRetries: 3 },
-          { maxResetSeconds: null, action: "error" }
-        ]
-      }
+    rateLimit: {
+      tiers: [
+        { maxResetSeconds: 120, action: "wait", maxWaitMs: 0, maxRetries: 3 },
+        { maxResetSeconds: null, action: "error" }
+      ]
     }
   })?.tiers;
 

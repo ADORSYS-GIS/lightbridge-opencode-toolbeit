@@ -16,6 +16,7 @@
   "keywords": [
     "opencode",
     "opencode-plugin",
+    "opencode-v2",
     "rate-limit",
     "throttle",
     "429",
@@ -56,10 +57,14 @@
     "format:check": "biome format ."
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.32"
+    "@opencode/plugin": "2.2.6"
   },
   "devDependencies": {
+    "effect": "4.1.0",
     "vite": "^8.3.0",
     "vitest": "^5.0.1"
+  },
+  "peerDependencies": {
+    "effect": "^4.0.0"
   }
 }

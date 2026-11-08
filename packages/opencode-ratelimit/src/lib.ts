@@ -1,7 +1,8 @@
 export {
   createOpencodeRatelimitPlugin,
   OpencodeRatelimitPlugin,
-  type OpenCodePluginFactoryOptions
+  type OpenCodePluginFactoryOptions,
+  PLUGIN_ID
 } from "./opencode.js";
 
 export {
@@ -16,24 +17,27 @@ export {
 export { parseRateLimit } from "./headers.js";
 
 export {
+  captureHostContext,
+  createEffectLogger,
   createJsonConsoleLogger,
   DEFAULT_LOG_LEVEL,
-  fromOpenCodeLogLevel,
   type LogFields,
   type Logger,
-  type LogLevel
+  type LogLevel,
+  resolveLogLevel
 } from "./logging.js";
 
 export {
+  type BucketRef,
+  collectOptIns,
   createProviderState,
+  createRateLimiter,
   DEFAULT_BACKOFF_MS,
-  type InstallConfigInput,
-  installRateLimiter,
-  makeRateLimitFetch,
-  type ProviderConfigLike,
   type ProviderRateState,
   type RateLimitDeps,
-  type RateStateStore
+  type RateLimiter,
+  type RateStateStore,
+  type RetryDecision
 } from "./plugin.js";
 
 export type {
