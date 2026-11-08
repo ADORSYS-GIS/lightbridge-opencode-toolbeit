@@ -1,5 +1,5 @@
 import { DEVTOOLS_TOOLS } from "../src/catalog.js";
-import { buildContext } from "../src/tools.js";
+import { buildContext } from "../src/context.js";
 import type { NeutralResult, ToolContext } from "../src/tool-spec.js";
 import type { ResolvedDevtoolsOptions } from "../src/types.js";
 
