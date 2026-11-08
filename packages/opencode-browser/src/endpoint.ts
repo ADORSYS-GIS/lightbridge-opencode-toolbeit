@@ -18,6 +18,8 @@ export interface EndpointOptions {
   label?: string;
   /** Delay before retrying election after a drop. */
   reelectMs?: number;
+  /** Ceiling for the guest handshake (open -> `ready`); default 5000. Forwarded to `AgentClient`. */
+  connectTimeoutMs?: number;
   /**
    * Fired whenever this endpoint becomes the host — on the initial election AND
    * on any later failover re-election. Use it for host-only side effects like
@@ -148,7 +150,13 @@ export async function createEndpoint(opts: EndpointOptions, deps: EndpointDeps):
     // 2) Someone else hosts — join as a guest.
     deps.logger.trace("browser_guest_connect_attempt", { url });
     const client = new AgentClient(
-      { url, token: opts.token, label: opts.label, timeoutMs: opts.timeoutMs },
+      {
+        url,
+        token: opts.token,
+        label: opts.label,
+        timeoutMs: opts.timeoutMs,
+        connectTimeoutMs: opts.connectTimeoutMs
+      },
       {
         logger: deps.logger,
         createSocket: deps.createAgentSocket,

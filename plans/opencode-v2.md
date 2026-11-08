@@ -3,7 +3,7 @@
 **Status**: in progress. `@vymalo/opencode-ratelimit` is ported as the reference implementation;
 the other ten packages follow the pattern it establishes.
 
-Decision record: [ADR-0018](../docs/adr/0018-opencode-v2-cutover.md). Read it first — it holds the
+Decision record: [ADR-0019](../docs/adr/0019-opencode-v2-cutover.md). Read it first — it holds the
 *why* (v2-only, no dual export; the Effect surface; `effect` as a peer dep; ADR-0014's mechanism
 change). This document holds the *how* and the order.
 
@@ -22,7 +22,7 @@ Every port is the same five moves. Nothing below is specific to ratelimit except
 ```
 
 `@opencode-ai/plugin` comes out. `effect` is **peer + dev, never a runtime dependency** — the host
-supplies the instance, and a second copy silently breaks logging (ADR-0018).
+supplies the instance, and a second copy silently breaks logging (ADR-0019).
 
 ### 2. The adapter becomes `Plugin.define({ id, effect })`
 
@@ -68,7 +68,7 @@ Two things to get right, because neither fails a type check:
 Every port carries the ADR-0014 regression test: a `warn` record reaches the Effect logger at its
 true severity and does **not** reach the console unless `VYMALO_PLUGIN_CONSOLE_LOG=1`.
 
-### 4. Registrations, per the ADR-0018 mapping table
+### 4. Registrations, per the ADR-0019 mapping table
 
 Transform callbacks must stay **synchronous and cheap** — load effectful data before registering,
 and call the domain's `reload()` when it changes. Later plugins' transforms see earlier changes.
@@ -95,7 +95,7 @@ types.
 | 7 | `opencode-repo-auth` | `config` + `chat.headers` | `ctx.provider.transform` + `ctx.session.hook("model.request")` | Opt-in `options.meta.repoAuth` → `settings.repoAuth`. The oauth2-collision guard needs re-deriving from the provider editor rather than the config object. `git.ts` is off-disk and untouched. |
 | 8 | `opencode-otel` | `config`, `chat.message`, `chat.params`, `permission.ask`, `tool.execute.*`, `event` | `ctx.session.hook("context")`, `ctx.permission.hook("evaluate")`, `ctx.tool.hook(…)`, `ctx.event.subscribe` | Widest hook surface in the suite, but it is an observer — no transforms except the `model.request` header injection for W3C trace-context (replacing the `provider.options.fetch` wrapper). Check whether v2's `experimental.openTelemetry` config field (accepted-but-ignored per the migration guide) changes anything for us. |
 | 9 | `opencode-lightbridge` | all of the above | all of the above | Last, because it composes `provider-sync` + `core-otel` and must not regress ADR-0017's shared root-token cache or the scheduler-ownership guard. |
-| 10 | `opencode-code-index` | `config` + `tool` map | `ctx.tool.transform` | Private + experimental. Port last, or drop it — ADR-0018 is a good moment to decide whether it stays. |
+| 10 | `opencode-code-index` | `config` + `tool` map | `ctx.tool.transform` | Private + experimental. Port last, or drop it — ADR-0019 is a good moment to decide whether it stays. |
 
 Unaffected: `opencode-auth-core` (never imported the plugin API), `opencode-browser-mcp`,
 `opencode-devtools-mcp` (MCP servers — they consume catalogs, not hooks), and
@@ -108,7 +108,7 @@ the host-instance sharing that logging depends on.
 
 One PR per concern, per `CLAUDE.md`. Implementation and docs land together.
 
-1. ✅ **ratelimit + ADR-0018 + this plan** — the reference port.
+1. ✅ **ratelimit + ADR-0019 + this plan** — the reference port.
 2. **core-otel + provider-sync** — the two engines, together: both are `Hooks`-type-only changes and
    nothing else can port until they land.
 3. **models-info**, **devtools**, **browser** — independent, parallelisable.

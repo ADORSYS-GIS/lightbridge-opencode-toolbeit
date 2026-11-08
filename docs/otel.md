@@ -389,13 +389,15 @@ can afford it.
 
 ## What is deliberately not collected
 
-The plugin observes 9 of the 19 plugin hooks and 16 of the 32 SDK event types. The rest are left
+The plugin observes 9 of the 21 plugin hooks and 16 of the 32 SDK event types. The rest are left
 alone on purpose, and it is worth knowing which, so an absence is never mistaken for a bug.
 
 | Source | Why not |
 | --- | --- |
 | `chat.headers`, `shell.env` | Carry credentials and environment. Reading them to emit shape would mean handling secrets for no telemetry gain. |
 | `experimental.chat.messages.transform`, `experimental.chat.system.transform` | Content — the conversation and the system prompt. |
+| `experimental.provider.small_model` | Experimental model-routing hook (added in `@opencode-ai/plugin` 1.18.32); the chosen small model is a routing decision, not an inference call, so there is no telemetry to attach. Revisit if small-model routing becomes a telemetry need. |
+| `dispose` | Plugin teardown (added in `@opencode-ai/plugin` 1.18.32). Flushing already happens on `session.idle` + `beforeExit` / `SIGINT` / `SIGTERM`; a dispose flush would be a redundant third drain of the same buffers. Adopting it is a tracked follow-up. |
 | `tool.definition` | Tool descriptions, static and identical every run. |
 | `lsp.client.diagnostics` | The payload is `{serverID, path}` only — **no severity and no counts**. Emitting it would produce one high-volume event per diagnostics publish with nothing to aggregate. Worth revisiting if the event ever carries counts. |
 | `command.execute.before` | Redundant: `command.executed` already carries the name and arguments. |
@@ -409,10 +411,27 @@ nothing.
 
 ## Flushing
 
-The OpenCode plugin API has no dispose hook, so buffered telemetry would be lost when a short CLI
-invocation exits. The plugin flushes on **`session.idle`** — the natural turn boundary — and
-registers `beforeExit` / `SIGINT` / `SIGTERM` handlers for hard exits. Metrics still export on their
-own interval (60s by default) for long-running sessions.
+The plugin API gained a `dispose` hook in `@opencode-ai/plugin` 1.18.32, but this plugin does not
+register it (adopting it is a tracked follow-up). Buffered telemetry would otherwise be lost when a
+short CLI invocation exits. The plugin flushes on **`session.idle`**
+— the natural turn boundary — and registers `beforeExit` / `SIGINT` / `SIGTERM` handlers for hard
+exits. Metrics still export on their own interval (60s by default) for long-running sessions.
+
+What the signal handlers do depends on who else listens for the signal
+([ADR-0018](adr/0018-exit-handlers-reraise-the-signal.md)):
+
+- **Nothing else listens** (e.g. `opencode serve`): shut the exporters down — waiting at most 2 s,
+  so an unreachable collector cannot stall the exit — then **re-raise the same signal**, so the
+  process ends with the usual status (143 for SIGTERM, 130 for SIGINT). A bare listener would
+  replace the runtime's default "terminate" action and leave the process running; re-raising hands
+  it back.
+- **The host listens too** (e.g. `opencode run` handling Ctrl-C): the host decides whether the
+  process ends, so the plugin only **flushes** (same 2 s bound), keeps its exporters running, and
+  never terminates anything.
+
+`beforeExit` shuts the exporters down and never terminates anything. Outcomes are logged at `debug`
+(`otel_exit_reraised`, `otel_exit_deferred_to_host`, `otel_shutdown_deadline_exceeded`; the
+`opencode-lightbridge` module uses the `lightbridge_otel_` prefix) — never to the terminal.
 
 If you see traces but no metrics, wait out the interval or end the session; that is the batch
 window, not a failure.

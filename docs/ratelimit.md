@@ -2,7 +2,7 @@
 
 How `@vymalo/opencode-ratelimit` runs inside OpenCode: the three request-lifecycle hooks it registers, how it composes with any auth scheme, and — most importantly — how its waits interact with OpenCode's own request timeouts.
 
-> **OpenCode v2.** This plugin targets the v2 plugin API ([ADR-0018](adr/0018-opencode-v2-cutover.md)). It does not run on OpenCode v1. The per-provider opt-in moved from `options.meta.rateLimit` to `settings.rateLimit`, and the plugin's own options now come from its `plugins` entry rather than `pluginConfig`.
+> **OpenCode v2.** This plugin targets the v2 plugin API ([ADR-0019](adr/0019-opencode-v2-cutover.md)). It does not run on OpenCode v1. The per-provider opt-in moved from `options.meta.rateLimit` to `settings.rateLimit`, and the plugin's own options now come from its `plugins` entry rather than `pluginConfig`.
 
 For the copy-paste config reference (every option, the event table), see the package README: [`packages/opencode-ratelimit/README.md`](../packages/opencode-ratelimit/README.md). This page is for the adopter who needs to reason about the mechanism and its failure modes.
 

@@ -61,8 +61,8 @@
   },
   "devDependencies": {
     "effect": "4.1.0",
-    "vite": "^8.2.1",
-    "vitest": "^4.1.7"
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
   },
   "peerDependencies": {
     "effect": "^4.0.0"

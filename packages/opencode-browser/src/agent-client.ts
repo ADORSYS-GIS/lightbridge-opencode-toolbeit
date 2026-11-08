@@ -27,6 +27,8 @@ export interface AgentClientOptions {
   token: string;
   label?: string;
   timeoutMs: number;
+  /** Ceiling for the guest handshake; `connect()` rejects after it. Default 5000. */
+  connectTimeoutMs?: number;
 }
 
 /**
@@ -37,6 +39,14 @@ export interface AgentClientOptions {
  * before — otherwise the guest rejects locally while the executor keeps running.
  */
 const AGENT_TIMEOUT_GRACE_MS = 5_000;
+
+/**
+ * Default ceiling for the guest handshake (socket open -> broker `ready`).
+ * A broker port can stay bound by a dead process (on Windows a listen socket is
+ * inherited by child processes), so the TCP/WebSocket open succeeds but no
+ * `ready` frame ever arrives. Without a ceiling `connect()` never settles.
+ */
+const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 
 export interface AgentClientDeps {
   logger: Logger;
@@ -81,45 +91,81 @@ export class AgentClient implements AgentEndpoint {
   connect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
-      this.socket = this.deps.createSocket(this.opts.url, {
-        onOpen: () => {
-          this.socket?.send(
-            encodeFrame(helloFrame(this.opts.token, { role: "agent", client: this.opts.label }))
-          );
-          // Resolve only once the broker replies `ready`.
-        },
-        onMessage: (data) => {
-          const frame = decodeFrame(data);
-          if (!frame) {
-            return;
-          }
-          if (frame.type === "ready") {
-            this.ready = true;
-            this.deps.logger.trace("browser_guest_ready", { label: this.opts.label });
-            for (const w of this.readyWaiters.splice(0)) {
-              w();
+      const connectTimeoutMs = this.opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+      const connectTimer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.deps.logger.debug("browser_guest_connect_timeout", {
+          url: this.opts.url,
+          timeoutMs: connectTimeoutMs
+        });
+        // Abandon this attempt: `ws.close()` against a non-responsive peer can take
+        // ~30s to actually fire `onClose`. Marking the client closed makes that late
+        // close inert (it must not trigger the endpoint's re-election and wipe a
+        // later, successful election). Same flag `stop()` uses.
+        this.closed = true;
+        const socket = this.socket;
+        this.socket = null;
+        try {
+          socket?.close();
+        } catch {
+          // already closed
+        }
+        reject(new AgentClientError("bridge connect timed out", "connect_failed"));
+      }, connectTimeoutMs);
+      // A pending handshake must not keep the process alive on its own.
+      connectTimer.unref?.();
+      try {
+        this.socket = this.deps.createSocket(this.opts.url, {
+          onOpen: () => {
+            this.socket?.send(
+              encodeFrame(helloFrame(this.opts.token, { role: "agent", client: this.opts.label }))
+            );
+            // Resolve only once the broker replies `ready`.
+          },
+          onMessage: (data) => {
+            const frame = decodeFrame(data);
+            if (!frame) {
+              return;
             }
+            if (frame.type === "ready") {
+              this.ready = true;
+              this.deps.logger.trace("browser_guest_ready", { label: this.opts.label });
+              for (const w of this.readyWaiters.splice(0)) {
+                w();
+              }
+              if (!settled) {
+                settled = true;
+                clearTimeout(connectTimer);
+                resolve();
+              }
+            } else if (frame.type === "result") {
+              this.handleResult(frame);
+            }
+          },
+          onClose: () => {
+            this.ready = false;
+            this.rejectAllPending(new AgentClientError("disconnected from bridge", "disconnected"));
+            this.socket = null;
             if (!settled) {
               settled = true;
-              resolve();
+              clearTimeout(connectTimer);
+              reject(
+                new AgentClientError("bridge connection closed before ready", "connect_failed")
+              );
             }
-          } else if (frame.type === "result") {
-            this.handleResult(frame);
+            if (!this.closed) {
+              this.deps.onClose?.();
+            }
           }
-        },
-        onClose: () => {
-          this.ready = false;
-          this.rejectAllPending(new AgentClientError("disconnected from bridge", "disconnected"));
-          this.socket = null;
-          if (!settled) {
-            settled = true;
-            reject(new AgentClientError("bridge connection closed before ready", "connect_failed"));
-          }
-          if (!this.closed) {
-            this.deps.onClose?.();
-          }
-        }
-      });
+        });
+      } catch (err) {
+        settled = true;
+        clearTimeout(connectTimer);
+        reject(err);
+      }
     });
   }
 

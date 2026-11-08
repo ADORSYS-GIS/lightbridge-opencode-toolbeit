@@ -158,7 +158,7 @@ MIT
 ## Migrating from v1
 
 `0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See
-[ADR-0018](../../docs/adr/0018-opencode-v2-cutover.md) for why there is no dual-support build.
+[ADR-0019](../../docs/adr/0019-opencode-v2-cutover.md) for why there is no dual-support build.
 
 | v1 | v2 |
 | --- | --- |

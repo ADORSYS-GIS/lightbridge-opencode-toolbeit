@@ -48,6 +48,15 @@ export {
 } from "./deferred.js";
 
 export {
+  DEFAULT_SHUTDOWN_DEADLINE_MS,
+  type ExitHandlerOptions,
+  type ExitProcessLike,
+  type ExitSignal,
+  type ExitTimers,
+  registerExitHandlers
+} from "./exit-handlers.js";
+
+export {
   installTracePropagation,
   type PropagationConfigInput,
   type ProviderConfigLike

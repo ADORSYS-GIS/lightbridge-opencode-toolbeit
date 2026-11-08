@@ -25,8 +25,8 @@ const manifestFor = (browser: string) => {
 describe("manifest permissions", () => {
   it("requests only what the Chromium code path calls", () => {
     expect(manifestFor("chrome").permissions).toEqual([
-      "tabs", // command-router / group-registry: chrome.tabs.*
-      "scripting", // page-actions + feedback-overlay: chrome.scripting.executeScript
+      "tabs", // command-router / group-registry: browser.tabs.*
+      "scripting", // page-actions + feedback-overlay: browser.scripting.executeScript
       "cookies", // command-router: the `cookies` command
       "debugger", // cdp.ts: the CDP executor
       "tabGroups", // group-registry: real titled tab groups

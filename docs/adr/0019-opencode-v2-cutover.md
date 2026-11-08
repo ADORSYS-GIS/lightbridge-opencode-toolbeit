@@ -1,4 +1,4 @@
-# ADR-0018 — Cut over to the OpenCode v2 plugin API, on the Effect surface
+# ADR-0019 — Cut over to the OpenCode v2 plugin API, on the Effect surface
 
 - **Status**: Accepted
 - **Date**: 2026-11-08

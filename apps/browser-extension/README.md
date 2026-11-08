@@ -104,7 +104,7 @@ src/
 └── styles/globals.css       # Tailwind v4 theme tokens
 ```
 
-The two executors share all DOM-bound work via `chrome.scripting.executeScript`. The CDP
+The two executors share all DOM-bound work via `browser.scripting.executeScript`. The CDP
 executor (`chrome.debugger`) adds trusted input + full-page capture on Chromium; the
 content-script executor is the Firefox-safe fallback. Full architecture, wire protocol, and tool
 reference: [`docs/browser.md`](../../docs/browser.md).

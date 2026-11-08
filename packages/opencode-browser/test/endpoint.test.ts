@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentSocketFactory } from "../src/agent-client.js";
 import { createEndpoint } from "../src/endpoint.js";
@@ -70,6 +70,45 @@ describe("createEndpoint election", () => {
 
     expect(endpoint.mode()).not.toBe("host");
     expect(hosted).toBe(0);
+    endpoint.shutdown();
+  });
+});
+
+describe("createEndpoint guest handshake timeout", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("threads connectTimeoutMs through to the AgentClient", async () => {
+    const closeSpy = vi.fn();
+    // Bind loses (EADDRINUSE), socket opens but the broker never answers `ready`.
+    const addrInUse = Object.assign(new Error("in use"), { code: "EADDRINUSE" });
+    class BusyTransport implements BridgeTransport {
+      listen(): Promise<void> {
+        return Promise.reject(addrInUse);
+      }
+      stop(): void {}
+    }
+    const silentSocket: AgentSocketFactory = () => ({ send() {}, close: closeSpy });
+
+    let done = false;
+    const pending = createEndpoint(
+      { ...baseOpts, connectTimeoutMs: 1234 },
+      {
+        logger: noopLogger,
+        createServerTransport: () => new BusyTransport(),
+        createAgentSocket: silentSocket
+      }
+    ).then((e) => {
+      done = true;
+      return e;
+    });
+
+    await vi.advanceTimersByTimeAsync(1233);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const endpoint = await pending;
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(endpoint.mode()).toBe("electing");
     endpoint.shutdown();
   });
 });

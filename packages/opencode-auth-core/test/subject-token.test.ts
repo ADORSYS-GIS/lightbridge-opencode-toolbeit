@@ -55,7 +55,8 @@ describe("resolveSubjectToken", () => {
     let capturedAuth = "";
     const fetchImpl: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       capturedUrl = String(input);
-      capturedAuth = (init?.headers as Record<string, string>).Authorization;
+      const headers = init?.headers as Record<string, string> | undefined;
+      capturedAuth = headers?.Authorization ?? "";
       return new Response(JSON.stringify({ value: "gha-jwt-xyz" }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
