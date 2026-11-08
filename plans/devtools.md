@@ -1,5 +1,7 @@
 # Devtools utilities plugin + MCP (design)
 
+> **Historical design record (OpenCode v1).** Written against the v1 plugin API (`Hooks.*`, `chat.headers`, `options.meta.*`, `pluginConfig`, `provider.options.fetch`). The suite is now v2-only ([ADR-0019](../docs/adr/0019-opencode-v2-cutover.md)); read those names as the v1 design, and see [`docs/devtools.md`](../docs/devtools.md) for current behaviour and config.
+
 Status: **implemented in 0.9.0.** New published pair: `@vymalo/opencode-devtools` (OpenCode plugin)
 and `@vymalo/opencode-devtools-mcp` (MCP stdio server) — same dual-ship shape as
 `opencode-browser` / `opencode-browser-mcp`. User-facing reference: [`docs/devtools.md`](../docs/devtools.md).

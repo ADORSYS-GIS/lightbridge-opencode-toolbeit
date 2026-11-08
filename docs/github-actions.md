@@ -155,11 +155,11 @@ jobs:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@vymalo/opencode-oauth2"],
-  "provider": {
+  "plugins": [{ "package": "@vymalo/opencode-oauth2" }],
+  "providers": {
     "miaou": {
       "name": "Miaou",
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.verif.fyi/realms/camer-digital",

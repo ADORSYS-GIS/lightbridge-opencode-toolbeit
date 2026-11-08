@@ -19,7 +19,7 @@ many repos, so the store's bootstrap cost and idle footprint matter as much as q
 
 The suite's whole ethos is "no heavy infra, runs under Bun *and* Node, atomic-file caches"
 — standing up a database **server** per project cuts hard against it (see the cost calculus
-in [`plans/code-index.md`](../../plans/code-index.md)).
+in `plans/code-index.md`, deleted with the package).
 
 ## Decision
 

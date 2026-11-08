@@ -1,5 +1,7 @@
 # OpenTelemetry plugin (design)
 
+> **Historical design record (OpenCode v1).** Written against the v1 plugin API (`Hooks.*`, `chat.headers`, `options.meta.*`, `pluginConfig`, `provider.options.fetch`). The suite is now v2-only ([ADR-0019](../docs/adr/0019-opencode-v2-cutover.md)); read those names as the v1 design, and see [`docs/otel.md`](../docs/otel.md) for current behaviour and config.
+
 Status: **implemented.** Initial surface shipped in 0.12.0; full hook/event coverage in 0.13.0;
 short-lived credential support (`tokenCommand`), export-failure log visibility, and repository (VCS)
 metadata shipped in 0.14.0. Published package: `@vymalo/opencode-otel`

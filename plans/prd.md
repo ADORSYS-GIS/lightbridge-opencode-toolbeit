@@ -1,5 +1,7 @@
 # Product Requirements Document (PRD)
 
+> **Historical design record (OpenCode v1).** Written against the v1 plugin API (`Hooks.*`, `chat.headers`, `options.meta.*`, `pluginConfig`, `provider.options.fetch`). The suite is now v2-only ([ADR-0019](../docs/adr/0019-opencode-v2-cutover.md)); read those names as the v1 design, and see [`docs/architecture.md`](../docs/architecture.md) for current behaviour and config.
+
 ## Product Name
 
 **OpenCode OAuth2 Model Sync Plugin**
