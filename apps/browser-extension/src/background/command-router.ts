@@ -1,3 +1,5 @@
+import { browser } from "wxt/browser";
+
 import { recordAction, recordScreenshot } from "../shared/db";
 import type { CommandFrame } from "../shared/protocol";
 import type { Executor, Viewport } from "./executor";
@@ -355,7 +357,7 @@ export class CommandRouter {
       if (!url) {
         throw new Error("cookies set requires a url");
       }
-      const cookie = await chrome.cookies.set({
+      const cookie = await browser.cookies.set({
         url,
         name,
         value: params.value as string | undefined,
@@ -368,11 +370,11 @@ export class CommandRouter {
       if (!url || !name) {
         throw new Error("cookies clear requires url and name");
       }
-      await chrome.cookies.remove({ url, name });
+      await browser.cookies.remove({ url, name });
       return { data: { ok: true }, summary: `cleared cookie ${name}` };
     }
     // get / list
-    const cookies = await chrome.cookies.getAll({ url, name: op === "get" ? name : undefined });
+    const cookies = await browser.cookies.getAll({ url, name: op === "get" ? name : undefined });
     return { data: { cookies }, summary: `${cookies.length} cookie(s)` };
   }
 }

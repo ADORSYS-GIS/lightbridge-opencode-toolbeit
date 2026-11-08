@@ -1,4 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
+import { browser } from "wxt/browser";
 
 import { StatusBadge } from "../../components/status-badge";
 import { Button } from "../../components/ui/button";
@@ -67,7 +68,7 @@ export function App() {
         >
           {online ? "Disconnect" : "Connect"}
         </Button>
-        <Button variant="ghost" onClick={() => chrome.runtime.openOptionsPage()}>
+        <Button variant="ghost" onClick={() => browser.runtime.openOptionsPage()}>
           Dashboard
         </Button>
       </div>
