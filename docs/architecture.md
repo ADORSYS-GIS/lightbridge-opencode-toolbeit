@@ -23,6 +23,16 @@ If you just want to copy YAML, jump to the [GitHub Actions](./github-actions.md)
 > runtime behavior accurately; only the file paths cited for `cache.ts` and `scheduler.ts` moved.
 > See [`docs/provider-sync.md`](provider-sync.md) for the extracted package itself.
 
+> **OpenCode v2.** The two v1 hooks described below are now `ctx.provider.transform` (registration,
+> model merge, bearer propagation — synchronous; the engine build and warmup run in a background
+> queue that calls `ctx.provider.reload()`), `ctx.session.hook("model.request")` (replaces
+> `chat.headers`) and `ctx.session.hook("http.response")` (the Responses-SSE repair, replacing the
+> `options.fetch` wrapper). Servers come from `ctx.options.servers`; the per-provider block is
+> `settings.oauth2`. Token handling, the cache and all five auth flows are unchanged
+> ([ADR-0020](adr/0020-oauth2-integration-domain.md)). Where the text below says `config`,
+> `chat.headers`, `options.*` or `pluginConfig`, read the v2 equivalent; the step-by-step behaviour is
+> otherwise accurate.
+
 ## The two hooks
 
 The plugin registers exactly two OpenCode hooks: `config` (plugin load) and `chat.headers` (per request).

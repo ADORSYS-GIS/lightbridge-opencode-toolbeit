@@ -16,6 +16,7 @@
   "keywords": [
     "opencode",
     "opencode-plugin",
+    "opencode-v2",
     "oauth2",
     "oidc",
     "openai-compatible",
@@ -57,14 +58,18 @@
     "format:check": "biome format ."
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.32",
+    "@opencode/plugin": "2.2.6",
     "@vymalo/opencode-auth-core": "workspace:*",
     "@vymalo/opencode-provider-sync": "workspace:*"
   },
   "devDependencies": {
     "@ai-sdk/openai": "^4.0.73",
     "ai": "^7.0.112",
+    "effect": "4.1.0",
     "vite": "^8.3.0",
     "vitest": "^5.0.1"
+  },
+  "peerDependencies": {
+    "effect": "^4.0.0"
   }
 }

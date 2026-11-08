@@ -31,8 +31,12 @@ export { OAuth2ModelSyncPlugin, type PluginOptions } from "./plugin.js";
 
 export { resolveCacheDir, FileCacheStore } from "./cache.js";
 
-export { createOpencodeOauth2Plugin } from "./opencode.js";
-export type { OpenCodePluginFactoryOptions } from "./opencode.js";
+export { createOpencodeOauth2Plugin, PLUGIN_ID } from "./opencode.js";
+export type { OAuth2RuntimeHandle, OpenCodePluginFactoryOptions } from "./opencode.js";
+
+export { resolveLogLevel } from "./logging.js";
+
+export { repairResponsesResponse } from "./responses-repair.js";
 
 export type {
   CachedServerState,

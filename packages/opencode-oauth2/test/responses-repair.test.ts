@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  createResponsesRepairFetch,
   makeResponsesRepairStream,
+  repairResponsesResponse,
   repairResponsesSseText
 } from "../src/responses-repair.js";
 
@@ -126,55 +126,70 @@ describe("makeResponsesRepairStream", () => {
   });
 });
 
-describe("createResponsesRepairFetch", () => {
-  const sseResponse = (body: string) =>
-    new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+describe("repairResponsesResponse", () => {
+  const sseResponse = (body: string, contentType = "text/event-stream") =>
+    new Response(body, { status: 200, headers: { "content-type": contentType } });
+  const post = (path: string) => new Request(`https://gw.example/v1/${path}`, { method: "POST" });
 
   it("repairs the SSE body for /responses streaming calls", async () => {
-    const delegate = (async () => sseResponse(RAW_SSE)) as unknown as typeof fetch;
-    const f = createResponsesRepairFetch(delegate);
-
-    const res = await f("https://gw.example/v1/responses", { method: "POST" });
+    const res = repairResponsesResponse(post("responses"), sseResponse(RAW_SSE));
     const events = parseEvents(await res.text());
     expect(
       events.filter((e) => e.type === "response.output_item.added").map((e) => e.output_index)
     ).toEqual([0, 1]);
   });
 
-  it("passes non-/responses requests through untouched", async () => {
-    const delegate = (async () =>
-      new Response(`{"data":[]}`, {
-        status: 200,
-        headers: { "content-type": "application/json" }
-      })) as unknown as typeof fetch;
-    const f = createResponsesRepairFetch(delegate);
+  it("keeps status, statusText and headers on the repaired response", async () => {
+    const original = new Response(RAW_SSE, {
+      status: 200,
+      statusText: "OK",
+      headers: { "content-type": "text/event-stream", "x-ratelimit-remaining": "7" }
+    });
+    const res = repairResponsesResponse(post("responses"), original);
+    expect(res.status).toBe(200);
+    expect(res.statusText).toBe("OK");
+    expect(res.headers.get("x-ratelimit-remaining")).toBe("7");
+  });
 
-    const res = await f("https://gw.example/v1/models");
+  it("passes non-/responses requests through untouched", async () => {
+    const original = new Response(`{"data":[]}`, {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+    const res = repairResponsesResponse(post("models"), original);
+    expect(res).toBe(original);
     expect(await res.text()).toBe(`{"data":[]}`);
+  });
+
+  it("passes a non-/responses event-stream through untouched", () => {
+    const original = sseResponse(RAW_SSE);
+    expect(repairResponsesResponse(post("chat/completions"), original)).toBe(original);
   });
 
   it("passes non-streaming /responses replies through untouched", async () => {
     const json = `{"object":"response","output":[]}`;
-    const delegate = (async () =>
-      new Response(json, {
-        status: 200,
-        headers: { "content-type": "application/json" }
-      })) as unknown as typeof fetch;
-    const f = createResponsesRepairFetch(delegate);
-
-    const res = await f("https://gw.example/v1/responses", { method: "POST" });
+    const original = new Response(json, {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+    const res = repairResponsesResponse(post("responses"), original);
+    expect(res).toBe(original);
     expect(await res.text()).toBe(json);
   });
 
-  it("repairs even when the content-type is differently cased / parameterized", async () => {
-    const delegate = (async () =>
-      new Response(RAW_SSE, {
-        status: 200,
-        headers: { "content-type": "Text/Event-Stream; charset=utf-8" }
-      })) as unknown as typeof fetch;
-    const f = createResponsesRepairFetch(delegate);
+  it("passes a body-less response through untouched", () => {
+    const original = new Response(null, {
+      status: 204,
+      headers: { "content-type": "text/event-stream" }
+    });
+    expect(repairResponsesResponse(post("responses"), original)).toBe(original);
+  });
 
-    const res = await f("https://gw.example/v1/responses", { method: "POST" });
+  it("repairs even when the content-type is differently cased / parameterized", async () => {
+    const res = repairResponsesResponse(
+      post("responses"),
+      sseResponse(RAW_SSE, "Text/Event-Stream; charset=utf-8")
+    );
     const events = parseEvents(await res.text());
     expect(
       events.filter((e) => e.type === "response.output_item.added").map((e) => e.output_index)

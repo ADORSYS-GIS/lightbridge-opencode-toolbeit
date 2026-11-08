@@ -2,6 +2,17 @@
 
 How an OpenCode server hands a ready-made provider + plugin setup to a user with a single `opencode auth login <url>` — no hand-written `opencode.json`, no plugin install step. This is the distribution channel the `@vymalo` plugins are built for: the server advertises *"use these plugins, this provider, this issuer"* and the client wires itself up.
 
+> **OpenCode v2.** This page was written against the v1 host. Under v2 the manifest is
+> `{ auth?, config?, remote_config? }` and a well-known origin becomes an **Integration**. The
+> `auth` block is the same `{ command, env }` shape shown below (it was already command-based in v1).
+> Inside `config`, `plugin` becomes `plugins` (entries `{ package, options }`), `provider` becomes
+> `providers`, and `options.baseURL` / `options.oauth2` / `options.meta.*` become `settings.*`; the
+> oauth2 server list moves from `pluginConfig.oauth2ModelSync.servers` to the plugin's own
+> `options.servers`. A v1 and a v2 client cannot share one document. `remote_config` is a host
+> feature and is **not** a fit for OAuth2-managed gateways (the config is fetched before the plugin's
+> bearer exists). See [ADR-0020](adr/0020-oauth2-integration-domain.md). The v1 examples below are
+> kept for reference; the v2 form of the oauth2 example is at the end of this page.
+
 > This page documents **OpenCode host behavior** as observed end-to-end against a live server, cross-checked against the `@opencode-ai/sdk` `Auth` types. It is not behavior implemented in this repo — the plugins are downstream consumers of it. Where the exact host mechanics aren't observable from the outside, that's called out.
 
 ## The endpoint
@@ -149,3 +160,35 @@ It's just a static (or dynamically-rendered) JSON document at that path. Minimal
 ```
 
 List `@vymalo/opencode-oauth2` **before** `@vymalo/opencode-models-info` so the bearer is stamped on the provider headers before the metadata fetch runs ([why](./models-info.md#auth-composition)). For the full provider/option reference see the [oauth2 README](../packages/opencode-oauth2/README.md) and [models-info README](../packages/opencode-models-info/README.md).
+
+### The same document for OpenCode v2
+
+```jsonc
+{
+  "auth": { "command": ["sh", "-c", "echo plugin-managed"], "env": "OPENAI_API_KEY" },
+  "config": {
+    "plugins": [
+      { "package": "@vymalo/opencode-oauth2" },
+      { "package": "@vymalo/opencode-models-info" }
+    ],
+    "providers": {
+      "your-provider-id": {
+        "name": "Your Provider",
+        "settings": {
+          "baseURL": "https://api.example.com/v1",
+          "oauth2": {
+            "authFlow": "device_code",
+            "issuer": "https://auth.example.com/realms/yours",
+            "clientId": "opencode-cli",
+            "scopes": ["openid", "profile", "offline_access"],
+            "syncIntervalMinutes": 60
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The `oauth2` block's fields are unchanged. The exact v2 key names inside `config` follow
+[ADR-0019](adr/0019-opencode-v2-cutover.md) and have not been checked against a live v2 host.
