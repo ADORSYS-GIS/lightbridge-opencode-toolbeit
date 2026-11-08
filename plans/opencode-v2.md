@@ -128,6 +128,10 @@ One PR per concern, per `CLAUDE.md`. Implementation and docs landed together. St
 5. ✅ **repo-auth** (#136), **otel** (#137).
 6. ✅ **lightbridge** — #139, together with oauth2 and provider-sync.
 7. ✅ **code-index removal** — #132. Dropped rather than ported.
+   Post-cutover cleanups, also merged: #140 (core-otel: drop the dead `session.diff` / `todo.updated` /
+   `command.executed` paths) and #141 (provider-sync, lightbridge: export `upsertManagedProvider`).
+   `plugin-bundle`'s externals (it still externalises only `@opencode-ai/plugin`, so `@opencode/plugin`
+   and `effect` would be inlined) are being fixed in a separate PR.
 8. ⏳ **Release PR**: one version line across all sixteen packages (the next line is `0.18.0`; `0.17.1`
    was the last v1 release), the consolidated `CHANGELOG.md` entry, and a top-level migration guide
    for users (config renames, per-plugin `options`, `settings.<key>` opt-ins). Per-package READMEs
