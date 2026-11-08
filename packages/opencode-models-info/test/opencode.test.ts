@@ -1,19 +1,40 @@
-import type { PluginInput } from "@opencode-ai/plugin";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Plugin } from "@opencode/plugin/effect";
+import { Effect, Exit, Logger, References, Scope } from "effect";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CacheStore } from "../src/cache.js";
-import type { Logger } from "../src/logging.js";
-import { createOpencodeModelsInfoPlugin } from "../src/opencode.js";
+import {
+  createOpencodeModelsInfoPlugin,
+  OpencodeModelsInfoPlugin,
+  PLUGIN_ID
+} from "../src/opencode.js";
+import type { ListedModel, ModelsInfoEngine } from "../src/plugin.js";
 import type { CachedModelsRecord } from "../src/types.js";
 
-function silentLogger(): Logger {
-  return {
-    trace: vi.fn(),
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn()
-  };
+type ProviderCb = (editor: unknown) => void;
+
+function fakeCtx(options: Record<string, unknown> = {}) {
+  let providerCb: ProviderCb | undefined;
+  let modelCb: ProviderCb | undefined;
+  const reload = vi.fn(() => Effect.void);
+  const registration = Effect.succeed({ dispose: Effect.void });
+  const ctx = {
+    options,
+    provider: {
+      transform: (cb: ProviderCb) => {
+        providerCb = cb;
+        return registration;
+      }
+    },
+    model: {
+      transform: (cb: ProviderCb) => {
+        modelCb = cb;
+        return registration;
+      },
+      reload
+    }
+  } as unknown as Plugin.Context;
+  return { ctx, reload, provider: () => providerCb, model: () => modelCb };
 }
 
 function memoryCache(): CacheStore {
@@ -24,197 +45,199 @@ function memoryCache(): CacheStore {
   };
 }
 
-function fakePluginInput(): PluginInput {
-  return { client: { app: { log: async () => undefined } } } as unknown as PluginInput;
+function silentLogger() {
+  return { trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
-function okResponse(): Response {
-  return new Response(JSON.stringify({ data: [] }), { status: 200 });
+const providerRecord = (headers?: Record<string, string>) => ({
+  provider: {
+    id: "gw",
+    settings: { baseURL: "https://x.test/v1", modelsInfoUrl: "models" },
+    headers
+  }
+});
+
+function modelEditor(models: ListedModel[], headers?: Record<string, string>) {
+  return {
+    list: () => models,
+    update: (_p: string, id: string, fn: (m: ListedModel) => void) => {
+      const model = models.find((m) => m.id === id);
+      if (model) {
+        fn(model);
+      }
+    },
+    remove: vi.fn(),
+    provider: { list: () => [providerRecord(headers)] }
+  };
 }
+
+const placeholder = (): ListedModel => ({
+  id: "kimi",
+  modelID: "kimi",
+  name: "Kimi",
+  capabilities: { tools: false, input: [], output: [] },
+  limit: { context: 0, output: 0 },
+  cost: []
+});
+
+const catalog = () =>
+  new Response(
+    JSON.stringify({
+      data: [
+        {
+          id: "kimi",
+          context_length: 200_000,
+          top_provider: { max_completion_tokens: 8192 },
+          supported_parameters: ["tools"]
+        }
+      ]
+    }),
+    { status: 200 }
+  );
+
+async function start(
+  over: Parameters<typeof createOpencodeModelsInfoPlugin>[0] = {},
+  options: Record<string, unknown> = {}
+) {
+  const fake = fakeCtx(options);
+  let engine: ModelsInfoEngine | undefined;
+  const plugin = createOpencodeModelsInfoPlugin({
+    logger: silentLogger(),
+    cache: memoryCache(),
+    onEngine: (e) => {
+      engine = e;
+    },
+    ...over
+  });
+  // A long-lived scope: closing it runs the plugin finalizer (engine.dispose).
+  const scope = Scope.makeUnsafe();
+  await Effect.runPromise(Effect.provideService(plugin.effect(fake.ctx), Scope.Scope, scope));
+  return { fake, engine: engine as ModelsInfoEngine, scope };
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("createOpencodeModelsInfoPlugin", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
+  it("has a stable id", () => {
+    expect(PLUGIN_ID).toBe("vymalo.models-info");
+    expect(createOpencodeModelsInfoPlugin().id).toBe(PLUGIN_ID);
+    expect(OpencodeModelsInfoPlugin.id).toBe(PLUGIN_ID);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
+  it("registers a model transform and a read-only provider transform", async () => {
+    const { fake } = await start();
+    expect(fake.model()).toBeTypeOf("function");
+    expect(fake.provider()).toBeTypeOf("function");
   });
 
-  it("starts a refresh scheduler on config, ticking on the provider's modelsInfoTtlSeconds cadence", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(okResponse());
+  it("enriches after the catalog lands: first transform fetches, reload() triggers the second", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () => catalog());
+    const { fake, engine } = await start({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    const models = [placeholder()];
+    const editor = modelEditor(models);
+
+    fake.model()?.(editor);
+    expect(models[0]?.limit).toEqual({ context: 0, output: 0 }); // transform never awaits
+    await engine.idle();
+    await Promise.resolve();
+
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://x.test/v1/models");
+    expect(fake.reload).toHaveBeenCalledTimes(1);
+
+    fake.model()?.(editor); // the host's reload re-runs the transform
+    expect(models[0]?.limit).toEqual({ context: 200_000, output: 8192 });
+    expect(models[0]?.capabilities.tools).toBe(true);
+    engine.dispose();
+  });
+
+  it("hands the provider-domain Authorization to the catalog fetch when the model domain can't see it", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () => catalog());
+    const { fake, engine } = await start({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    // oauth2's bearer is visible to the provider-domain transform only.
+    fake.provider()?.({ list: () => [providerRecord({ Authorization: "Bearer from-oauth2" })] });
+    fake.model()?.(modelEditor([placeholder()], undefined));
+    await engine.idle();
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer from-oauth2");
+    engine.dispose();
+  });
+
+  it("prefers the model-domain view of the provider's Authorization when it has one", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () => catalog());
+    const { fake, engine } = await start({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    fake.provider()?.({ list: () => [providerRecord({ Authorization: "Bearer stale" })] });
+    fake.model()?.(modelEditor([placeholder()], { Authorization: "Bearer fresh" }));
+    await engine.idle();
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer fresh");
+    engine.dispose();
+  });
+
+  it("disposes the engine (stopping schedulers) when the plugin scope closes", async () => {
+    const fake = fakeCtx();
+    let dispose: ReturnType<typeof vi.spyOn> | undefined;
     const plugin = createOpencodeModelsInfoPlugin({
       logger: silentLogger(),
       cache: memoryCache(),
-      fetchImpl: fetchImpl as unknown as typeof fetch
-    });
-    const hooks = await plugin(fakePluginInput());
-
-    const config = {
-      provider: {
-        custom: {
-          options: { meta: { modelsInfoUrl: "https://x.test/m", modelsInfoTtlSeconds: 1 } },
-          models: { "model-a": {} }
-        }
+      onEngine: (e) => {
+        dispose = vi.spyOn(e, "dispose");
       }
-    };
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SDKConfig stand-in for the test
-    await hooks.config?.(config as any);
-    expect(fetchImpl).toHaveBeenCalledTimes(1); // initial enrichConfig fetch (cold cache)
-
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(fetchImpl).toHaveBeenCalledTimes(2); // scheduler tick refreshed the cache
-  });
-
-  it("dispose() stops the scheduler so no further ticks fire", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(okResponse());
-    const plugin = createOpencodeModelsInfoPlugin({
-      logger: silentLogger(),
-      cache: memoryCache(),
-      fetchImpl: fetchImpl as unknown as typeof fetch
     });
-    const hooks = await plugin(fakePluginInput());
-
-    const config = {
-      provider: {
-        custom: {
-          options: { meta: { modelsInfoUrl: "https://x.test/m", modelsInfoTtlSeconds: 1 } },
-          models: { "model-a": {} }
-        }
-      }
-    };
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SDKConfig stand-in for the test
-    await hooks.config?.(config as any);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-
-    await hooks.dispose?.();
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it("a rebuilt config stops the prior scheduler instead of leaking a duplicate", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(okResponse());
-    const plugin = createOpencodeModelsInfoPlugin({
-      logger: silentLogger(),
-      cache: memoryCache(),
-      fetchImpl: fetchImpl as unknown as typeof fetch
-    });
-    const hooks = await plugin(fakePluginInput());
-
-    const config = {
-      provider: {
-        custom: {
-          options: { meta: { modelsInfoUrl: "https://x.test/m", modelsInfoTtlSeconds: 1 } },
-          models: { "model-a": {} }
-        }
-      }
-    };
-    // OpenCode re-runs `config` on certain config edits — simulate that here.
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SDKConfig stand-in for the test
-    await hooks.config?.(config as any);
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SDKConfig stand-in for the test
-    await hooks.config?.(config as any);
-    // Second call's cache is already fresh (same frozen fake-timer instant),
-    // so only the first call actually hits the network.
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(1000);
-    // Exactly one more tick — if the first scheduler leaked, this would be 2.
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const scope = Scope.makeUnsafe();
+    await Effect.runPromise(Effect.provideService(plugin.effect(fake.ctx), Scope.Scope, scope));
+    expect(dispose).not.toHaveBeenCalled();
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    expect(dispose).toHaveBeenCalledTimes(1);
   });
 });
 
-describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
-  // client.app.log needs to be a spy (not just an async no-op) so we can
-  // assert on what actually reached the host log.
-  function spiedPluginInput(): PluginInput {
-    return {
-      client: { app: { log: vi.fn().mockResolvedValue(undefined) } }
-    } as unknown as PluginInput;
-  }
+describe("the default logger runs on the host's context (ADR-0014)", () => {
+  it("delivers the plugin's own records to the host logger, never the console", async () => {
+    const records: Array<{ level: string; message: unknown[] }> = [];
+    const recorder = Logger.make<unknown, void>((options) => {
+      records.push({ level: options.logLevel, message: options.message as unknown[] });
+    });
+    const consoles = [
+      vi.spyOn(console, "log").mockImplementation(() => {}),
+      vi.spyOn(console, "warn").mockImplementation(() => {}),
+      vi.spyOn(console, "error").mockImplementation(() => {})
+    ];
 
-  // A fetch that always 502s, against a cold (empty) cache, is the simplest
-  // reliable way to force a real `warn` record
-  // (`models_info_fetch_failed_no_cache`) without waiting on a live catalog.
-  function withFailingFetch() {
-    return {
+    const fake = fakeCtx({ logLevel: "info" });
+    let engine: ModelsInfoEngine | undefined;
+    const plugin = createOpencodeModelsInfoPlugin({
       cache: memoryCache(),
-      fetchImpl: vi
-        .fn()
-        .mockResolvedValue(new Response("boom", { status: 502 })) as unknown as typeof fetch
-    };
-  }
-
-  function failingConfig() {
-    return {
-      provider: {
-        custom: {
-          options: { meta: { modelsInfoUrl: "https://x.test/m" } },
-          models: { "model-a": {} }
-        }
+      fetchImpl: (async () => new Response("no", { status: 401 })) as unknown as typeof fetch,
+      onEngine: (e) => {
+        engine = e;
       }
-    };
-  }
+    });
 
-  it("never mirrors a warn record to the console fallback", async () => {
-    const input = spiedPluginInput();
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-
-    // No `logger:` option — this exercises the real, default
-    // `createOpenCodeLogger`, not a test double.
-    const plugin = createOpencodeModelsInfoPlugin(withFailingFetch());
-    const hooks = await plugin(input);
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SDKConfig stand-in for the test
-    await hooks.config?.(failingConfig() as any);
-
-    expect(warn).not.toHaveBeenCalled();
-    expect(log).not.toHaveBeenCalled();
-    warn.mockRestore();
-    log.mockRestore();
-  });
-
-  it("still forwards the warn record to client.app.log at its true level", async () => {
-    const input = spiedPluginInput();
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    const plugin = createOpencodeModelsInfoPlugin(withFailingFetch());
-    const hooks = await plugin(input);
-    // biome-ignore lint/suspicious/noExplicitAny: minimal SDKConfig stand-in for the test
-    await hooks.config?.(failingConfig() as any);
-
-    const log = input.client.app.log as unknown as ReturnType<typeof vi.fn>;
-    expect(log).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body: expect.objectContaining({
-          service: "opencode-models-info-plugin",
-          level: "warn",
-          message: "models_info_fetch_failed_no_cache"
-        })
-      })
+    await Effect.runPromise(
+      Effect.provideService(plugin.effect(fake.ctx), Scope.Scope, Scope.makeUnsafe()).pipe(
+        Effect.provide(Logger.layer([recorder], { mergeWithExisting: false })),
+        Effect.provideService(References.MinimumLogLevel, "All")
+      )
     );
-    vi.restoreAllMocks();
-  });
 
-  it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
-    const input = spiedPluginInput();
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
-    process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
+    // 401 with no cache: the warn the docs call out as the Authorization symptom.
+    fake.model()?.(modelEditor([placeholder()]));
+    await engine?.idle();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    engine?.dispose();
 
-    try {
-      const plugin = createOpencodeModelsInfoPlugin(withFailingFetch());
-      const hooks = await plugin(input);
-      // biome-ignore lint/suspicious/noExplicitAny: minimal SDKConfig stand-in for the test
-      await hooks.config?.(failingConfig() as any);
-      expect(warn).toHaveBeenCalled();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
-      } else {
-        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
-      }
-      warn.mockRestore();
+    expect(records.map((r) => [r.level, r.message[0]])).toContainEqual([
+      "Warn",
+      "models_info_fetch_failed_no_cache"
+    ]);
+    for (const spy of consoles) {
+      expect(spy).not.toHaveBeenCalled();
     }
   });
 });

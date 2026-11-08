@@ -1,32 +1,40 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_TIMEOUT_MS, DEFAULT_TTL_SECONDS, parseMetaOptions } from "../src/config.js";
+import {
+  DEFAULT_TIMEOUT_MS,
+  DEFAULT_TTL_SECONDS,
+  OVERWRITABLE_FIELDS,
+  parseModelsInfoSettings
+} from "../src/config.js";
 
-describe("parseMetaOptions", () => {
-  it("returns null when no provider options exist", () => {
-    expect(parseMetaOptions(undefined)).toBeNull();
+const URL_ = "https://x.test/m";
+const parse = (extra: Record<string, unknown> = {}) =>
+  parseModelsInfoSettings({ modelsInfoUrl: URL_, ...extra });
+
+describe("parseModelsInfoSettings", () => {
+  it("returns null when the provider has no settings", () => {
+    expect(parseModelsInfoSettings(undefined)).toBeNull();
+    expect(parseModelsInfoSettings({})).toBeNull();
   });
 
-  it("returns null when meta is absent or not an object", () => {
-    expect(parseMetaOptions({})).toBeNull();
-    expect(parseMetaOptions({ meta: "no" })).toBeNull();
-    expect(parseMetaOptions({ meta: [] })).toBeNull();
+  it("does not read the v1 options.meta shape", () => {
+    expect(parseModelsInfoSettings({ meta: { modelsInfoUrl: URL_ } })).toBeNull();
   });
 
-  it("returns null when modelsInfoUrl is missing or empty", () => {
-    expect(parseMetaOptions({ meta: {} })).toBeNull();
-    expect(parseMetaOptions({ meta: { modelsInfoUrl: "" } })).toBeNull();
-    expect(parseMetaOptions({ meta: { modelsInfoUrl: "   " } })).toBeNull();
-    expect(parseMetaOptions({ meta: { modelsInfoUrl: 42 } })).toBeNull();
+  it("returns null when modelsInfoUrl is missing, blank or not a string", () => {
+    expect(parseModelsInfoSettings({ baseURL: "https://x.test" })).toBeNull();
+    expect(parseModelsInfoSettings({ modelsInfoUrl: "" })).toBeNull();
+    expect(parseModelsInfoSettings({ modelsInfoUrl: "   " })).toBeNull();
+    expect(parseModelsInfoSettings({ modelsInfoUrl: 42 })).toBeNull();
   });
 
   it("applies defaults for optional fields", () => {
-    const out = parseMetaOptions({ meta: { modelsInfoUrl: "https://x.test/m" } });
-    expect(out).toEqual({
-      modelsInfoUrl: "https://x.test/m",
+    expect(parse()).toEqual({
+      modelsInfoUrl: URL_,
       modelsInfoTtlSeconds: DEFAULT_TTL_SECONDS,
       modelsInfoTimeoutMs: DEFAULT_TIMEOUT_MS,
       modelsInfoHeaders: undefined,
+      modelsInfoOverwrite: undefined,
       modelsInfoHideTextOnly: false,
       modelsInfoHideInternal: false,
       modelsInfoHideUnmatched: false,
@@ -34,178 +42,86 @@ describe("parseMetaOptions", () => {
     });
   });
 
-  it("parses modelsInfoHideTextOnly, defaulting to false for anything but a literal true", () => {
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideTextOnly: true }
-      })?.modelsInfoHideTextOnly
-    ).toBe(true);
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideTextOnly: "true" }
-      })?.modelsInfoHideTextOnly
-    ).toBe(false);
-    expect(
-      parseMetaOptions({ meta: { modelsInfoUrl: "https://x.test/m" } })?.modelsInfoHideTextOnly
-    ).toBe(false);
-  });
-
-  it("parses modelsInfoHideInternal, defaulting to false for anything but a literal true, independent of modelsInfoHideTextOnly", () => {
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideInternal: true }
-      })?.modelsInfoHideInternal
-    ).toBe(true);
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideInternal: "true" }
-      })?.modelsInfoHideInternal
-    ).toBe(false);
-    expect(
-      parseMetaOptions({ meta: { modelsInfoUrl: "https://x.test/m" } })?.modelsInfoHideInternal
-    ).toBe(false);
-    // The two flags are independent — setting one must not implicitly set the other.
-    const both = parseMetaOptions({
-      meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideInternal: true }
-    });
-    expect(both?.modelsInfoHideTextOnly).toBe(false);
-  });
-
-  it("parses modelsInfoHideUnmatched, defaulting to false for anything but a literal true, independent of the other two flags", () => {
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideUnmatched: true }
-      })?.modelsInfoHideUnmatched
-    ).toBe(true);
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideUnmatched: "true" }
-      })?.modelsInfoHideUnmatched
-    ).toBe(false);
-    expect(
-      parseMetaOptions({ meta: { modelsInfoUrl: "https://x.test/m" } })?.modelsInfoHideUnmatched
-    ).toBe(false);
-    const onlyUnmatched = parseMetaOptions({
-      meta: { modelsInfoUrl: "https://x.test/m", modelsInfoHideUnmatched: true }
-    });
-    expect(onlyUnmatched?.modelsInfoHideTextOnly).toBe(false);
-    expect(onlyUnmatched?.modelsInfoHideInternal).toBe(false);
+  it.each([
+    ["modelsInfoHideTextOnly"],
+    ["modelsInfoHideInternal"],
+    ["modelsInfoHideUnmatched"]
+  ] as const)("%s is true only for a literal true, and independent of the others", (flag) => {
+    const out = parse({ [flag]: true });
+    expect(out?.[flag]).toBe(true);
+    const others = (
+      ["modelsInfoHideTextOnly", "modelsInfoHideInternal", "modelsInfoHideUnmatched"] as const
+    ).filter((f) => f !== flag);
+    for (const other of others) {
+      expect(out?.[other]).toBe(false);
+    }
+    expect(parse({ [flag]: "true" })?.[flag]).toBe(false);
+    expect(parse()?.[flag]).toBe(false);
   });
 
   it("coerces positive integers and ignores invalid numeric inputs", () => {
-    const out = parseMetaOptions({
-      meta: {
-        modelsInfoUrl: "https://x.test/m",
-        modelsInfoTtlSeconds: 60.7,
-        modelsInfoTimeoutMs: -1
-      }
-    });
+    const out = parse({ modelsInfoTtlSeconds: 60.7, modelsInfoTimeoutMs: -1 });
     expect(out?.modelsInfoTtlSeconds).toBe(60);
     expect(out?.modelsInfoTimeoutMs).toBe(DEFAULT_TIMEOUT_MS);
   });
 
   it("filters non-string header values out of modelsInfoHeaders", () => {
-    const out = parseMetaOptions({
-      meta: {
-        modelsInfoUrl: "https://x.test/m",
-        modelsInfoHeaders: { "x-tenant": "t1", bogus: 123, empty: "" }
-      }
-    });
+    const out = parse({ modelsInfoHeaders: { "x-tenant": "t1", bogus: 123, empty: "" } });
     expect(out?.modelsInfoHeaders).toEqual({ "x-tenant": "t1" });
   });
 
-  it("returns undefined headers when the map is empty after filtering", () => {
-    const out = parseMetaOptions({
-      meta: {
-        modelsInfoUrl: "https://x.test/m",
-        modelsInfoHeaders: { bogus: 123 }
-      }
-    });
-    expect(out?.modelsInfoHeaders).toBeUndefined();
+  it("returns undefined headers when the map is empty after filtering, or is an array", () => {
+    expect(parse({ modelsInfoHeaders: { bogus: 123 } })?.modelsInfoHeaders).toBeUndefined();
+    expect(parse({ modelsInfoHeaders: ["a"] })?.modelsInfoHeaders).toBeUndefined();
   });
 
-  it("parses modelsInfoOverwrite, keeping only known fields and dropping dupes", () => {
-    const out = parseMetaOptions({
-      meta: {
-        modelsInfoUrl: "https://x.test/m",
-        modelsInfoOverwrite: ["name", "modalities", "name", "bogus", 7]
-      }
+  it("parses modelsInfoOverwrite, keeping only known v2 field names and dropping dupes", () => {
+    const out = parse({ modelsInfoOverwrite: ["name", "input", "name", "bogus", 7] });
+    expect(out?.modelsInfoOverwrite).toEqual(["name", "input"]);
+  });
+
+  it("drops the v1-only overwrite names that have no Model.Info field", () => {
+    const out = parse({
+      modelsInfoOverwrite: ["reasoning", "attachment", "tool_call", "modalities"]
     });
-    expect(out?.modelsInfoOverwrite).toEqual(["name", "modalities"]);
+    expect(out?.modelsInfoOverwrite).toBeUndefined();
+    expect([...OVERWRITABLE_FIELDS].sort()).toEqual(
+      ["cost", "input", "limit", "name", "output", "temperature", "tools"].sort()
+    );
   });
 
   it("leaves modelsInfoOverwrite undefined when absent, non-array, or empty after filtering", () => {
-    expect(
-      parseMetaOptions({ meta: { modelsInfoUrl: "https://x.test/m" } })?.modelsInfoOverwrite
-    ).toBeUndefined();
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoOverwrite: "name" }
-      })?.modelsInfoOverwrite
-    ).toBeUndefined();
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "https://x.test/m", modelsInfoOverwrite: ["bogus"] }
-      })?.modelsInfoOverwrite
-    ).toBeUndefined();
+    expect(parse()?.modelsInfoOverwrite).toBeUndefined();
+    expect(parse({ modelsInfoOverwrite: "name" })?.modelsInfoOverwrite).toBeUndefined();
+    expect(parse({ modelsInfoOverwrite: ["bogus"] })?.modelsInfoOverwrite).toBeUndefined();
+  });
+});
+
+describe("modelsInfoUrl resolution against settings.baseURL", () => {
+  const resolve = (baseURL: string | undefined, modelsInfoUrl: string) =>
+    parseModelsInfoSettings({ baseURL, modelsInfoUrl })?.modelsInfoUrl;
+
+  it("resolves a path-relative url under the baseURL's path, with or without a trailing slash", () => {
+    expect(resolve("https://x.test/v1", "models/info")).toBe("https://x.test/v1/models/info");
+    expect(resolve("https://x.test/v1/", "models/info")).toBe("https://x.test/v1/models/info");
   });
 
-  it("resolves a path-relative modelsInfoUrl under the baseURL's path", () => {
-    // No leading slash + baseURL with or without trailing slash → joins under
-    // baseURL's path. baseURL is always treated as a directory.
-    expect(
-      parseMetaOptions({
-        baseURL: "https://x.test/v1",
-        meta: { modelsInfoUrl: "models/info" }
-      })?.modelsInfoUrl
-    ).toBe("https://x.test/v1/models/info");
-
-    expect(
-      parseMetaOptions({
-        baseURL: "https://x.test/v1/",
-        meta: { modelsInfoUrl: "models/info" }
-      })?.modelsInfoUrl
-    ).toBe("https://x.test/v1/models/info");
+  it("resolves a leading-slash url from the origin of baseURL", () => {
+    expect(resolve("https://x.test/v1", "/models")).toBe("https://x.test/models");
   });
 
-  it("resolves a leading-slash modelsInfoUrl from the origin of baseURL", () => {
-    // Standard WHATWG semantics: `/path` is origin-rooted. This is the
-    // escape hatch for users whose metadata endpoint sits at a different
-    // path than the inference API.
-    expect(
-      parseMetaOptions({
-        baseURL: "https://x.test/v1",
-        meta: { modelsInfoUrl: "/models" }
-      })?.modelsInfoUrl
-    ).toBe("https://x.test/models");
-  });
-
-  it("avoids path duplication when the modelsInfoUrl includes the same prefix as baseURL", () => {
-    // Regression: previously stripping the leading slash before resolving
-    // produced `https://x.test/v1/v1/models`. Standard semantics give the
-    // intuitive result.
-    expect(
-      parseMetaOptions({
-        baseURL: "https://x.test/v1",
-        meta: { modelsInfoUrl: "/v1/models/info" }
-      })?.modelsInfoUrl
-    ).toBe("https://x.test/v1/models/info");
+  it("avoids path duplication when the url repeats the baseURL prefix", () => {
+    expect(resolve("https://x.test/v1", "/v1/models/info")).toBe("https://x.test/v1/models/info");
   });
 
   it("leaves absolute URLs untouched even when baseURL is present", () => {
-    expect(
-      parseMetaOptions({
-        baseURL: "https://x.test/v1",
-        meta: { modelsInfoUrl: "https://other.test/models" }
-      })?.modelsInfoUrl
-    ).toBe("https://other.test/models");
+    expect(resolve("https://x.test/v1", "https://other.test/models")).toBe(
+      "https://other.test/models"
+    );
   });
 
-  it("keeps the relative path verbatim when baseURL is absent", () => {
-    expect(
-      parseMetaOptions({
-        meta: { modelsInfoUrl: "/models" }
-      })?.modelsInfoUrl
-    ).toBe("/models");
+  it("keeps the relative path verbatim when baseURL is absent or unparsable", () => {
+    expect(resolve(undefined, "/models")).toBe("/models");
+    expect(resolve("not a url", "models")).toBe("models");
   });
 });

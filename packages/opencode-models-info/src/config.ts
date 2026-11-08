@@ -1,24 +1,26 @@
-import type { MetaProviderOptions } from "./types.js";
+import type { ModelsInfoSettings } from "./types.js";
 
 export const DEFAULT_TTL_SECONDS = 86_400;
 export const DEFAULT_TIMEOUT_MS = 5_000;
 
-const META_KEY = "meta";
-
 /**
- * Fields a user may opt out of upstream-wins via `meta.modelsInfoOverwrite`.
- * Mirrors the keys of `ModelMetadata` — anything outside this set is ignored
- * so a typo never silently clobbers an unrelated field.
+ * Fields a user may opt out of upstream-wins via `settings.modelsInfoOverwrite`.
+ * Mirrors the keys of `ModelMetadata` (the v2 `Model.Info` target fields) —
+ * anything outside this set is ignored so a typo never silently clobbers an
+ * unrelated field.
+ *
+ * v1's `reasoning` and `attachment` are gone: `Model.Info` has no field for
+ * either (attachment support is now implied by a non-text `capabilities.input`).
+ * `tool_call` became `tools`; `modalities` split into `input` / `output`.
  */
-const OVERWRITABLE_FIELDS = new Set([
+export const OVERWRITABLE_FIELDS: ReadonlySet<string> = new Set([
   "name",
-  "attachment",
-  "reasoning",
+  "tools",
   "temperature",
-  "tool_call",
   "cost",
   "limit",
-  "modalities"
+  "input",
+  "output"
 ]);
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -71,57 +73,50 @@ function asBoolean(value: unknown): boolean {
 }
 
 /**
- * Parse a provider's `options.meta` for opt-in model-info fields. Returns
- * `null` if the provider has not opted in (no `meta.modelsInfoUrl`).
+ * Parse a provider's `settings` for the `modelsInfo*` opt-in keys. Returns
+ * `null` if the provider has not opted in (no `settings.modelsInfoUrl`).
+ *
+ * v1 read these from `options.meta`; v2's `Provider.Info` has no `options`, so
+ * they sit flat on the open `settings` struct beside `baseURL`.
  *
  * URL resolution follows the WHATWG URL spec when `modelsInfoUrl` is not
- * absolute:
+ * absolute, against `settings.baseURL`:
  *   - Absolute URL (`https://…`)            → used as-is.
  *   - Path starting with `/`                → resolves from the **origin**
  *                                             of `baseURL`. So with
  *                                             `baseURL: "https://x.test/v1"`
  *                                             and `modelsInfoUrl: "/models"`,
  *                                             you get `https://x.test/models`.
- *                                             Useful when your metadata
- *                                             endpoint sits at a different
- *                                             path than the inference API.
  *   - Path without leading `/`              → resolves **relative to**
  *                                             `baseURL`. So with
  *                                             `baseURL: "https://x.test/v1"`
  *                                             and `modelsInfoUrl: "models"`,
  *                                             you get `https://x.test/v1/models`.
- *                                             Useful when metadata sits under
- *                                             the same path as inference.
  */
-export function parseMetaOptions(
-  providerOptions: Record<string, unknown> | undefined
-): MetaProviderOptions | null {
-  if (!providerOptions) {
+export function parseModelsInfoSettings(
+  settings: Record<string, unknown> | undefined
+): ModelsInfoSettings | null {
+  if (!settings) {
     return null;
   }
 
-  const meta = asRecord(providerOptions[META_KEY]);
-  if (!meta) {
-    return null;
-  }
-
-  const rawUrl = asString(meta.modelsInfoUrl);
+  const rawUrl = asString(settings.modelsInfoUrl);
   if (!rawUrl) {
     return null;
   }
 
-  const baseURL = asString(providerOptions.baseURL);
+  const baseURL = asString(settings.baseURL);
   const modelsInfoUrl = resolveUrl(rawUrl, baseURL);
 
   return {
     modelsInfoUrl,
-    modelsInfoTtlSeconds: asPositiveInt(meta.modelsInfoTtlSeconds, DEFAULT_TTL_SECONDS),
-    modelsInfoTimeoutMs: asPositiveInt(meta.modelsInfoTimeoutMs, DEFAULT_TIMEOUT_MS),
-    modelsInfoHeaders: asStringMap(meta.modelsInfoHeaders),
-    modelsInfoOverwrite: asOverwriteList(meta.modelsInfoOverwrite),
-    modelsInfoHideTextOnly: asBoolean(meta.modelsInfoHideTextOnly),
-    modelsInfoHideInternal: asBoolean(meta.modelsInfoHideInternal),
-    modelsInfoHideUnmatched: asBoolean(meta.modelsInfoHideUnmatched),
+    modelsInfoTtlSeconds: asPositiveInt(settings.modelsInfoTtlSeconds, DEFAULT_TTL_SECONDS),
+    modelsInfoTimeoutMs: asPositiveInt(settings.modelsInfoTimeoutMs, DEFAULT_TIMEOUT_MS),
+    modelsInfoHeaders: asStringMap(settings.modelsInfoHeaders),
+    modelsInfoOverwrite: asOverwriteList(settings.modelsInfoOverwrite),
+    modelsInfoHideTextOnly: asBoolean(settings.modelsInfoHideTextOnly),
+    modelsInfoHideInternal: asBoolean(settings.modelsInfoHideInternal),
+    modelsInfoHideUnmatched: asBoolean(settings.modelsInfoHideUnmatched),
     modelsInfoFormat: "openrouter"
   };
 }

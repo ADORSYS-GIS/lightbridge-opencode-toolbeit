@@ -1,20 +1,39 @@
+import { createHash } from "node:crypto";
+
 import { cacheKey, type CacheStore, FileCacheStore, isExpired } from "./cache.js";
-import { parseMetaOptions } from "./config.js";
+import { parseModelsInfoSettings } from "./config.js";
 import { fetchOpenRouterModels } from "./fetcher.js";
 import type { Logger } from "./logging.js";
-import { isTextOnlyModality, mapOpenRouterEntry, mergeIntoModel } from "./mapping.js";
+import {
+  applyMetadata,
+  type EnrichableModel,
+  isTextOnlyModality,
+  mapOpenRouterEntry
+} from "./mapping.js";
 import { type SchedulerHandle, startScheduler } from "./scheduler.js";
-import type { CachedModelsRecord, MetaProviderOptions, OpenRouterModel } from "./types.js";
+import type { CachedModelsRecord, ModelsInfoSettings, OpenRouterModel } from "./types.js";
 
-export type ProviderOptions = Record<string, unknown> | undefined;
-
-export interface ProviderConfigLike {
-  options?: Record<string, unknown>;
-  models?: Record<string, Record<string, unknown>>;
+/** The slice of a provider record this plugin reads (`ProviderRecord.provider`). */
+export interface ProviderEntry {
+  id: string;
+  settings?: Record<string, unknown>;
+  headers?: Record<string, string>;
 }
 
-export interface EnrichConfigInput {
-  provider?: Record<string, ProviderConfigLike>;
+/** A model as the editor lists it: `Model.Info`'s id fields plus the enrichable slice. */
+export type ListedModel = EnrichableModel & { id: string; modelID?: string };
+
+/**
+ * The structural slice of OpenCode's `ModelEditor` the engine uses. The real
+ * editor is assignable to it; tests drive it with a plain object.
+ */
+export interface ModelEditorLike {
+  list(providerID?: string): readonly ListedModel[];
+  update(providerID: string, modelID: string, update: (model: EnrichableModel) => void): void;
+  remove(providerID: string, modelID: string): void;
+  readonly provider: {
+    list(): readonly { readonly provider: ProviderEntry }[];
+  };
 }
 
 export interface EnrichDeps {
@@ -22,158 +41,285 @@ export interface EnrichDeps {
   logger: Logger;
   fetchImpl?: typeof fetch;
   now?: () => number;
+  /**
+   * Called when a provider's catalog changed after the model transform last
+   * ran. The plugin wires it to `ctx.model.reload()`; the transform is
+   * synchronous, so a catalog that arrives late can only reach the models by
+   * asking the host to run the transform again.
+   */
+  onChange?: () => void;
+  /** Override the periodic-refresh scheduler (tests). */
+  scheduler?: typeof startScheduler;
 }
 
-/**
- * Walk every provider in the assembled OpenCode config, fetch its
- * `meta.modelsInfoUrl` (if any) — honoring the cache — and merge derived
- * metadata onto each matching model entry. Runs providers in parallel; one
- * failure never blocks others.
- */
-export async function enrichConfig(input: EnrichConfigInput, deps: EnrichDeps): Promise<void> {
-  const providers = input.provider;
-  if (!providers) {
-    deps.logger.trace("models_info_enrich_no_providers", {});
-    return;
-  }
-
-  deps.logger.trace("models_info_enrich_start", {
-    providerCount: Object.keys(providers).length
-  });
-
-  await Promise.allSettled(
-    Object.entries(providers).map(([providerId, providerConfig]) =>
-      enrichProvider(providerId, providerConfig, deps)
-    )
-  );
+export interface ModelsInfoEngine {
+  /**
+   * The `ctx.model.transform` callback body. Synchronous and cheap: reconciles
+   * the opted-in set, kicks off any catalog load that is missing, and applies
+   * whatever catalogs are already in memory. Never awaits.
+   */
+  transform(editor: ModelEditorLike): void;
+  /**
+   * Read-only observation from a `ctx.provider.transform`: remembers each
+   * provider's headers so the model transform can fall back to them when
+   * `ModelEditor.provider` does not reflect provider-domain transforms.
+   */
+  observeProviders(entries: readonly ProviderEntry[]): void;
+  /** Resolves once every in-flight catalog load has settled. */
+  idle(): Promise<void>;
+  /** Stop every scheduler. Loads still in flight no longer call `onChange`. */
+  dispose(): void;
 }
 
-/**
- * Start one background refresh scheduler per opted-in provider, keeping the
- * on-disk cache warm at `meta.modelsInfoTtlSeconds` cadence (the same knob
- * that already governs cache freshness — no separate interval to configure).
- *
- * `config` only runs at plugin load and on rare config-signature changes
- * (see docs/models-info.md#periodic-refresh), so a long-lived OpenCode
- * process would otherwise keep serving whatever the catalog looked like at
- * boot until it happens to restart. This closes that gap for the *next*
- * `config` run — it cannot push a live update into an already-open session,
- * since a config hook has no way to hot-patch a running one. Callers own the
- * returned handles' lifecycle: stop them when the config that produced them
- * is superseded (a rebuilt `config` hook) or the plugin is disposed.
- */
-export function startCacheRefreshSchedulers(
-  input: EnrichConfigInput,
-  deps: EnrichDeps
-): SchedulerHandle[] {
-  const providers = input.provider;
-  if (!providers) {
-    return [];
-  }
+interface ProviderState {
+  providerId: string;
+  opts: ModelsInfoSettings;
+  /** What a refetch depends on. A change here discards the state and starts over. */
+  signature: string;
+  /** Latest provider headers (rotating bearer); read at fetch time, never keyed. */
+  headers: Record<string, string> | undefined;
+  /** Header fingerprint of the last load attempt — drives retry-on-new-credential. */
+  attemptedHeaderSig: string | undefined;
+  record: CachedModelsRecord | undefined;
+  fingerprint: string | undefined;
+  loading: Promise<void> | undefined;
+  scheduler: SchedulerHandle | undefined;
+}
 
-  const handles: SchedulerHandle[] = [];
-  for (const [providerId, providerConfig] of Object.entries(providers)) {
-    const opts = parseMetaOptions(providerConfig?.options);
-    if (!opts) {
-      continue;
+export function createModelsInfoEngine(deps: EnrichDeps): ModelsInfoEngine {
+  const states = new Map<string, ProviderState>();
+  const observed = new Map<string, Record<string, string>>();
+  const pending = new Set<Promise<void>>();
+  const schedule = deps.scheduler ?? startScheduler;
+  let disposed = false;
+
+  const stopState = (state: ProviderState): void => {
+    state.scheduler?.stop();
+    state.scheduler = undefined;
+  };
+
+  /** Adopt a record; fire `onChange` only when the catalog content moved. */
+  const adopt = (state: ProviderState, record: CachedModelsRecord): void => {
+    if (states.get(state.providerId) !== state) {
+      return; // superseded while the fetch was in flight
     }
-    const providerHeaders = asHeaderMap(providerConfig?.options?.headers);
-    const intervalMs = opts.modelsInfoTtlSeconds * 1000;
-    deps.logger.trace("models_info_refresh_scheduler_started", { providerId, intervalMs });
-    handles.push(
-      startScheduler({
-        intervalMs,
-        logger: deps.logger,
-        taskName: `models-info-refresh:${providerId}`,
-        run: () => refreshProviderCache(providerId, opts, providerHeaders, deps)
+    const fingerprint = fingerprintOf(record);
+    const changed = fingerprint !== state.fingerprint;
+    state.record = record;
+    state.fingerprint = fingerprint;
+    if (changed && !disposed) {
+      deps.logger.debug("models_info_catalog_changed", {
+        providerId: state.providerId,
+        sourceModels: record.models.length
+      });
+      deps.onChange?.();
+    }
+  };
+
+  const load = (state: ProviderState): void => {
+    state.attemptedHeaderSig = headerSignature(state.headers);
+    const task = loadRecord(state.providerId, state.opts, state.headers, deps)
+      .then((record) => {
+        if (record) {
+          adopt(state, record);
+        } else {
+          deps.logger.trace("models_info_no_record", { providerId: state.providerId });
+        }
       })
-    );
-  }
-  return handles;
+      .catch((error: unknown) => {
+        deps.logger.error("models_info_enrichment_failed", {
+          providerId: state.providerId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      })
+      .finally(() => {
+        state.loading = undefined;
+        pending.delete(task);
+      });
+    state.loading = task;
+    pending.add(task);
+  };
+
+  const sync = (entries: readonly ProviderEntry[]): void => {
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const opts = parseModelsInfoSettings(entry.settings);
+      deps.logger.trace("models_info_provider_settings_parsed", {
+        providerId: entry.id,
+        hasModelsInfoUrl: Boolean(opts)
+      });
+      if (!opts) {
+        continue;
+      }
+      seen.add(entry.id);
+
+      // The bearer another plugin stamped. The model domain's own view of the
+      // provider wins; fall back to what a provider-domain transform observed.
+      const own = nonEmpty(entry.headers);
+      const headers = own ?? observed.get(entry.id);
+      deps.logger.trace("models_info_provider_headers_resolved", {
+        providerId: entry.id,
+        source: own ? "model-domain" : headers ? "provider-domain" : "none",
+        hasAuthorization: hasAuthorization(headers),
+        hasMetaHeaders: Boolean(opts.modelsInfoHeaders)
+      });
+
+      const signature = JSON.stringify([
+        opts.modelsInfoUrl,
+        opts.modelsInfoTtlSeconds,
+        opts.modelsInfoTimeoutMs,
+        opts.modelsInfoHeaders ?? null
+      ]);
+      let state = states.get(entry.id);
+      if (!state || state.signature !== signature) {
+        if (state) {
+          stopState(state);
+        }
+        state = {
+          providerId: entry.id,
+          opts,
+          signature,
+          headers,
+          attemptedHeaderSig: undefined,
+          record: undefined,
+          fingerprint: undefined,
+          loading: undefined,
+          scheduler: undefined
+        };
+        states.set(entry.id, state);
+        const created = state;
+        const intervalMs = opts.modelsInfoTtlSeconds * 1000;
+        deps.logger.trace("models_info_refresh_scheduler_started", {
+          providerId: entry.id,
+          intervalMs
+        });
+        created.scheduler = schedule({
+          intervalMs,
+          logger: deps.logger,
+          taskName: `models-info-refresh:${entry.id}`,
+          run: async () => {
+            const record = await refreshProviderCache(
+              created.providerId,
+              created.opts,
+              created.headers,
+              deps
+            );
+            if (record) {
+              adopt(created, record);
+            }
+          }
+        });
+        load(state);
+        continue;
+      }
+
+      state.opts = opts;
+      state.headers = headers;
+      // A load that found nothing (typically a 401 before the bearer landed)
+      // is retried exactly when a different credential shows up — never in a
+      // loop, since a repeat failure leaves the catalog unchanged.
+      if (
+        !state.record &&
+        !state.loading &&
+        headerSignature(headers) !== state.attemptedHeaderSig
+      ) {
+        load(state);
+      }
+    }
+
+    for (const [providerId, state] of states) {
+      if (!seen.has(providerId)) {
+        stopState(state);
+        states.delete(providerId);
+      }
+    }
+  };
+
+  const apply = (editor: ModelEditorLike): void => {
+    for (const state of states.values()) {
+      if (!state.record) {
+        continue;
+      }
+      enrichProvider(editor, state, state.record, deps.logger);
+    }
+  };
+
+  return {
+    transform(editor) {
+      deps.logger.trace("models_info_enrich_start", {});
+      sync(editor.provider.list().map((record) => record.provider));
+      apply(editor);
+    },
+    observeProviders(entries) {
+      for (const entry of entries) {
+        const headers = nonEmpty(entry.headers);
+        if (headers) {
+          observed.set(entry.id, headers);
+        } else {
+          observed.delete(entry.id);
+        }
+      }
+    },
+    async idle() {
+      while (pending.size > 0) {
+        await Promise.allSettled([...pending]);
+      }
+    },
+    dispose() {
+      disposed = true;
+      for (const state of states.values()) {
+        stopState(state);
+      }
+      states.clear();
+    }
+  };
 }
 
-async function enrichProvider(
-  providerId: string,
-  providerConfig: ProviderConfigLike | undefined,
-  deps: EnrichDeps
-): Promise<void> {
+function enrichProvider(
+  editor: ModelEditorLike,
+  state: ProviderState,
+  record: CachedModelsRecord,
+  logger: Logger
+): void {
+  const { providerId, opts } = state;
   try {
-    if (!providerConfig) {
-      deps.logger.trace("models_info_provider_no_config", { providerId });
+    const models = [...editor.list(providerId)];
+    if (models.length === 0) {
+      logger.debug("models_info_provider_skipped_no_models", { providerId });
       return;
     }
-    const opts = parseMetaOptions(providerConfig.options);
-    deps.logger.trace("models_info_provider_meta_parsed", {
-      providerId,
-      hasModelsInfoUrl: Boolean(opts)
-    });
-    if (!opts) {
-      return;
-    }
-    const models = providerConfig.models;
-    const modelCount = models ? Object.keys(models).length : 0;
-    deps.logger.trace("models_info_provider_models_present", {
-      providerId,
-      hasModels: modelCount > 0,
-      modelCount
-    });
-    if (!models || Object.keys(models).length === 0) {
-      deps.logger.debug("models_info_provider_skipped_no_models", { providerId });
-      return;
-    }
-
-    // Pull whatever headers the upstream config (oauth2 plugin, static API
-    // key, etc.) has already attached to the provider; the meta-specific
-    // `modelsInfoHeaders` win on conflict. This is what makes the plugin
-    // truly auth-agnostic — we never need to know how the token was acquired.
-    const providerHeaders = asHeaderMap(providerConfig.options?.headers);
-    deps.logger.trace("models_info_provider_headers_resolved", {
-      providerId,
-      hasProviderHeaders: Boolean(providerHeaders),
-      hasMetaHeaders: Boolean(opts.modelsInfoHeaders)
-    });
-    const record = await loadRecord(providerId, opts, providerHeaders, deps);
-    if (!record) {
-      deps.logger.trace("models_info_no_record", { providerId });
-      return;
-    }
-
     const byId = new Map<string, OpenRouterModel>(record.models.map((m) => [m.id, m]));
     const overwrite = opts.modelsInfoOverwrite ? new Set(opts.modelsInfoOverwrite) : undefined;
-    deps.logger.trace("models_info_match_table_built", {
+    logger.trace("models_info_match_table_built", {
       providerId,
       sourceModels: record.models.length,
       overwriteFields: overwrite ? [...overwrite] : []
     });
 
-    const totalModels = Object.keys(models).length;
     const tally = { enriched: 0, hidden: 0 };
-    const reconcileCtx: ReconcileContext = { providerId, models, byId, opts, overwrite, deps };
-    for (const [modelId, modelConfig] of Object.entries(models)) {
-      const outcome = reconcileModel(modelId, modelConfig, reconcileCtx);
+    for (const model of models) {
+      const outcome = reconcileModel(editor, model, { providerId, byId, opts, overwrite, logger });
       if (outcome !== "skipped") {
         tally[outcome] += 1;
       }
     }
-    const { enriched: enrichedCount, hidden: hiddenCount } = tally;
-
-    deps.logger.trace("models_info_provider_done", {
+    logger.trace("models_info_provider_done", {
       providerId,
-      enrichedCount,
-      hiddenCount,
-      totalModels
+      enrichedCount: tally.enriched,
+      hiddenCount: tally.hidden,
+      totalModels: models.length
     });
-    deps.logger.debug("models_info_enriched", {
+    logger.debug("models_info_enriched", {
       providerId,
-      enrichedCount,
-      hiddenCount,
-      totalModels,
+      enrichedCount: tally.enriched,
+      hiddenCount: tally.hidden,
+      totalModels: models.length,
       sourceModels: record.models.length
     });
   } catch (error) {
-    // Promise.allSettled would otherwise swallow this — surface it loudly so
-    // a broken cache disk or mapping bug isn't silently no-op'd per provider.
-    deps.logger.error("models_info_enrichment_failed", {
+    // A transform callback must never throw into the host — surface it loudly
+    // so a mapping bug isn't silently no-op'd per provider.
+    logger.error("models_info_enrichment_failed", {
       providerId,
       error: error instanceof Error ? error.message : String(error)
     });
@@ -182,92 +328,87 @@ async function enrichProvider(
 
 interface ReconcileContext {
   providerId: string;
-  models: Record<string, Record<string, unknown>>;
   byId: Map<string, OpenRouterModel>;
-  opts: MetaProviderOptions;
+  opts: ModelsInfoSettings;
   overwrite: ReadonlySet<string> | undefined;
-  deps: EnrichDeps;
+  logger: Logger;
 }
 
 type ReconcileOutcome = "enriched" | "hidden" | "skipped";
 
 /**
- * Decide one model's fate against the catalog and apply it in place —
- * merge, delete, or leave untouched — returning what happened for the
- * caller's tally. Three independent gates:
+ * Decide one model's fate against the catalog and apply it — merge, remove, or
+ * leave untouched — returning what happened for the caller's tally. Three
+ * independent gates:
  *   - `modelsInfoHideTextOnly` OR `modelsInfoHideUnmatched` — a model absent
- *     from the catalog entirely gets deleted. Either flag alone is enough;
+ *     from the catalog entirely gets removed. Either flag alone is enough;
  *     `modelsInfoHideTextOnly` has triggered this since 0.10.0 (unchanged,
  *     for backward compat with existing adopters) — `modelsInfoHideUnmatched`
  *     exists for a consumer that wants catalog-authoritative *membership*
  *     WITHOUT also pulling in modality-based hiding.
  *   - `modelsInfoHideInternal` — a matched model the catalog flags
- *     `internal: true` gets deleted. Independent of the above: modality and
- *     internal/restricted status are unrelated signals, and conflating them
- *     (routing "hide internal" through `modelsInfoHideTextOnly`) hides
- *     legitimate text-only external models.
+ *     `internal: true` gets removed. Independent of the above: modality and
+ *     internal/restricted status are unrelated signals.
  *   - `modelsInfoHideTextOnly` — a matched model the catalog reports as
- *     text-in/text-out only gets deleted. Unchanged from 0.10.0.
+ *     text-in/text-out only gets removed. Unchanged from 0.10.0.
  */
 function reconcileModel(
-  modelId: string,
-  modelConfig: Record<string, unknown>,
+  editor: ModelEditorLike,
+  model: ListedModel,
   ctx: ReconcileContext
 ): ReconcileOutcome {
-  const { providerId, models, byId, opts, overwrite, deps } = ctx;
-  const declaredId = typeof modelConfig.id === "string" ? modelConfig.id : undefined;
+  const { providerId, byId, opts, overwrite, logger } = ctx;
+  const modelId = model.id;
+  const declaredId = model.modelID !== modelId ? model.modelID : undefined;
   const matchById = byId.has(modelId);
   const match = byId.get(modelId) ?? (declaredId ? byId.get(declaredId) : undefined);
 
   if (!match) {
     if (!opts.modelsInfoHideTextOnly && !opts.modelsInfoHideUnmatched) {
-      deps.logger.trace("models_info_model_unmatched", { providerId, modelId, declaredId });
+      logger.trace("models_info_model_unmatched", { providerId, modelId, declaredId });
       return "skipped";
     }
-    delete models[modelId];
-    deps.logger.debug("models_info_model_hidden_unmatched", { providerId, modelId, declaredId });
+    editor.remove(providerId, modelId);
+    logger.debug("models_info_model_hidden_unmatched", { providerId, modelId, declaredId });
     return "hidden";
   }
 
-  deps.logger.trace("models_info_model_matched", {
+  logger.trace("models_info_model_matched", {
     providerId,
     modelId,
     matchedBy: matchById ? "id" : "declaredId"
   });
 
   if (opts.modelsInfoHideInternal && match.internal === true) {
-    delete models[modelId];
-    deps.logger.debug("models_info_model_hidden_internal", { providerId, modelId });
+    editor.remove(providerId, modelId);
+    logger.debug("models_info_model_hidden_internal", { providerId, modelId });
     return "hidden";
   }
 
   const derived = mapOpenRouterEntry(match, overwrite);
 
-  if (opts.modelsInfoHideTextOnly && isTextOnlyModality(derived.modalities)) {
-    delete models[modelId];
-    deps.logger.debug("models_info_model_hidden_text_only", { providerId, modelId });
+  if (opts.modelsInfoHideTextOnly && isTextOnlyModality(derived)) {
+    editor.remove(providerId, modelId);
+    logger.debug("models_info_model_hidden_text_only", { providerId, modelId });
     return "hidden";
   }
 
-  const derivedFields = Object.keys(derived);
-  const appliedFields = derivedFields.filter(
-    (f) => modelConfig[f] === undefined || overwrite?.has(f)
-  );
-  const skippedFields = derivedFields.filter((f) => !appliedFields.includes(f));
-  deps.logger.trace("models_info_model_merge", {
-    providerId,
-    modelId,
-    derivedFields,
-    appliedFields,
-    skippedFields
+  editor.update(providerId, modelId, (target) => {
+    const { applied, skipped } = applyMetadata(target, derived, overwrite);
+    logger.trace("models_info_model_merge", {
+      providerId,
+      modelId,
+      derivedFields: Object.keys(derived),
+      appliedFields: applied,
+      skippedFields: skipped
+    });
   });
-  mergeIntoModel(modelConfig, derived, overwrite);
   return "enriched";
 }
 
 async function loadRecord(
   providerId: string,
-  opts: MetaProviderOptions,
+  opts: ModelsInfoSettings,
   providerHeaders: Record<string, string> | undefined,
   deps: EnrichDeps
 ): Promise<CachedModelsRecord | undefined> {
@@ -300,26 +441,25 @@ async function loadRecord(
  * Unconditionally revalidates a provider's catalog against the network
  * (still honoring the `ETag`, so an unchanged catalog is a cheap `304`) and
  * writes the result back to the cache — regardless of whether the current
- * entry is still within its TTL. This is the periodic-refresh path (see
- * {@link startCacheRefreshSchedulers}): `loadRecord`'s TTL fast-path exists
- * to avoid a network call from the `config` hook on every launch, but a
- * background scheduler's entire point is to go check anyway.
+ * entry is still within its TTL. This is the periodic-refresh path:
+ * `loadRecord`'s TTL fast-path exists to avoid a network call on every launch,
+ * but a background scheduler's entire point is to go check anyway.
  */
 async function refreshProviderCache(
   providerId: string,
-  opts: MetaProviderOptions,
+  opts: ModelsInfoSettings,
   providerHeaders: Record<string, string> | undefined,
   deps: EnrichDeps
-): Promise<void> {
+): Promise<CachedModelsRecord | undefined> {
   const key = cacheKey(providerId, opts.modelsInfoUrl, opts.modelsInfoHeaders);
   const now = deps.now ? deps.now() : Date.now();
   const cached = await deps.cache.get(key);
-  await fetchAndCache(providerId, opts, providerHeaders, deps, key, cached, now);
+  return fetchAndCache(providerId, opts, providerHeaders, deps, key, cached, now);
 }
 
 async function fetchAndCache(
   providerId: string,
-  opts: MetaProviderOptions,
+  opts: ModelsInfoSettings,
   providerHeaders: Record<string, string> | undefined,
   deps: EnrichDeps,
   key: string,
@@ -365,9 +505,9 @@ async function fetchAndCache(
   }
 
   if (result.status === "not-modified" && cached) {
-    // Apply the CURRENT TTL from config — a tightened TTL in opencode.json
-    // should take effect on the next revalidation, not on the next full
-    // 200 fetch (which might be 24h away).
+    // Apply the CURRENT TTL from config — a tightened TTL should take effect on
+    // the next revalidation, not on the next full 200 fetch (which might be
+    // 24h away).
     const refreshed: CachedModelsRecord = {
       ...cached,
       fetchedAt: now,
@@ -391,6 +531,8 @@ async function fetchAndCache(
     return cached;
   }
 
+  // HTTP 401 here usually means the provider's bearer had not been stamped yet
+  // (see docs/models-info.md#auth-composition).
   deps.logger.warn("models_info_fetch_failed_no_cache", {
     providerId,
     url: opts.modelsInfoUrl,
@@ -400,12 +542,13 @@ async function fetchAndCache(
 }
 
 /**
- * Merge the provider's resolved request headers with the meta-specific
- * `modelsInfoHeaders`. Meta wins on conflict so a user can override e.g. a
- * dynamic `Authorization` header for the metadata endpoint specifically.
+ * Merge the provider's resolved request headers with the
+ * `settings.modelsInfoHeaders`. The latter wins on conflict so a user can
+ * override e.g. a dynamic `Authorization` header for the metadata endpoint
+ * specifically.
  */
 function buildFetchHeaders(
-  opts: MetaProviderOptions,
+  opts: ModelsInfoSettings,
   providerHeaders: Record<string, string> | undefined
 ): Record<string, string> | undefined {
   if (!providerHeaders && !opts.modelsInfoHeaders) {
@@ -435,7 +578,8 @@ async function safePut(
   }
 }
 
-function asHeaderMap(value: unknown): Record<string, string> | undefined {
+/** Non-empty string headers only; `undefined` when there are none. */
+function nonEmpty(value: unknown): Record<string, string> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
@@ -446,6 +590,20 @@ function asHeaderMap(value: unknown): Record<string, string> | undefined {
     }
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function hasAuthorization(headers: Record<string, string> | undefined): boolean {
+  return headers
+    ? Object.keys(headers).some((key) => key.toLowerCase() === "authorization")
+    : false;
+}
+
+function headerSignature(headers: Record<string, string> | undefined): string {
+  return headers ? JSON.stringify(Object.entries(headers).sort()) : "";
+}
+
+function fingerprintOf(record: CachedModelsRecord): string {
+  return createHash("sha1").update(JSON.stringify(record.models)).digest("hex");
 }
 
 export { FileCacheStore };
