@@ -1,285 +1,360 @@
-import type { Plugin, PluginInput } from "@opencode-ai/plugin";
-
-import {
-  createJsonConsoleLogger,
-  type LogFields,
-  LOG_LEVEL_PRIORITY,
-  type Logger,
-  type LogLevel
-} from "@vymalo/opencode-auth-core/lib";
+import { Plugin } from "@opencode/plugin/effect";
 import {
   collectManagedProviders,
   mergeDiscoveredModels,
+  type ProviderServerConfigInput,
+  type ProviderEditor,
   propagateCachedBearer,
-  runtimeSignature,
-  type OpenCodeConfig
+  resolveCachedBearer,
+  runtimeSignature
 } from "@vymalo/opencode-provider-sync/lib";
-import { DEFAULT_LOG_LEVEL, type OAuth2ModelSyncConfigInput } from "./config.js";
+import { Effect } from "effect";
+
+import type { OAuth2ModelSyncConfigInput } from "./config.js";
+import {
+  captureHostContext,
+  createEffectLogger,
+  DEFAULT_LOG_LEVEL,
+  type Logger,
+  type LogLevel,
+  resolveLogLevel,
+  runInHost
+} from "./logging.js";
 import { OAuth2ModelSyncPlugin } from "./plugin.js";
-import { createResponsesRepairFetch } from "./responses-repair.js";
+import { repairResponsesResponse } from "./responses-repair.js";
 
-/**
- * Map OpenCode's host-level `config.logLevel` (uppercase `"DEBUG" | "INFO" |
- * "WARN" | "ERROR"`) to this plugin's internal `LogLevel`. Unknown / missing
- * values fall through to `undefined` so the caller can apply its own default —
- * we never throw on the OpenCode-supplied value because the host owns
- * validation of its own field.
- *
- * Note: host `DEBUG` unlocks this plugin's most-verbose `"trace"` tier (there
- * is no separate host `TRACE` level), so running OpenCode with
- * `--log-level DEBUG` surfaces the `oauth2_*` trace events emitted across the
- * runtime hot paths.
- */
-export function fromOpenCodeLogLevel(value: unknown): LogLevel | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  switch (value.toUpperCase()) {
-    case "DEBUG":
-      return "trace";
-    case "INFO":
-      return "info";
-    case "WARN":
-      return "warn";
-    case "ERROR":
-      return "error";
-    default:
-      return undefined;
-  }
-}
+/** Stable plugin id. v2 requires one and keys storage/registrations by it. */
+export const PLUGIN_ID = "vymalo.oauth2";
 
-// oauth2's own config-key literals — where it looks for a provider's OAuth
-// extension (`provider.options.<key>`) and its top-level server list
-// (`pluginConfig.<key>.servers`). These are oauth2's public config surface and
-// deliberately stay here rather than in the shared
-// `@vymalo/opencode-provider-sync` engine (a future consumer, e.g.
-// lightbridge, will pass its own).
-const OAUTH_OPTIONS_KEYS = ["oauth2", "oauth2ModelSync"] as const;
-const OAUTH_PLUGIN_CONFIG_KEY = "oauth2ModelSync";
-const PLUGIN_SERVICE_NAME = "opencode-oauth2-plugin";
+// oauth2's own config-key literals: where it looks for a provider's OAuth
+// extension (`provider.settings.<key>`). The server list is the plugin's own
+// `ctx.options.servers` — v2 has no `pluginConfig`, and a plugin's options are
+// already its own scope. These deliberately stay here rather than in the shared
+// `@vymalo/opencode-provider-sync` engine (lightbridge passes its own).
+const OAUTH_SETTINGS_KEYS = ["oauth2", "oauth2ModelSync"] as const;
+// Part of the on-disk cache path (`<root>/opencode-oauth2/<namespace>`): changing
+// it forces every user to log in again, and breaks the cache shared with
+// lightbridge (ADR-0017).
+const CACHE_NAMESPACE = "opencode-oauth2-model-sync";
 
-interface RuntimeState {
-  runtime?: OAuth2ModelSyncPlugin;
-  signature?: string;
-  managedProviderIds: Set<string>;
+/** Test/embedder handle onto the runtime the plugin builds in the background. */
+export interface OAuth2RuntimeHandle {
+  /** Resolves once every queued runtime build + warmup (and its reload) has finished. */
+  settled(): Promise<void>;
+  /** The current engine, or `undefined` before the first build / with no managed provider. */
+  runtime(): OAuth2ModelSyncPlugin | undefined;
 }
 
 export interface OpenCodePluginFactoryOptions {
+  /** Override the logger (tests). Defaults to the host's Effect logger. */
   logger?: Logger;
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
   cacheDir?: string;
+  /** Observe the background runtime (tests). */
+  onRuntime?: (handle: OAuth2RuntimeHandle) => void;
 }
 
-function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
-  // Bypass createJsonConsoleLogger's own filter so the gate stays driven by
-  // the current value of getMinLevel() — the level can change once the plugin
-  // sees `pluginConfig.oauth2ModelSync.logLevel` during the `config` hook.
-  const fallback = createJsonConsoleLogger("debug");
-  // OpenCode already captures plugin logs via client.app.log (and filters them
-  // by its own log level). No plugin in this suite may write to the user's
-  // TUI (ADR-0014, superseding ADR-0013's narrower per-plugin scope) — even a
-  // warn/error about the caller's own expired token or failed exchange stays
-  // off the terminal and goes only to the host log, so only mirror to the
-  // JSON console when explicitly requested; set VYMALO_PLUGIN_CONSOLE_LOG=1
-  // to restore full console output for debugging.
-  const consoleAll = /^(1|true|yes|on)$/i.test(process.env.VYMALO_PLUGIN_CONSOLE_LOG ?? "");
-
-  const write = (
-    level: "trace" | "debug" | "info" | "warn" | "error",
-    event: string,
-    fields?: LogFields
-  ) => {
-    if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
-      return;
-    }
-
-    if (consoleAll) {
-      fallback[level](event, fields);
-    }
-
-    // OpenCode's host log API has no dedicated `trace` level, so forward our
-    // most-verbose tier as host `debug` (the trace gate above already ran, so
-    // host-side filtering only sees records we intended to surface). The
-    // original event name still carries the `oauth2_*` prefix, so the record
-    // remains identifiable in the host log stream.
-    const hostLevel = level === "trace" ? "debug" : level;
-
-    void client.app
-      .log({
-        body: {
-          service: PLUGIN_SERVICE_NAME,
-          level: hostLevel,
-          message: event,
-          extra: fields
-        }
-      })
-      .catch(() => {
-        // Best-effort forwarding; console logger is the reliable fallback.
-      });
-  };
-
-  return {
-    trace(event, fields) {
-      write("trace", event, fields);
-    },
-    debug(event, fields) {
-      write("debug", event, fields);
-    },
-    info(event, fields) {
-      write("info", event, fields);
-    },
-    warn(event, fields) {
-      write("warn", event, fields);
-    },
-    error(event, fields) {
-      write("error", event, fields);
-    }
-  };
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Make a managed provider self-describing. Other plugins (repo-auth's
+ * double-management guard) can only see the provider record — never this
+ * plugin's private `ctx.options` — so every provider we manage must carry a
+ * `settings.oauth2` / `settings.oauth2ModelSync` block. A provider declared with
+ * its own block already does and is left untouched; one materialised purely from
+ * `options.servers` gets a marker. The marker has no issuer/clientId/scopes, so
+ * `parseOAuthExtension` ignores it on the next pass.
+ */
+function markManaged(editor: ProviderEditor, providerId: string): void {
+  const settings = editor.get(providerId)?.provider.settings as Record<string, unknown> | undefined;
+  const has = (key: string) => {
+    const value = settings?.[key];
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  };
+  if (OAUTH_SETTINGS_KEYS.some(has)) {
+    return;
+  }
+  editor.update(providerId, (provider) => {
+    provider.settings = {
+      ...(provider.settings ?? {}),
+      oauth2: { managed: true, source: "options.servers" }
+    } as typeof provider.settings;
+  });
+}
+
+/**
+ * Build the OpenCode v2 plugin.
+ *
+ * Three registrations, one per lifecycle seam:
+ *
+ *  - `provider.transform` registers the managed providers (from `options.servers`
+ *    and `settings.oauth2` opt-ins), merges the discovered models and stamps the
+ *    cached bearer on `Provider.Info.headers` for config-time consumers. It is
+ *    synchronous and cheap by contract: token and sync work happens in a queued
+ *    background build, which calls `provider.reload()` when it has something new.
+ *  - `session.hook("model.request")` injects a freshly ensured bearer per request.
+ *  - `session.hook("http.response")` runs the Responses-API SSE repair for
+ *    providers that opted into `responseApi`.
+ *
+ * All five auth flows stay on the plugin-owned `TokenRuntime` inside the sync
+ * engine — see ADR-0020 for why none of them is an `ctx.integration` method.
+ */
 export function createOpencodeOauth2Plugin(
   factoryOptions: OpenCodePluginFactoryOptions = {}
-): Plugin {
-  return async ({ client }) => {
-    // The plugin defers to OpenCode's own `config.logLevel` for filter
-    // decisions. Until the first `config` hook fires we don't know what the
-    // host picked, so we start at the package default (`"info"`) and update
-    // the holder once we see the real value.
-    let currentLogLevel: LogLevel = DEFAULT_LOG_LEVEL;
-    const logger = factoryOptions.logger ?? createOpenCodeLogger(client, () => currentLogLevel);
+): Plugin.Plugin {
+  return Plugin.define({
+    id: PLUGIN_ID,
+    effect: Effect.fn(function* (ctx) {
+      // v2 gives plugins no `config` object, so the v1 `config.logLevel` channel
+      // is gone: take this plugin's own `logLevel` option first, then the host's
+      // `OPENCODE_LOG_LEVEL`.
+      const logLevel: LogLevel =
+        resolveLogLevel(ctx.options.logLevel) ??
+        resolveLogLevel(process.env.OPENCODE_LOG_LEVEL) ??
+        DEFAULT_LOG_LEVEL;
 
-    const state: RuntimeState = {
-      runtime: undefined,
-      signature: undefined,
-      managedProviderIds: new Set<string>()
-    };
+      // Captured INSIDE the plugin's own Effect so records reach the host's file
+      // logger and not the terminal (ADR-0014 / ADR-0019).
+      const hostContext = yield* captureHostContext;
+      const logger: Logger =
+        factoryOptions.logger ?? createEffectLogger(hostContext, () => logLevel);
 
-    return {
-      config: async (config: OpenCodeConfig) => {
-        // Apply the host's logLevel BEFORE walking the config: parsing emits
-        // `plugin_config_server_invalid` / `plugin_config_server_missing_fields`
-        // warnings via `logger`, and those need to be filtered against the
-        // user's chosen threshold — not the bootstrap default.
-        currentLogLevel = fromOpenCodeLogLevel(config.logLevel) ?? DEFAULT_LOG_LEVEL;
-        logger.trace("oauth2_config_hook_start", {
-          logLevel: currentLogLevel,
-          hostLogLevel: typeof config.logLevel === "string" ? config.logLevel : undefined
-        });
-        const managed = collectManagedProviders(config, logger, {
-          pluginConfigKey: OAUTH_PLUGIN_CONFIG_KEY,
-          optionKeys: OAUTH_OPTIONS_KEYS,
-          createResponsesRepairFetch
-        });
-        logger.trace("oauth2_config_hook_collected_providers", {
-          managedCount: managed.servers.length,
-          providerIds: managed.servers.map((server) => server.id)
-        });
+      let runtime: OAuth2ModelSyncPlugin | undefined;
+      let runtimeSig: string | undefined;
+      let requestedSig: string | undefined;
+      let managedIds = new Set<string>();
+      let responseApiIds = new Set<string>();
+      // providerId -> "Bearer …", refreshed out of band and applied by the
+      // (synchronous) provider transform.
+      const bearers = new Map<string, string>();
+      const stamped = new Map<string, string>();
+      // Serialises runtime builds so a burst of transform passes cannot race.
+      let chain: Promise<void> = Promise.resolve();
 
-        if (managed.servers.length === 0) {
-          logger.trace("oauth2_config_hook_no_managed_providers", {});
-          state.runtime?.stop();
-          state.runtime = undefined;
-          state.signature = undefined;
-          state.managedProviderIds = new Set<string>();
+      const reloadProviders = (): Promise<void> => runInHost(hostContext, ctx.provider.reload());
+
+      const safeModels = (providerId: string): Array<{ id: string; displayName: string }> => {
+        try {
+          return runtime?.getServerModels(providerId) ?? [];
+        } catch {
+          // The runtime was built for a different server set; the next build
+          // will catch up.
+          return [];
+        }
+      };
+
+      async function applyServers(servers: ProviderServerConfigInput[]): Promise<void> {
+        if (servers.length === 0) {
+          logger.trace("oauth2_no_managed_providers", {});
+          runtime?.stop();
+          runtime = undefined;
+          runtimeSig = undefined;
           return;
         }
 
         const pluginConfig: OAuth2ModelSyncConfigInput = {
-          servers: managed.servers,
-          cacheNamespace: "opencode-oauth2-model-sync",
-          logLevel: currentLogLevel
+          servers,
+          // Optional tuning read from the plugin's own `options`. Unset keeps the
+          // defaults (`cacheNamespace` falls back to CACHE_NAMESPACE). An invalid
+          // value makes `validateConfig` throw, which is logged as
+          // `oauth2_runtime_build_failed`.
+          cacheNamespace:
+            typeof ctx.options.cacheNamespace === "string"
+              ? ctx.options.cacheNamespace
+              : CACHE_NAMESPACE,
+          httpTimeoutMs: ctx.options.httpTimeoutMs,
+          tokenExpirySkewMs: ctx.options.tokenExpirySkewMs,
+          logLevel
         };
-
         const signature = runtimeSignature(pluginConfig);
-        if (!state.runtime || state.signature !== signature) {
-          logger.trace("oauth2_runtime_rebuild", {
-            reason: state.runtime ? "signature_changed" : "first_build",
-            serverCount: pluginConfig.servers.length
-          });
-          state.runtime?.stop();
-
-          state.runtime = new OAuth2ModelSyncPlugin(pluginConfig, {
-            logger,
-            fetchImpl: factoryOptions.fetchImpl,
-            onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
-            cacheDir: factoryOptions.cacheDir
-          });
-
-          await state.runtime.initialize();
-          await state.runtime.start({ warmup: true });
-          state.signature = signature;
-        } else {
-          logger.trace("oauth2_runtime_reused", { serverCount: pluginConfig.servers.length });
-        }
-
-        state.managedProviderIds = new Set<string>(managed.servers.map((server) => server.id));
-
-        const providers = (config.provider ??= {});
-        const runtime = state.runtime;
-        // Each provider is independent (distinct config object, distinct
-        // runtime state), and propagation can do a token-refresh round trip
-        // (up to httpTimeoutMs). Fan out so one slow IdP doesn't serialize
-        // startup behind the others. propagateCachedBearer swallows its own
-        // errors, so this never rejects.
-        await Promise.all(
-          [...state.managedProviderIds].map((providerId) => {
-            const providerConfig = providers[providerId];
-            if (!providerConfig) {
-              return undefined;
-            }
-
-            const models = runtime.getServerModels(providerId);
-            logger.trace("oauth2_config_hook_provider_models", {
-              providerId,
-              modelCount: models.length
-            });
-            if (models.length > 0) {
-              mergeDiscoveredModels(providerConfig, models);
-            }
-
-            // Stamp the cached bearer onto `options.headers.Authorization` so
-            // subsequent `config` hooks (e.g. @vymalo/opencode-models-info
-            // fetching a metadata endpoint) can inherit it without depending
-            // on this plugin. `chat.headers` still overwrites per-request with
-            // a freshly-ensured token, so a stale value here can only ever
-            // affect other config-time consumers — never the actual inference
-            // call. We never clobber a user-set Authorization header.
-            return propagateCachedBearer(providerConfig, providerId, runtime, logger);
-          })
-        );
-        logger.trace("oauth2_config_hook_finished", {
-          managedCount: state.managedProviderIds.size
-        });
-      },
-      "chat.headers": async (input, output) => {
-        const providerId = input.model?.providerID ?? input.provider?.info?.id;
-        if (!providerId || !state.runtime || !state.managedProviderIds.has(providerId)) {
-          logger.trace("oauth2_chat_headers_skipped", {
-            providerId,
-            managed: providerId ? state.managedProviderIds.has(providerId) : false
-          });
+        if (runtime && runtimeSig === signature) {
+          logger.trace("oauth2_runtime_reused", { serverCount: servers.length });
           return;
         }
 
-        logger.trace("oauth2_chat_headers_ensure_token", { providerId });
-        const token = await state.runtime.ensureAccessToken(providerId);
-        output.headers.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
-        logger.trace("oauth2_chat_headers_bearer_injected", {
-          providerId,
-          present: Boolean(token.accessToken),
-          tokenType: token.tokenType || "Bearer"
+        logger.trace("oauth2_runtime_rebuild", {
+          reason: runtime ? "signature_changed" : "first_build",
+          serverCount: servers.length
+        });
+        runtime?.stop();
+        runtime = undefined;
+        runtimeSig = undefined;
+
+        const next = new OAuth2ModelSyncPlugin(pluginConfig, {
+          logger,
+          fetchImpl: factoryOptions.fetchImpl,
+          onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
+          cacheDir: factoryOptions.cacheDir
+        });
+        await next.initialize();
+        runtime = next;
+        runtimeSig = signature;
+        await next.start({ warmup: true });
+
+        // Each provider is independent and resolving a bearer can mean a token
+        // refresh round trip, so fan out. resolveCachedBearer swallows its own
+        // errors, so this never rejects.
+        await Promise.all(
+          servers.map(async (server) => {
+            const authorization = await resolveCachedBearer(server.id, next, logger);
+            if (authorization) {
+              bearers.set(server.id, authorization);
+            } else {
+              bearers.delete(server.id);
+            }
+          })
+        );
+
+        // Models and bearers are now known: ask the host to re-run transforms.
+        await reloadProviders();
+      }
+
+      function scheduleApply(servers: ProviderServerConfigInput[]): void {
+        const signature = runtimeSignature({ servers });
+        if (signature === requestedSig) {
+          return;
+        }
+        requestedSig = signature;
+        chain = chain
+          .then(() => applyServers(servers))
+          .catch((error) => {
+            // A failed build must not wedge the queue, and must be retried by the
+            // next distinct server set.
+            runtimeSig = undefined;
+            logger.error("oauth2_runtime_build_failed", { error: errorMessage(error) });
+          });
+      }
+
+      factoryOptions.onRuntime?.({
+        async settled() {
+          let current: Promise<void>;
+          do {
+            current = chain;
+            await current;
+          } while (current !== chain);
+        },
+        runtime: () => runtime
+      });
+
+      yield* ctx.provider.transform((editor) => {
+        logger.trace("oauth2_provider_transform_start", {});
+        let servers: ProviderServerConfigInput[];
+        try {
+          servers = collectManagedProviders(editor, ctx.options, logger, {
+            settingsKeys: OAUTH_SETTINGS_KEYS
+          }).servers;
+        } catch (error) {
+          // Invalid user config (e.g. a bad redirectPort). v1 threw out of the
+          // `config` hook; here a throw would take down the whole provider
+          // pipeline for every plugin, so report it and manage nothing instead.
+          logger.error("oauth2_config_invalid", { error: errorMessage(error) });
+          servers = [];
+        }
+
+        managedIds = new Set(servers.map((server) => server.id));
+        responseApiIds = new Set(
+          servers.filter((server) => server.responseApi).map((server) => server.id)
+        );
+        logger.trace("oauth2_provider_transform_collected", {
+          managedCount: servers.length,
+          providerIds: [...managedIds]
         });
 
-        if (state.runtime.getServerModels(providerId).length === 0) {
-          logger.trace("oauth2_chat_headers_lazy_sync", { providerId });
-          void state.runtime.syncServer(providerId);
+        for (const server of servers) {
+          markManaged(editor, server.id);
+          const models = safeModels(server.id);
+          if (models.length > 0) {
+            mergeDiscoveredModels(editor, server.id, models);
+          }
+          // Stamp the cached bearer onto `Provider.Info.headers.Authorization`
+          // so a later consumer (models-info fetching a metadata endpoint) can
+          // inherit it. `model.request` re-injects a fresh token per request, so
+          // a stale value here can only ever affect that consumer — never the
+          // inference call. A user-set Authorization header is never clobbered.
+          propagateCachedBearer(editor, server.id, bearers.get(server.id), logger, stamped);
         }
-      }
-    };
-  };
+
+        scheduleApply(servers);
+      });
+
+      yield* ctx.session.hook("model.request", (event) =>
+        Effect.tryPromise({
+          try: async () => {
+            // Wait for any in-flight build/warmup: a request racing startup must
+            // not leave the managed provider without a bearer.
+            await chain;
+            const providerId = event.model.providerID;
+            if (!runtime || !managedIds.has(providerId)) {
+              logger.trace("oauth2_model_request_skipped", {
+                providerId,
+                managed: managedIds.has(providerId)
+              });
+              return;
+            }
+
+            logger.trace("oauth2_model_request_ensure_token", { providerId });
+            const token = await runtime.ensureAccessToken(providerId);
+            // Header names are case-insensitive: drop any variant already set
+            // (e.g. the placeholder key's `Authorization`, or a lowercase copy).
+            for (const key of Object.keys(event.headers)) {
+              if (key.toLowerCase() === "authorization") {
+                delete event.headers[key];
+              }
+            }
+            event.headers.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
+            logger.trace("oauth2_model_request_bearer_injected", {
+              providerId,
+              present: Boolean(token.accessToken),
+              tokenType: token.tokenType || "Bearer"
+            });
+
+            if (runtime.getServerModels(providerId).length === 0) {
+              logger.trace("oauth2_model_request_lazy_sync", { providerId });
+              const active = runtime;
+              void active.syncServer(providerId).then(async () => {
+                if (active.getServerModels(providerId).length > 0) {
+                  await reloadProviders();
+                }
+              });
+            }
+          },
+          catch: (error) => error
+        }).pipe(
+          // Fail closed: with no usable token the request must not go out under
+          // a placeholder or stale credential. The cause is logged first.
+          Effect.tapError((error) =>
+            Effect.sync(() =>
+              logger.error("oauth2_model_request_token_failed", {
+                providerId: event.model.providerID,
+                error: errorMessage(error)
+              })
+            )
+          ),
+          Effect.orDie
+        )
+      );
+
+      yield* ctx.session.hook("http.response", (event) =>
+        Effect.sync(() => {
+          if (!responseApiIds.has(event.model.providerID)) {
+            return;
+          }
+          event.response = repairResponsesResponse(event.request, event.response);
+        })
+      );
+
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          runtime?.stop();
+        })
+      );
+    })
+  });
 }
 
-export const OpencodeOauth2Plugin: Plugin = createOpencodeOauth2Plugin();
+export const OpencodeOauth2Plugin: Plugin.Plugin = createOpencodeOauth2Plugin();
 
 export default OpencodeOauth2Plugin;

@@ -48,9 +48,10 @@ flowchart LR
    is used directly as the bearer. See [The exchange is opt-in](#the-exchange-is-opt-in-adr-0017)
    below for why the default flipped.
 3. **Two injectors read the SAME cached project token:**
-   - **Gateway** (`gateway` config block) — a `chat.headers` hook injects
+   - **Gateway** (`gateway` config block) — a `session.hook("model.request")` hook injects
      `Authorization: Bearer <project-token>` on the configured `providers`, per request. Fails
-     closed: an exchange failure injects no header, and the gateway 401s.
+     closed: a token failure kills the request locally (see
+     [Fail-closed gateway](#fail-closed-gateway-v2)).
    - **OTEL** (`otel` config block) — a `TokenSource` whose `headers()` calls the shared runtime,
      passed as the 5th argument to `@vymalo/opencode-core-otel`'s `createProviders`. The OTLP
      exporters already call `headers()` as an async factory before every export (see
@@ -72,34 +73,41 @@ config — the plugin logs once and registers no observing hooks.
 ```jsonc
 // opencode.json
 {
-  "plugin": [
-    ["@vymalo/opencode-lightbridge", {
-      "auth": {
-        "id": "lightbridge",
-        "issuer": "https://authz.example.com/realms/lightbridge",
-        "clientId": "opencode-cli",
-        "scopes": ["openid", "offline_access"],
-        "authFlow": "device_code"
-      },
-      "gateway": {
-        "providers": ["gateway"],
-        "exchange": false
-      },
-      "otel": {
-        "endpoint": "http://localhost:4318"
-      },
-      "register": {
-        "baseURL": "https://gateway.example.com/v1"
+  "plugins": [
+    {
+      "package": "@vymalo/opencode-lightbridge",
+      "options": {
+        "auth": {
+          "id": "lightbridge",
+          "issuer": "https://authz.example.com/realms/lightbridge",
+          "clientId": "opencode-cli",
+          "scopes": ["openid", "offline_access"],
+          "authFlow": "device_code"
+        },
+        "gateway": {
+          "providers": ["gateway"],
+          "exchange": false
+        },
+        "otel": {
+          "endpoint": "http://localhost:4318"
+        },
+        "register": {
+          "baseURL": "https://gateway.example.com/v1"
+        }
       }
-    }]
+    }
   ]
 }
 ```
 
+The plugin id is `vymalo.lightbridge`. All of the above are the plugin's own `options`
+(`ctx.options`), plus an optional `logLevel` (`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`; falls back to
+the host's `OPENCODE_LOG_LEVEL`).
+
 | Field | Required | Notes |
 | --- | --- | --- |
 | `auth` | yes | `AuthServerConfigInput` (auth-core) — the one IdP login. Validated eagerly via `validateAuthConfig`; a malformed block fails plugin load with a field-level error rather than a half-built plugin. `auth.id` is also the OpenCode provider id `register` uses AND the shared cache identity (see below). |
-| `gateway.providers` | required if `gateway` is set | Which OpenCode provider ids get the bearer injected on `chat.headers`. |
+| `gateway.providers` | required if `gateway` is set | Which OpenCode provider ids get the bearer injected per request (`session.hook("model.request")`). |
 | `gateway.exchange` | no, default `false` (ADR-0017) | `false`: use the IdP access token directly as the bearer. `true`: RFC 8693-exchange it for a project-scoped token first (ADR-0012's original behaviour). See [The exchange is opt-in](#the-exchange-is-opt-in-adr-0017). |
 | `gateway.projectId` | no | Optional project id for the gateway exchange. Only meaningful when `gateway.exchange: true`. Omit for the caller's **default project**. |
 | `otel` | no | Same shape as `@vymalo/opencode-otel`'s options. `tokenCommand` / `tokenHeader` / `tokenPrefix` are accepted (they are just `OtelPluginOptions` fields) but always **ignored** — the shared runtime's `TokenSource` supersedes that seam entirely and always wins in `createProviders`. Setting any of them logs `lightbridge_otel_token_command_ignored` once at `debug` rather than silently no-opping. |
@@ -112,11 +120,114 @@ config — the plugin logs once and registers no observing hooks.
 | `projectId` (top-level) | no | Optional project id for the shared exchange. Only meaningful when `gateway.exchange: true`. When omitted (and no `gateway.projectId`), the backend mints a **default-project** token. An explicit top-level `projectId` wins over `gateway.projectId`. |
 
 When the shared credential resolution itself fails (expired login, rejected exchange, no session at
-all), `gateway` injects no header on that request and the gateway 401s as normal; `otel`'s
+all), `gateway` **fails the request** (the `model.request` hook dies, so nothing goes out — see
+[Fail-closed gateway](#fail-closed-gateway-v2)); `otel`'s
 `TokenSource.headers()` resolves to `undefined` on that call, which skips the export entirely rather
 than sending it with no `Authorization` header. Both modules keep re-trying on their own natural
 cadence (`gateway` on the next request, `otel` on the next batch flush), so a later successful login
 resumes both without a restart.
+
+## Module wiring (v2)
+
+```mermaid
+sequenceDiagram
+  participant Host as OpenCode v2 host
+  participant LB as vymalo.lightbridge
+  participant Eng as ProviderModelSyncEngine
+  participant RT as LightbridgeRuntime (shared)
+  participant Rec as TelemetryRecorder
+  Host->>LB: provider.transform(editor)  [sync, opencode.ts register block]
+  LB->>LB: collision? settings.oauth2 on auth.id → skip, never build
+  LB->>Host: upsert provider + merge cached models + stamp cached bearer
+  LB-)Eng: queued build: initialize, start(warmup), resolveCachedBearer
+  Eng--)LB: models + bearer ready
+  LB->>Host: provider.reload()
+  Host->>LB: session.hook("model.request")  [gateway]
+  LB->>RT: getProjectToken({ interactive: true })
+  RT-->>LB: token, or throws
+  LB-->>Host: Authorization set, or the request dies (fail closed)
+  Host-)LB: event stream, prompt/context/tool/permission hooks  [otel]
+  LB->>Rec: otel-adapter.ts translates v2 payloads
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> Idle: register configured
+  Idle --> Building: first non-collision transform pass
+  Building --> Ready: warmup done, provider.reload()
+  Building --> Suppressed: oauth2 marker seen
+  Ready --> Suppressed: oauth2 marker seen on a later pass (engine.stop())
+  Suppressed --> Idle: marker gone
+  Ready --> [*]: plugin scope closed (engine.stop())
+```
+
+| Module | v2 registration | Source |
+| --- | --- | --- |
+| `register` | `provider.transform` (sync) + queued background engine build + `provider.reload()` | `packages/opencode-lightbridge/src/opencode.ts` (`register module` block) |
+| `gateway` | `session.hook("model.request")` | same file, `gateway module` block |
+| `otel` | `event.subscribe`, `session.hook("prompt" \| "context" \| "http.request")`, `tool.hook("execute.before" \| "execute.after")`, `permission.hook("evaluate")` | same file, `otel module` block; payload translation in `src/otel-adapter.ts` |
+
+### Fail-closed gateway (v2)
+
+`gateway` never stamps a bearer onto the provider record, so it creates no sticky header. But the
+same provider id can carry a stamped `Authorization` from elsewhere: `register` stamps the raw IdP
+token (`propagateCachedBearer`, for models-info), and oauth2 does the same for a provider it
+manages. If `gateway.exchange: true` and the RFC 8693 exchange (a remote call) then fails, simply
+*not setting* a header would let that stale stamped value go out. So a failed token resolution makes
+the hook **die** (`Effect.orDie`, the mechanism oauth2 uses): the request does not leave the
+process. The cause is logged first as `lightbridge_gateway_no_bearer` (`warn`). Both paths behave
+the same: `exchange: false` fails when the IdP login is missing or expired and cannot be refreshed,
+`exchange: true` additionally fails when the exchange is rejected.
+
+## Migrating from v1
+
+`0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release
+([ADR-0019](adr/0019-opencode-v2-cutover.md)). There is no dual-support build.
+
+| v1 | v2 |
+| --- | --- |
+| `"plugin": [["@vymalo/opencode-lightbridge", { ... }]]` | `"plugins": [{ "package": "@vymalo/opencode-lightbridge", "options": { ... } }]` |
+| `Hooks.config` registered the provider into `config.provider[<auth.id>]` | `provider.transform` over the provider editor; `Provider.Info.package` / `settings.baseURL` |
+| `npm: "@ai-sdk/openai-compatible"` | `package: "aisdk:@ai-sdk/openai-compatible"` (Responses: `aisdk:@ai-sdk/openai`) |
+| `options.baseURL` / `options.apiKey` | `settings.baseURL` / `settings.apiKey` |
+| `chat.headers` (gateway) | `session.hook("model.request")` |
+| `event`, `chat.message`, `chat.params`, `tool.execute.*`, `permission.ask` | `event.subscribe`, `session.hook("prompt")`, `session.hook("context")`, `tool.hook`, `permission.hook("evaluate")` |
+| trace propagation via `provider.options.fetch` | `session.hook("http.request")` |
+| host `config.logLevel` drove the log level | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
+| oauth2 collision read `pluginConfig.oauth2ModelSync.servers` and `provider.options.oauth2` | reads `settings.oauth2` / `settings.oauth2ModelSync` on the provider record |
+
+## Behaviour changes in v2
+
+- **Gateway failure now fails the request.** v1's `chat.headers` hook swallowed a failed token
+  resolution (`lightbridge_gateway_no_bearer`, `trace`) and let the request go out without a bearer
+  for the gateway to 401. v2 dies the hook, so the request is refused locally, and the same event is
+  now logged at `warn`. See [Fail-closed gateway](#fail-closed-gateway-v2).
+- **oauth2 collision detection is order-sensitive.** v1 read oauth2's private `pluginConfig`. A v2
+  plugin cannot see another plugin's options, so lightbridge looks for the `settings.oauth2` marker
+  oauth2 stamps on every provider it manages. List `@vymalo/opencode-oauth2` **before**
+  lightbridge in `plugins`. If lightbridge is listed first it may start its engine on the first
+  pass; it stands the engine down (`engine.stop()`, releasing its scheduler slot) as soon as a later
+  pass shows the marker. The scheduler-ownership guard in `ProviderModelSyncEngine` still prevents
+  two engines polling the same cache file in the meantime.
+- **`oauth2ManagedProviderIds`, `OpenCodeConfigLike` and the config-shaped `hasOAuth2Conflict`
+  signature are gone** from `./lib`; `hasOAuth2Conflict(editor, id)` replaces it (`ProviderLookup`).
+- **`session.diff` / `todo.updated` / `command.executed` are no longer observed.** `@opencode/schema`
+  2.2.6 has no `session.diff` or `todo.updated` event, and `command.executed` is not mapped, so the lines-of-code metric, the `opencode.file_edited` event and the
+  todo/command counters stop being produced by the `otel` module. Session, message (step),
+  tool, permission, retry, compaction, error and resource attributes are unchanged.
+- **`experimental.compaction.autocontinue` is gone** (no v2 equivalent); the plain compaction event
+  and counter remain.
+- **Trace context now rides `http.request`** instead of a wrapped `options.fetch`; it composes with
+  `@vymalo/opencode-ratelimit` regardless of order.
+- **Events renamed:** none. Added: `lightbridge_register_build_failed` (a failed background engine
+  build, `error`), `lightbridge_gateway_model_request_skipped` (`trace`),
+  `lightbridge_otel_event_stream_failed` (`warn`). Removed: `lightbridge_gateway_chat_headers_skipped`
+  (replaced by `lightbridge_gateway_model_request_skipped`).
+- **A malformed config no longer returns an inert `config` hook**; the plugin logs
+  `lightbridge_config_invalid` and registers nothing.
+- **Not configurable any more:** nothing was dropped from `auth` / `gateway` / `otel` / `register`;
+  `otel.tokenCommand` / `tokenHeader` / `tokenPrefix` were already ignored. The Responses-API SSE
+  repair was never injected by lightbridge and still is not.
 
 **Exit behaviour (`otel`).** When the `otel` module is active it flushes buffered telemetry on
 `beforeExit`, and on `SIGINT`/`SIGTERM` it shuts the exporters down (waiting at most 2 s), then
@@ -129,7 +240,7 @@ the process. Same implementation as `@vymalo/opencode-otel`, events prefixed `li
 ## `register` — provider registration + model discovery (ADR-0017)
 
 `register` makes lightbridge do everything `@vymalo/opencode-oauth2` does: register `auth`'s IdP as
-an OpenCode provider (`npm`, `name`, `options.baseURL`) and keep its model list in sync, via the
+an OpenCode provider (`package`, `name`, `settings.baseURL`) and keep its model list in sync, via the
 SAME `@vymalo/opencode-provider-sync` `ProviderModelSyncEngine` oauth2 builds on — not a fork. It is
 independent of `gateway` (bearer injection) and `otel` (export credential): a config can register a
 provider without ever routing chat traffic through it, though the common case sets
@@ -144,9 +255,10 @@ provider without ever routing chat traffic through it, though the common case se
 ```
 
 **Provider-id collision guard.** If `auth.id` is ALSO managed by `@vymalo/opencode-oauth2` in the
-same host config (its `pluginConfig.oauth2ModelSync.servers[].id`, or a provider's own
-`options.oauth2`/`options.oauth2ModelSync` block), lightbridge's `register` module skips entirely —
-no engine is built, `config.provider[id]` is never touched — logged once at `debug`
+same host (the provider record carries `settings.oauth2` / `settings.oauth2ModelSync` — either the
+user's own block or the `{ managed: true }` marker oauth2 stamps on providers it materialises from
+its `options.servers`), lightbridge's `register` module skips entirely — no engine is built, the
+provider is never touched, nothing is scheduled — logged once at `debug`
 (`lightbridge_register_skipped_oauth2_conflict`; nothing reaches the terminal, per
 [ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md)). The gateway/OTEL bearer keeps working
 regardless — see the next section.
@@ -233,7 +345,9 @@ Mirrors the per-package convention (see `AGENTS.md`), **minus `cache.ts`** (auth
 packages/opencode-lightbridge/
 ├── src/
 │   ├── index.ts     # slim entry — single `export { default } from "./opencode.js"`
-│   ├── opencode.ts  # plugin factory: createLightbridgePlugin(opts) → Plugin; merges register + gateway + otel hooks
+│   ├── opencode.ts  # plugin factory: createLightbridgePlugin(opts) → Plugin; register + gateway + otel registrations
+│   ├── otel-adapter.ts # v2 events/hooks → core-otel recorder inputs (pure, host-free)
+│   ├── logging.ts   # captureHostContext + createEffectLogger (ADR-0014/0019)
 │   ├── plugin.ts    # LightbridgeRuntime — the shared root-token wrapper (ensure/exchange/shared cache)
 │   ├── migration.ts # ADR-0017: one-time old-cache → shared-cache root-token migration
 │   ├── config.ts    # pluginOptions parsing + validation → LightbridgeOptions
@@ -245,7 +359,7 @@ packages/opencode-lightbridge/
 
 Same posture as `@vymalo/opencode-repo-auth`, extended to the OTEL egress and `register`:
 
-- **Fail closed** — a token-resolution failure means no gateway header and, for OTEL, no export
+- **Fail closed** — a token-resolution failure means no gateway request and, for OTEL, no export
   attempt at all (not just no `Authorization` header — see
   [ADR-0015](adr/0015-otel-fail-closed-credential-gate.md)). No module ever invents a token.
 - **Two cache locations, by design (ADR-0017)** — the shared human root token lives at

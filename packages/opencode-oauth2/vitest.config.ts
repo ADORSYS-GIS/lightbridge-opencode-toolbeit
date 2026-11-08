@@ -11,7 +11,7 @@ export default defineConfig({
       provider: "v8",
       include: ["src/**"],
       reporter: ["text-summary"],
-      thresholds: { statements: 71, branches: 63, functions: 69, lines: 71 }
+      thresholds: { statements: 90, branches: 80, functions: 90, lines: 90 }
     }
   }
 });

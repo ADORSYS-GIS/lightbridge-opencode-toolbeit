@@ -5,9 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { FileCacheStore } from "../src/cache.js";
-import { createOpencodeOauth2Plugin } from "../src/opencode.js";
 import type { NormalizedModel } from "../src/types.js";
-import { createSilentLogger } from "./helpers.js";
+import { startPlugin } from "./harness.js";
 
 const SERVER_ID = "example-ai";
 
@@ -93,31 +92,19 @@ async function tempCacheDir(name: string): Promise<string> {
 }
 
 describe("cross-process token state (shared cache file)", () => {
-  it("injects the token another process rotated on the per-request chat.headers path", async () => {
+  it("injects the token another process rotated on the per-request model.request path", async () => {
     const cacheDir = await tempCacheDir("chat-headers");
     await writeStateFile(cacheDir, "process-a-initial", "refresh-1", Date.now() - 10_000);
 
     const recorder = createFetchRecorder();
-    const factory = createOpencodeOauth2Plugin({
+    const harness = await startPlugin({
       cacheDir,
-      logger: createSilentLogger(),
-      fetchImpl: recorder.impl
-    });
-
-    const hooks = await factory({
-      client: { app: { log: async () => ({ data: true }) } },
-      project: { id: "project-1" },
-      directory: process.cwd(),
-      worktree: process.cwd(),
-      serverUrl: new URL("http://127.0.0.1:3000"),
-      $: {} as never
-    } as never);
-
-    const config: Record<string, unknown> = {
-      provider: {
-        [SERVER_ID]: {
+      factory: { fetchImpl: recorder.impl },
+      sources: [
+        {
+          id: SERVER_ID,
           name: "Example AI",
-          options: {
+          settings: {
             baseURL: "https://api.example.com/v1",
             oauth2: {
               issuer: "https://auth.example.com",
@@ -126,16 +113,21 @@ describe("cross-process token state (shared cache file)", () => {
             }
           }
         }
-      }
-    };
+      ]
+    });
 
-    await hooks.config?.(config as never);
+    harness.runTransform();
+    await harness.settle();
 
     // Process A rotates after this process already booted and cached state.
     await writeStateFile(cacheDir, "process-a-rotated", "refresh-2", Date.now());
 
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.({ model: { providerID: SERVER_ID } } as never, output as never);
+    const output = {
+      model: { id: "glm-5", providerID: SERVER_ID },
+      headers: {} as Record<string, string>
+    };
+    await harness.call("model.request", output);
+    await harness.close();
 
     expect(output.headers.Authorization).toBe("Bearer process-a-rotated");
   });

@@ -5,8 +5,8 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { streamText } from "ai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { createResponsesRepairFetch } from "../src/responses-repair.js";
 import { NONCONFORMANT_RESPONSES_SSE } from "./fixtures/responses-sse.js";
+import { type Harness, OAUTH_BLOCK, startPlugin } from "./harness.js";
 
 // End-to-end against a local stub that serves the captured non-conformant Envoy
 // AI Gateway `/v1/responses` SSE. Two layers:
@@ -22,6 +22,26 @@ import { NONCONFORMANT_RESPONSES_SSE } from "./fixtures/responses-sse.js";
 
 let server: Server;
 let baseURL: string;
+let harness: Harness;
+
+/**
+ * A `fetch` that behaves like the v2 host around the plugin: it performs the
+ * HTTP exchange, then offers it to the plugin's REAL `session.hook("http.response")`
+ * and returns whatever response the hook leaves on the event. This is the seam
+ * that replaced v1's `provider.options.fetch` wrapper.
+ */
+function hostFetch(providerID: string): typeof fetch {
+  return (async (input, init) => {
+    const request = new Request(input as RequestInfo, init);
+    const event = {
+      model: { id: "test-model", providerID },
+      request,
+      response: await fetch(request)
+    };
+    await harness.call("http.response", event);
+    return event.response;
+  }) as typeof fetch;
+}
 
 beforeAll(async () => {
   server = createServer((_req, res) => {
@@ -31,9 +51,21 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   baseURL = `http://127.0.0.1:${port}/v1`;
+
+  harness = await startPlugin({
+    sources: [
+      {
+        id: "gw",
+        settings: { baseURL, oauth2: { ...OAUTH_BLOCK, responseApi: true } }
+      },
+      { id: "plain", settings: { baseURL } }
+    ]
+  });
+  harness.runTransform();
 });
 
 afterAll(async () => {
+  await harness.close();
   await new Promise<void>((resolve, reject) =>
     server.close((err) => (err ? reject(err) : resolve()))
   );
@@ -68,8 +100,9 @@ describe("responses repair — wire conformance over HTTP", () => {
   });
 
   it("the repair fetch injects the indices a strict consumer needs", async () => {
-    const repairFetch = createResponsesRepairFetch();
-    const repaired = await (await repairFetch(`${baseURL}/responses`, { method: "POST" })).text();
+    const repaired = await (
+      await hostFetch("gw")(`${baseURL}/responses`, { method: "POST" })
+    ).text();
     const events = parseEvents(repaired);
 
     // every item/content/text event now carries an output_index...
@@ -85,10 +118,15 @@ describe("responses repair — wire conformance over HTTP", () => {
   });
 
   it("only touches /responses event-streams, not other routes", async () => {
-    const repairFetch = createResponsesRepairFetch();
     // a non-/responses URL is returned verbatim even if it streams
-    const passthrough = await repairFetch(`${baseURL}/models`, { method: "GET" });
+    const passthrough = await hostFetch("gw")(`${baseURL}/models`, { method: "GET" });
     expect(await passthrough.text()).toBe(NONCONFORMANT_RESPONSES_SSE);
+  });
+
+  it("only repairs providers that opted into responseApi", async () => {
+    // Same defective /responses stream, but the provider did not opt in: untouched.
+    const untouched = await hostFetch("plain")(`${baseURL}/responses`, { method: "POST" });
+    expect(await untouched.text()).toBe(NONCONFORMANT_RESPONSES_SSE);
   });
 });
 
@@ -97,7 +135,7 @@ describe("responses repair — real @ai-sdk/openai consumer", () => {
     const openai = createOpenAI({
       baseURL,
       apiKey: "test-key",
-      fetch: createResponsesRepairFetch()
+      fetch: hostFetch("gw")
     });
 
     const result = streamText({ model: openai.responses("test-model"), prompt: "hi" });

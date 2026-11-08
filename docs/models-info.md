@@ -172,6 +172,8 @@ In v1, oauth2 wrote the bearer to `provider.options.headers.Authorization` in it
 
 > **Symptom of getting this wrong:** `models_info_fetch_failed_no_cache` with `error: "HTTP 401"`. Check that oauth2 is listed before this plugin, and read `models_info_provider_headers_resolved` at trace level to see whether any `Authorization` reached the fetch.
 
+The owner side of this handoff (where `@vymalo/opencode-provider-sync` writes it, when it is absent, the ordering guarantee) is specified in [provider-sync.md → The `Authorization` handoff](./provider-sync.md#the-authorization-handoff-to-models-info-v2-contract).
+
 ## URL resolution
 
 `settings.modelsInfoUrl` resolves against `settings.baseURL` with standard WHATWG URL semantics:

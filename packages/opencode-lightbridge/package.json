@@ -59,9 +59,10 @@
     "format:check": "biome format ."
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.18.32",
+    "@opencode/plugin": "2.2.6",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.222.0",
+    "@opentelemetry/core": "^2.11.0",
     "@vymalo/opencode-auth-core": "workspace:*",
     "@vymalo/opencode-core-otel": "workspace:*",
     "@vymalo/opencode-provider-sync": "workspace:*"
@@ -69,7 +70,11 @@
   "devDependencies": {
     "@opentelemetry/sdk-logs": "^0.222.0",
     "@opentelemetry/sdk-trace": "^2.11.0",
+    "effect": "4.1.0",
     "vite": "^8.3.0",
     "vitest": "^5.0.1"
+  },
+  "peerDependencies": {
+    "effect": "^4.0.0"
   }
 }

@@ -23,6 +23,24 @@ If you just want to copy YAML, jump to the [GitHub Actions](./github-actions.md)
 > runtime behavior accurately; only the file paths cited for `cache.ts` and `scheduler.ts` moved.
 > See [`docs/provider-sync.md`](provider-sync.md) for the extracted package itself.
 
+> **OpenCode v2.** The two v1 hooks described below are now `ctx.provider.transform` (registration,
+> model merge, bearer propagation — synchronous; the engine build and warmup run in a background
+> queue that calls `ctx.provider.reload()`), `ctx.session.hook("model.request")` (replaces
+> `chat.headers`) and `ctx.session.hook("http.response")` (the Responses-SSE repair, replacing the
+> `options.fetch` wrapper). Servers come from `ctx.options.servers`; the per-provider block is
+> `settings.oauth2`. Token handling, the cache and all five auth flows are unchanged
+> ([ADR-0020](adr/0020-oauth2-integration-domain.md)). Where the text below says `config`,
+> `chat.headers`, `options.*` or `pluginConfig`, read the v2 equivalent; the step-by-step behaviour is
+> otherwise accurate.
+>
+> **Behaviour changes in v2.** (1) Invalid user config (bad `redirectPort`, unknown `authFlow`,
+> non-boolean `responseApi`) no longer rejects plugin load: the plugin logs `oauth2_config_invalid`
+> at `error` and manages no providers, so a typo yields a *missing provider* rather than a loud
+> failure. Search the host log for `oauth2_config_invalid`. (2) Startup no longer blocks on warmup:
+> the runtime builds in the background and `provider.reload()` fills in models, so the first login
+> prompt appears after the UI is up. `options.{cacheNamespace,httpTimeoutMs,tokenExpirySkewMs}`
+> configure the engine as `pluginConfig.oauth2ModelSync` did.
+
 ## The two hooks
 
 The plugin registers exactly two OpenCode hooks: `config` (plugin load) and `chat.headers` (per request).
@@ -37,6 +55,8 @@ Runs once when OpenCode boots the plugin. Source: [`packages/opencode-oauth2/src
 4. **Warmup** iterates servers, attempts `syncServer(id, { interactive: <TTY-detected> })`, and starts a per-server scheduler (`syncIntervalMinutes`, default 60).
 5. **Merge discovered models** into each provider's `models` map. If a server has no cached models yet (cold start, non-interactive warmup, refresh-token expired), it stays empty in OpenCode — the user sees no models for that provider until a chat request triggers on-demand auth.
 6. **Propagate the bearer.** For each managed provider, stamp `options.headers.Authorization = "<tokenType> <accessToken>"` — unless the user already set an `Authorization` header (case-insensitive), which always wins. The token comes from a **refresh-only ensure** (`ensureAccessToken(id, { interactive: false })`): a valid warmed-up token is returned as-is, a near-expiry one is transparently refreshed, and anything that would need a fresh browser / device-code prompt is skipped (`oauth2_bearer_propagation_skipped_no_token`) rather than blocking startup on a second login. This makes the token visible to *subsequent* `config` hooks, most notably [`@vymalo/opencode-models-info`](./models-info.md) fetching an OAuth2-protected `meta.modelsInfoUrl`. It's the only coupling point between the two plugins, and it's one-directional and via the shared config object — neither plugin imports the other. A stale value here is harmless: `chat.headers` (below) overwrites per-request with a freshly-ensured token, so the inference call is never affected. Emits `oauth2_bearer_propagated_to_provider_headers` (or `oauth2_bearer_propagation_skipped_user_set` / `..._skipped_no_token`).
+
+   > **v2 note.** Under the OpenCode v2 API this step is split in two because transform callbacks must be synchronous: `resolveCachedBearer` (async, refresh-only, run beforehand) and `propagateCachedBearer` (sync, inside `ctx.provider.transform`), and the target is `Provider.Info.headers.Authorization` rather than `options.headers`. See [provider-sync.md → The `Authorization` handoff](provider-sync.md#the-authorization-handoff-to-models-info-v2-contract). The text above describes oauth2's current v1 behaviour until it is ported.
 
    > **Why refresh-only, not a raw cache read.** An earlier version stamped only if the *cached* token cleared a fixed 30s expiry skew. On a first interactive device-code login against a short-lived realm, the just-minted token could already be inside that window, so the header was never stamped and models-info fetched the metadata endpoint with no `Authorization` → HTTP 401 (`models_info_fetch_failed_no_cache`). Going through `ensureAccessToken` refreshes instead of giving up, so the downstream fetch reliably carries a usable token.
 

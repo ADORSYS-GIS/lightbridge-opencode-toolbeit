@@ -1,4 +1,5 @@
-import type { Hooks } from "@opencode-ai/plugin";
+import { Model, Provider } from "@opencode/plugin/effect";
+import type { ProviderEditor } from "@opencode/plugin/effect/provider";
 
 import type {
   Logger,
@@ -9,35 +10,54 @@ import type {
 import type { ProviderModelSyncEngine } from "./engine.js";
 
 /**
- * Host-config wiring helpers shared by any OpenCode plugin composing
- * `ProviderModelSyncEngine` (currently `@vymalo/opencode-oauth2`; a future
- * `@vymalo/opencode-lightbridge` gateway module is the second consumer).
+ * Provider-editor wiring helpers shared by any OpenCode v2 plugin composing
+ * `ProviderModelSyncEngine` (`@vymalo/opencode-oauth2`, and lightbridge's
+ * `register` module).
+ *
+ * v2 has no mutable global config object, so these helpers take the domain
+ * editor a `ctx.provider.transform(...)` callback receives. An editor is only
+ * valid *inside* that callback, which must be synchronous and cheap — so
+ * anything effectful (the bearer lookup) is split into an async half that runs
+ * beforehand and a sync half that applies the result.
  *
  * Deliberately NOT baked in here — each consumer supplies its own:
- * - the `pluginConfig.<key>` / `provider.options.<key>` config-key literals
- *   (oauth2's are `"oauth2ModelSync"` / `["oauth2", "oauth2ModelSync"]`);
- * - the Responses-API SSE repair hook (gateway-specific, injected via
- *   `createResponsesRepairFetch` — never imported here).
+ * - the `provider.settings.<key>` opt-in key literals
+ *   (oauth2's are `["oauth2", "oauth2ModelSync"]`);
+ * - plugin options, which arrive as the caller's `ctx.options` object.
+ *
+ * The Responses-API SSE repair is gone from this layer: v1 injected it as
+ * `provider.options.fetch`, and `Provider.Info` has no `fetch` field. A
+ * consumer that needs it hooks `session.hook("http.response")` itself.
  */
 
-const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible";
+// v2 names a provider's implementation with `Provider.Info.package`; AI-SDK
+// packages carry an `aisdk:` prefix (v1 used the bare npm name in `npm`).
+const AISDK_PREFIX = "aisdk:";
+const OPENAI_COMPATIBLE_PACKAGE = `${AISDK_PREFIX}@ai-sdk/openai-compatible`;
 // The native OpenAI provider. Since AI SDK v5 its default `languageModel()`
 // targets the Responses API (`/v1/responses`), where `@ai-sdk/openai-compatible`
 // only ever speaks Chat Completions (`/v1/chat/completions`). Opting a provider
-// into `responseApi: true` swaps the emitted `npm` to this package so OpenCode
+// into `responseApi: true` swaps the emitted `package` to this one so OpenCode
 // routes inference through the gateway's Responses endpoint instead.
-const OPENAI_RESPONSES_NPM = "@ai-sdk/openai";
+const OPENAI_RESPONSES_PACKAGE = `${AISDK_PREFIX}@ai-sdk/openai`;
 // Unlike `@ai-sdk/openai-compatible`, the native provider throws
 // "OpenAI API key is missing" at request construction when no `apiKey` is set.
-// The real bearer is injected per-request via `chat.headers` (which overwrites
-// Authorization before anything leaves the process), so this inert placeholder
-// only exists to satisfy that construction-time guard — it is never sent.
+// The real bearer is injected per-request by the consumer's `model.request`
+// hook (which overwrites Authorization before anything leaves the process), so
+// this inert placeholder only exists to satisfy that construction-time guard —
+// it is never sent.
 const RESPONSES_API_PLACEHOLDER_KEY = "oauth2-managed-bearer";
 
-export type OpenCodeConfig = Parameters<NonNullable<Hooks["config"]>>[0];
-export type OpenCodeProviderMap = NonNullable<OpenCodeConfig["provider"]>;
-export type OpenCodeProviderConfig = OpenCodeProviderMap[string];
-export type OpenCodeModelConfig = NonNullable<OpenCodeProviderConfig["models"]>[string];
+export type { ProviderEditor };
+/** The v2 provider shape (`Provider.Info`) the editor reads and writes. */
+export type ProviderInfo = Provider.Info;
+/** The v2 model shape (`Model.Info`) the editor reads and writes. */
+export type ModelInfo = Model.Info;
+
+/** Anything carrying a provider's open `settings` struct (e.g. a `Provider.Info`). */
+export interface HasProviderSettings {
+  readonly settings?: unknown;
+}
 
 export interface ProviderExtension {
   issuer: string;
@@ -191,80 +211,68 @@ function asStringMap(value: unknown): Record<string, string> | undefined {
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
-export function resolveProviderNpm(responseApi: boolean | undefined): string {
-  return responseApi ? OPENAI_RESPONSES_NPM : OPENAI_COMPATIBLE_NPM;
-}
-
-export interface ApplyResponsesApiOptionsHooks {
-  /**
-   * Injected Responses-API SSE repair fetch factory (gateway-specific — e.g.
-   * oauth2's `createResponsesRepairFetch`). Omit it for a consumer that has no
-   * such repair need; `responseApi: true` still swaps the provider npm and
-   * stamps the placeholder key, it just leaves `options.fetch` untouched.
-   */
-  createResponsesRepairFetch?: (delegate?: typeof fetch) => typeof fetch;
+/**
+ * The `Provider.Info.package` value for a managed provider. v1 returned a bare
+ * npm name for `provider.npm`; v2 keys the implementation off `package`, and
+ * AI-SDK packages take an `aisdk:` prefix.
+ */
+export function resolveProviderPackage(responseApi: boolean | undefined): string {
+  return responseApi ? OPENAI_RESPONSES_PACKAGE : OPENAI_COMPATIBLE_PACKAGE;
 }
 
 /**
- * When a provider opts into the Responses API, ensure its options carry an
+ * When a provider opts into the Responses API, ensure its `settings` carry an
  * `apiKey` so the native `@ai-sdk/openai` provider can be constructed. A
  * user-supplied key is left untouched; otherwise we stamp an inert placeholder
- * (the real bearer is injected per-request by `chat.headers`). A no-op for
- * Chat-Completions providers, which need no key.
+ * (the real bearer is injected per-request by the consumer's `model.request`
+ * hook). A no-op for Chat-Completions providers, which need no key.
+ *
+ * Field mapping from v1 `provider.options`: `apiKey` and `baseURL` live on
+ * `Provider.Info.settings` (an open struct handed to the provider package);
+ * `headers` moved to `Provider.Info.headers`; `fetch` has no v2 home at all.
  */
-export function applyResponsesApiOptions(
-  options: Record<string, unknown>,
+export function applyResponsesApiSettings(
+  settings: Record<string, unknown>,
   responseApi: boolean | undefined,
   providerId: string,
-  logger: Logger,
-  hooks: ApplyResponsesApiOptionsHooks = {}
+  logger: Logger
 ): Record<string, unknown> {
   if (!responseApi) {
     // If the same provider id appears in both config shapes and an earlier pass
     // stamped our placeholder for Responses mode, but Responses ultimately loses
     // (this shape omits the flag), don't leave the fake key on the resulting
     // Chat-Completions provider. Only ever scrub our own placeholder.
-    if (asString(options.apiKey) === RESPONSES_API_PLACEHOLDER_KEY) {
-      const cleaned = { ...options };
+    if (asString(settings.apiKey) === RESPONSES_API_PLACEHOLDER_KEY) {
+      const cleaned = { ...settings };
       delete cleaned.apiKey;
       return cleaned;
     }
-    return options;
+    return settings;
   }
 
   logger.debug("oauth2_provider_response_api_enabled", { providerId });
 
-  const next: Record<string, unknown> = { ...options };
+  const next: Record<string, unknown> = { ...settings };
 
   // The native @ai-sdk/openai provider throws at construction without an
-  // apiKey; stamp an inert placeholder only when the user hasn't set one. The
-  // real bearer is injected per-request by chat.headers, so it is never sent.
+  // apiKey; stamp an inert placeholder only when the user hasn't set one.
   if (!asString(next.apiKey)) {
     next.apiKey = RESPONSES_API_PLACEHOLDER_KEY;
-  }
-
-  if (hooks.createResponsesRepairFetch) {
-    // Repair the gateway's Responses SSE: some gateways (e.g. Envoy AI Gateway)
-    // omit `output_index` / `content_index`, which AI-SDK/OpenCode need to
-    // assemble message parts (absent → "text part <id> not found"). We compose
-    // with any pre-existing fetch so a later fetch-wrapping plugin (e.g.
-    // @vymalo/opencode-ratelimit) still wraps ours rather than clobbering it.
-    const delegate = typeof next.fetch === "function" ? (next.fetch as typeof fetch) : undefined;
-    next.fetch = hooks.createResponsesRepairFetch(delegate);
   }
 
   return next;
 }
 
-export function parsePluginConfigServers(
-  config: OpenCodeConfig,
-  logger: Logger,
-  options: { pluginConfigKey: string }
+/**
+ * Read the `servers` array out of a plugin's own options object (`ctx.options`).
+ * v1 read `config.pluginConfig.<key>.servers`; v2 has no `pluginConfig`, and a
+ * plugin's options already are its own scope, so no key is needed.
+ */
+export function parsePluginOptionsServers(
+  pluginOptions: Record<string, unknown> | undefined,
+  logger: Logger
 ): ProviderServerConfigInput[] {
-  const root = asRecord(config);
-  const pluginConfig = asRecord(root?.pluginConfig);
-  const scoped = asRecord(pluginConfig?.[options.pluginConfigKey]);
-  const servers = scoped?.servers;
+  const servers = asRecord(pluginOptions)?.servers;
 
   if (!Array.isArray(servers)) {
     return [];
@@ -297,7 +305,7 @@ export function parsePluginConfigServers(
         ? entry.syncIntervalMinutes
         : undefined;
 
-    const sourceLabel = `pluginConfig.${options.pluginConfigKey}.servers[${index}] (id=${id})`;
+    const sourceLabel = `options.servers[${index}] (id=${id})`;
 
     parsed.push({
       id,
@@ -325,19 +333,26 @@ export function parsePluginConfigServers(
   return parsed;
 }
 
+/**
+ * Parse a provider's per-provider OAuth opt-in out of `provider.settings`
+ * (v1: `provider.options`). The first key in `settingsKeys` that holds an
+ * object wins.
+ */
 export function parseOAuthExtension(
-  provider: OpenCodeProviderConfig,
-  options: { optionKeys: readonly string[] }
+  provider: HasProviderSettings,
+  options: { settingsKeys: readonly string[] }
 ): ProviderExtension | undefined {
-  const providerOptions = asRecord(provider.options);
-  if (!providerOptions) {
+  const providerSettings = asRecord(provider.settings);
+  if (!providerSettings) {
     return undefined;
   }
 
   let raw: Record<string, unknown> | undefined;
-  for (const key of options.optionKeys) {
-    raw = asRecord(providerOptions[key]);
+  let matchedKey = "oauth2";
+  for (const key of options.settingsKeys) {
+    raw = asRecord(providerSettings[key]);
     if (raw) {
+      matchedKey = key;
       break;
     }
   }
@@ -346,6 +361,7 @@ export function parseOAuthExtension(
     return undefined;
   }
 
+  const source = `provider.settings.${matchedKey}`;
   const issuer = asString(raw.issuer);
   const clientId = asString(raw.clientId);
   const scopes = asStringArray(raw.scopes);
@@ -364,7 +380,7 @@ export function parseOAuthExtension(
   return {
     issuer,
     clientId,
-    clientSecret: asClientSecret(raw.clientSecret, "provider.options.oauth2"),
+    clientSecret: asClientSecret(raw.clientSecret, source),
     scopes,
     syncIntervalMinutes,
     nameOverrides: asStringMap(raw.nameOverrides),
@@ -372,74 +388,121 @@ export function parseOAuthExtension(
     tokenEndpoint: asString(raw.tokenEndpoint),
     deviceAuthorizationEndpoint: asString(raw.deviceAuthorizationEndpoint),
     jwksUri: asString(raw.jwksUri),
-    redirectPort: asRedirectPort(raw.redirectPort, "provider.options.oauth2"),
-    authFlow: asAuthFlow(raw.authFlow, "provider.options.oauth2"),
-    pkce: asBoolean(raw.pkce, "provider.options.oauth2.pkce"),
+    redirectPort: asRedirectPort(raw.redirectPort, source),
+    authFlow: asAuthFlow(raw.authFlow, source),
+    pkce: asBoolean(raw.pkce, `${source}.pkce`),
     // Deep validation of subjectTokenSource happens in each consumer's own
     // config module — this layer just passes the raw value through so error
     // messages reference the canonical config path.
     subjectTokenSource: raw.subjectTokenSource as SubjectTokenSource | undefined,
     tokenExchangeAudience: asString(raw.tokenExchangeAudience),
-    responseApi: asBoolean(raw.responseApi, "provider.options.oauth2.responseApi")
+    responseApi: asBoolean(raw.responseApi, `${source}.responseApi`)
   };
 }
 
-export interface CollectManagedProvidersOptions extends ApplyResponsesApiOptionsHooks {
-  pluginConfigKey: string;
-  optionKeys: readonly string[];
+export interface CollectManagedProvidersOptions {
+  /** `provider.settings.<key>` opt-in keys, first match wins (oauth2: `["oauth2", "oauth2ModelSync"]`). */
+  settingsKeys: readonly string[];
 }
 
+/**
+ * Create or update one managed provider on the editor. A provider that does
+ * not exist yet is added with `activation: "enabled"` (the gateway's bearer
+ * is not a connection the host knows about, so `"auto"` could leave it
+ * inactive); an existing one keeps its activation, id and other fields.
+ */
+function upsertManagedProvider(
+  editor: ProviderEditor,
+  providerId: string,
+  next: { name: string; package: string; settings: Record<string, unknown> }
+): void {
+  if (!editor.get(providerId)) {
+    editor.add({
+      info: {
+        id: Provider.ID.make(providerId),
+        name: next.name,
+        activation: "enabled",
+        package: next.package,
+        settings: next.settings
+      },
+      models: []
+    });
+    return;
+  }
+
+  editor.update(providerId, (provider) => {
+    provider.package = next.package;
+    provider.name = next.name;
+    provider.settings = next.settings as typeof provider.settings;
+  });
+}
+
+/**
+ * Materialize every managed provider on the editor and return the validated
+ * server list for `ProviderModelSyncEngine`. Two sources, as in v1:
+ *
+ * 1. `pluginOptions.servers` (the plugin's own `ctx.options`) — each entry is
+ *    added to, or merged onto, the editor;
+ * 2. any provider already on the editor carrying a `settings.<key>` OAuth
+ *    opt-in — which wins on a duplicate id (it runs second).
+ *
+ * Must be called inside a `ctx.provider.transform` callback. Idempotent, so
+ * it is safe across `provider.reload()`.
+ */
 export function collectManagedProviders(
-  config: OpenCodeConfig,
+  editor: ProviderEditor,
+  pluginOptions: Record<string, unknown> | undefined,
   logger: Logger,
   options: CollectManagedProvidersOptions
 ): ManagedProviders {
-  const providers = (config.provider ??= {});
   const byId = new Map<string, ProviderServerConfigInput>();
 
-  for (const server of parsePluginConfigServers(config, logger, options)) {
-    const providerConfig = (providers[server.id] ??= {});
-    const providerOptions = asRecord(providerConfig.options) ?? {};
+  for (const server of parsePluginOptionsServers(pluginOptions, logger)) {
+    const existing = editor.get(server.id)?.provider;
+    // `Provider.Info.name` is required, so a provider declared without a name
+    // reads back as its own id — treat that as "unset" and let the server's win.
+    const existingName = existing && existing.name !== server.id ? existing.name : undefined;
+    const name = existingName ?? server.name ?? server.id;
 
-    providerConfig.npm = resolveProviderNpm(server.responseApi);
-    providerConfig.name = asString(providerConfig.name) ?? server.name ?? server.id;
-    providerConfig.options = applyResponsesApiOptions(
-      { ...providerOptions, baseURL: server.baseURL },
-      server.responseApi,
-      server.id,
-      logger,
-      options
-    );
-
-    byId.set(server.id, {
-      ...server,
-      name: providerConfig.name ?? server.name ?? server.id
+    upsertManagedProvider(editor, server.id, {
+      name,
+      package: resolveProviderPackage(server.responseApi),
+      settings: applyResponsesApiSettings(
+        { ...(asRecord(existing?.settings) ?? {}), baseURL: server.baseURL },
+        server.responseApi,
+        server.id,
+        logger
+      )
     });
+
+    byId.set(server.id, { ...server, name });
   }
 
-  for (const [providerId, providerConfig] of Object.entries(providers)) {
-    const extension = parseOAuthExtension(providerConfig, options);
+  for (const { provider } of editor.list()) {
+    const extension = parseOAuthExtension(provider, options);
     if (!extension) {
       continue;
     }
 
-    const providerOptions = asRecord(providerConfig.options) ?? {};
-    const baseURL = asString(providerOptions.baseURL);
+    const providerId: string = provider.id;
+    const providerSettings = asRecord(provider.settings) ?? {};
+    const baseURL = asString(providerSettings.baseURL);
     if (!baseURL) {
       logger.warn("provider_skipped_missing_baseurl", { providerId });
       continue;
     }
 
-    const providerName = asString(providerConfig.name) ?? providerId;
-    providerConfig.npm = resolveProviderNpm(extension.responseApi);
-    providerConfig.name = providerName;
-    providerConfig.options = applyResponsesApiOptions(
-      { ...providerOptions, baseURL },
-      extension.responseApi,
-      providerId,
-      logger,
-      options
-    );
+    const providerName = asString(provider.name) ?? providerId;
+    upsertManagedProvider(editor, providerId, {
+      name: providerName,
+      package: resolveProviderPackage(extension.responseApi),
+      settings: applyResponsesApiSettings(
+        { ...providerSettings, baseURL },
+        extension.responseApi,
+        providerId,
+        logger
+      )
+    });
 
     byId.set(providerId, {
       id: providerId,
@@ -472,50 +535,91 @@ export function runtimeSignature(config: { servers: Array<{ id: string }> }): st
   return JSON.stringify(sorted);
 }
 
-export function mergeDiscoveredModels(
-  providerConfig: OpenCodeProviderConfig,
-  models: Array<{ id: string; displayName: string }>
-): void {
-  const existingModels = (providerConfig.models ?? {}) as Record<string, OpenCodeModelConfig>;
-  const merged: Record<string, OpenCodeModelConfig> = { ...existingModels };
-
-  for (const model of models) {
-    const existingModel = existingModels[model.id] ?? {};
-    merged[model.id] = {
-      ...existingModel,
-      id: model.id,
-      name: model.displayName
-    };
-  }
-
-  providerConfig.models = merged;
+/**
+ * A discovered model: only `id`/`modelID`/`providerID`/`name` are real. `Model.Info`
+ * requires every other field, so they are filled with SENTINELS that mean
+ * "unknown" and that a later enrichment pass (models-info) can recognise:
+ *
+ * - `limit`: `{ context: 0, output: 0 }` (what v1's host backfilled for an absent `limit`)
+ * - `cost`: `[]`
+ * - `capabilities`: `{ tools: false, input: [], output: [] }` (models-info's mapper only
+ *   ever sets `tools` to `true`, so `false` is "unknown", never "known false")
+ * - `time.released: 0`, `status: "active"`, `enabled: true`, `variants: []`
+ *
+ * Unlike `Model.Info.default(...)` (200k context, text+image), none of these can
+ * be mistaken for real data. Whether the host copes with empty modalities / a
+ * zero limit is unverified; v1 relied on the same zero `limit` backfill.
+ */
+export function discoveredModelPlaceholder(
+  providerId: string,
+  id: string,
+  name: string
+): ModelInfo {
+  return {
+    ...Model.Info.default(Provider.ID.make(providerId), Model.ID.make(id)),
+    name,
+    capabilities: { tools: false, input: [], output: [] },
+    limit: { context: 0, output: 0 }
+  };
 }
 
-export async function propagateCachedBearer(
-  providerConfig: OpenCodeProviderConfig,
+/**
+ * Merge discovered models into a provider on the editor. Existing models are
+ * kept as-is (a user's overrides survive) except that a model whose id was
+ * discovered takes the discovered display `name`; ids not yet on the provider
+ * are added as {@link discoveredModelPlaceholder}s carrying that name.
+ *
+ * `ProviderEditor.models.update` can only edit an existing model, and `set`
+ * replaces the provider's whole model list, so the union is built here and
+ * written with one `set`. A provider the editor does not know is a no-op.
+ *
+ * Must be called inside a `ctx.provider.transform` callback.
+ */
+export function mergeDiscoveredModels(
+  editor: ProviderEditor,
   providerId: string,
-  runtime: ProviderModelSyncEngine,
-  logger: Logger
-): Promise<void> {
-  const options = (providerConfig.options ??= {} as NonNullable<OpenCodeProviderConfig["options"]>);
-  const headers = ((options as { headers?: Record<string, string> }).headers ??= {});
-  // Case-insensitive scan so a user-set `authorization:` lowercase entry
-  // also wins — HTTP header names are case-insensitive but most plugins use
-  // PascalCase.
-  const hasUserAuth = Object.keys(headers).some((k) => k.toLowerCase() === "authorization");
-  if (hasUserAuth) {
-    logger.debug("oauth2_bearer_propagation_skipped_user_set", { providerId });
+  models: Array<{ id: string; displayName: string }>
+): void {
+  const record = editor.get(providerId);
+  if (!record) {
     return;
   }
 
-  // Refresh-only ensure: returns the warmed-up token, transparently refreshing
-  // one that's near expiry, and throws rather than opening a second browser /
-  // device-code prompt if a fresh login would be required. This is stricter
-  // than reading the raw cache (the previous behavior) — a token minted moments
-  // ago for a short-lived realm no longer fails a fixed expiry-skew gate, which
-  // is exactly the case that left `@vymalo/opencode-models-info` fetching an
-  // OAuth2-protected `meta.modelsInfoUrl` without a bearer (HTTP 401). A stale
-  // value here is still harmless: `chat.headers` overwrites per request.
+  const names = new Map(models.map((model) => [model.id, model.displayName]));
+  const merged: ModelInfo[] = [];
+
+  for (const [key, existing] of record.models) {
+    const name = names.get(key);
+    merged.push(name === undefined ? existing : { ...existing, name });
+    names.delete(key);
+  }
+
+  for (const [id, name] of names) {
+    merged.push(discoveredModelPlaceholder(providerId, id, name));
+  }
+
+  editor.models.set(providerId, merged);
+}
+
+/**
+ * ASYNC half of the bearer handoff to `@vymalo/opencode-models-info`: resolve
+ * the `Authorization` header value for a managed provider, or `undefined`.
+ * Run it BEFORE registering/reloading the transform — transform callbacks must
+ * stay synchronous, so the result is cached by the caller and applied with
+ * {@link propagateCachedBearer}.
+ *
+ * Uses a refresh-only ensure: returns the warmed-up token, transparently
+ * refreshing one that's near expiry, and throws rather than opening a second
+ * browser / device-code prompt if a fresh login would be required. A token
+ * minted moments ago for a short-lived realm therefore doesn't fail a fixed
+ * expiry-skew gate. A stale value is harmless for inference: the consumer's
+ * `model.request` hook overwrites Authorization per request.
+ */
+export async function resolveCachedBearer(
+  providerId: string,
+  runtime: ProviderModelSyncEngine,
+  logger: Logger
+): Promise<string | undefined> {
   logger.trace("oauth2_bearer_propagation_start", { providerId });
   let token: TokenSet;
   try {
@@ -525,16 +629,64 @@ export async function propagateCachedBearer(
       providerId,
       error: error instanceof Error ? error.message : String(error)
     });
-    return;
+    return undefined;
   }
 
   if (!token.accessToken) {
     // ensureAccessToken resolved but with no usable token — surface it so a
     // downstream 401 (e.g. models-info) isn't a silent mystery.
     logger.debug("oauth2_bearer_propagation_skipped_empty_token", { providerId });
+    return undefined;
+  }
+
+  return `${token.tokenType || "Bearer"} ${token.accessToken}`;
+}
+
+/**
+ * SYNC half of the bearer handoff: stamp `authorization` onto
+ * `Provider.Info.headers.Authorization` so a later transform/consumer
+ * (models-info fetching an OAuth-protected `modelsInfoUrl`) can reuse it.
+ * Must be called inside a `ctx.provider.transform` callback.
+ *
+ * A user-set `Authorization` header (matched case-insensitively — header names
+ * are case-insensitive but most config uses PascalCase) always wins and is
+ * never overwritten. To tell the user's header from one this plugin stamped on
+ * an earlier pass, pass the same `stamped` map every call: it records the last
+ * value written per provider, and a header equal to it is ours to refresh.
+ * DEFENSIVE: the published types do not say whether the host gives each
+ * transform pass a fresh editor or carries state across passes (unverified), so
+ * this keeps the refresh working whether or not the host hands each transform
+ * pass a fresh editor.
+ */
+export function propagateCachedBearer(
+  editor: ProviderEditor,
+  providerId: string,
+  authorization: string | undefined,
+  logger: Logger,
+  stamped?: Map<string, string>
+): void {
+  if (!authorization) {
     return;
   }
 
-  headers.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
+  const record = editor.get(providerId);
+  if (!record) {
+    return;
+  }
+
+  const headers = record.provider.headers ?? {};
+  const existingKey = Object.keys(headers).find((key) => key.toLowerCase() === "authorization");
+  if (existingKey !== undefined && headers[existingKey] !== stamped?.get(providerId)) {
+    logger.debug("oauth2_bearer_propagation_skipped_user_set", { providerId });
+    return;
+  }
+
+  editor.update(providerId, (provider) => {
+    provider.headers = {
+      ...(provider.headers ?? {}),
+      [existingKey ?? "Authorization"]: authorization
+    };
+  });
+  stamped?.set(providerId, authorization);
   logger.debug("oauth2_bearer_propagated_to_provider_headers", { providerId });
 }

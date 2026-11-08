@@ -31,29 +31,35 @@ npm install @vymalo/opencode-lightbridge
 ```jsonc
 // opencode.json
 {
-  "plugin": [
-    ["@vymalo/opencode-lightbridge", {
-      "auth": {
-        "id": "lightbridge",
-        "issuer": "https://authz.example.com/realms/lightbridge",
-        "clientId": "opencode-cli",
-        "scopes": ["openid", "offline_access"],
-        "authFlow": "device_code"
-      },
-      "gateway": {
-        "providers": ["gateway"],
-        "exchange": false
-      },
-      "otel": {
-        "endpoint": "http://localhost:4318"
-      },
-      "register": {
-        "baseURL": "https://gateway.example.com/v1"
+  "plugins": [
+    {
+      "package": "@vymalo/opencode-lightbridge",
+      "options": {
+        "auth": {
+          "id": "lightbridge",
+          "issuer": "https://authz.example.com/realms/lightbridge",
+          "clientId": "opencode-cli",
+          "scopes": ["openid", "offline_access"],
+          "authFlow": "device_code"
+        },
+        "gateway": {
+          "providers": ["gateway"],
+          "exchange": false
+        },
+        "otel": {
+          "endpoint": "http://localhost:4318"
+        },
+        "register": {
+          "baseURL": "https://gateway.example.com/v1"
+        }
       }
-    }]
+    }
   ]
 }
 ```
+
+If you also run `@vymalo/opencode-oauth2`, list it **before** lightbridge: lightbridge detects an
+oauth2-managed provider id from the `settings.oauth2` marker oauth2 stamps on the provider record.
 
 - **`auth`** (required) — the one IdP login, an `AuthServerConfigInput` (same shape as
   `opencode-oauth2`/`opencode-repo-auth`'s per-provider auth block). `auth.id` also doubles as the
@@ -106,3 +112,37 @@ for the full reasoning.
 ## License
 
 MIT
+
+## Migrating from v1
+
+`0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See
+[ADR-0019](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/adr/0019-opencode-v2-cutover.md)
+for why there is no dual-support build.
+
+| v1 | v2 |
+| --- | --- |
+| `"plugin": [["@vymalo/opencode-lightbridge", { ... }]]` | `"plugins": [{ "package": "@vymalo/opencode-lightbridge", "options": { ... } }]` |
+| `config.provider[<auth.id>]` registered by `register` | provider editor: `package: "aisdk:@ai-sdk/openai-compatible"`, `settings.baseURL` |
+| `chat.headers` (gateway bearer) | `session.hook("model.request")` |
+| OTEL observers (`event`, `chat.message`, `tool.execute.*`, …) | `event.subscribe` + `prompt` / `context` / `tool` / `permission` hooks |
+| trace propagation via `options.fetch` | `session.hook("http.request")` |
+| host `config.logLevel` | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
+| oauth2 collision via `pluginConfig` / `options.oauth2` | `settings.oauth2` marker on the provider record |
+
+The `auth`, `gateway`, `otel` and `register` option blocks are unchanged, as is every event name
+except where listed below.
+
+### Behaviour changes in v2
+
+- **Gateway failures now refuse the request.** A failed token resolution used to leave the request
+  to go out bearer-less (the gateway 401'd); it now dies the hook so a stale stamped `Authorization`
+  cannot ride along (`lightbridge_gateway_no_bearer`, now `warn`).
+- **List oauth2 before lightbridge** so the oauth2 collision marker is visible on the first pass.
+- **`session.diff`, `todo.updated` and `command.executed` are no longer observed** (no v2 mapping):
+  the lines-of-code metric and `opencode.file_edited` event stop being produced.
+- `experimental.compaction.autocontinue` is gone with no v2 equivalent.
+- `./lib` drops `oauth2ManagedProviderIds` and `OpenCodeConfigLike`; `hasOAuth2Conflict` now takes
+  a provider editor.
+
+The full list is in
+[`docs/lightbridge.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/lightbridge.md#behaviour-changes-in-v2).

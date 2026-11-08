@@ -2,369 +2,392 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { FileCacheStore } from "../src/cache.js";
-import { createOpencodeOauth2Plugin, fromOpenCodeLogLevel } from "../src/opencode.js";
-import { createSilentLogger } from "./helpers.js";
+import { OpencodeOauth2Plugin, PLUGIN_ID, createOpencodeOauth2Plugin } from "../src/opencode.js";
+import {
+  type Harness,
+  OAUTH_BLOCK,
+  recordingLogger,
+  requestEvent,
+  seedCache,
+  startPlugin
+} from "./harness.js";
 
-async function createHooks(cacheDir: string) {
-  const plugin = createOpencodeOauth2Plugin({
-    cacheDir,
-    logger: createSilentLogger(),
-    fetchImpl: async () => {
-      throw new Error("fetch is not expected in these hook tests");
-    }
-  });
+const open: Harness[] = [];
 
-  return plugin({
-    client: {
-      app: {
-        log: async () => ({ data: true })
-      }
-    },
-    project: { id: "project-1" },
-    directory: process.cwd(),
-    worktree: process.cwd(),
-    serverUrl: new URL("http://127.0.0.1:3000"),
-    $: {} as never
-  } as never);
+function settingsOf(
+  record: { provider: Record<string, unknown> } | undefined
+): Record<string, unknown> {
+  return (record?.provider.settings ?? {}) as Record<string, unknown>;
 }
 
-describe("OpenCode plugin hooks", () => {
-  it("configures provider from provider.options extension and injects auth header", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-cache-"));
-    const cache = new FileCacheStore(cacheDir);
-    await cache.ensureReady();
+async function start(...args: Parameters<typeof startPlugin>): Promise<Harness> {
+  const harness = await startPlugin(...args);
+  open.push(harness);
+  return harness;
+}
 
-    await cache.saveServerState({
-      serverId: "example-ai",
-      updatedAt: Date.now(),
-      lastSyncAt: Date.now(),
-      token: {
-        accessToken: "cached-access",
-        tokenType: "Bearer",
-        refreshToken: "cached-refresh",
-        expiresAt: Date.now() + 60_000
-      },
-      rawModels: [{ id: "glm-5" }],
-      models: [{ id: "glm-5", displayName: "GLM 5" }]
-    });
+async function freshCacheDir(prefix: string): Promise<string> {
+  return mkdtemp(join(tmpdir(), prefix));
+}
 
-    const hooks = await createHooks(cacheDir);
+afterEach(async () => {
+  await Promise.all(open.splice(0).map((harness) => harness.close()));
+});
 
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          name: "Example AI",
-          options: {
-            baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid", "offline_access"]
-            }
-          }
-        }
-      }
-    };
+const declared = (settings: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => [
+  {
+    id: "example-ai",
+    name: "Example AI",
+    settings: { baseURL: "https://api.example.com/v1", oauth2: { ...OAUTH_BLOCK, ...settings } },
+    ...extra
+  }
+];
 
-    await hooks.config?.(config as never);
-
-    const providerConfig = (config.provider as Record<string, Record<string, unknown>>)[
-      "example-ai"
-    ];
-    expect(providerConfig.npm).toBe("@ai-sdk/openai-compatible");
-
-    const models = providerConfig.models as Record<string, Record<string, unknown>>;
-    expect(models["glm-5"]?.name).toBe("GLM 5");
-
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.(
-      {
-        sessionID: "session-1",
-        agent: "general",
-        model: { id: "glm-5", providerID: "example-ai" },
-        provider: {
-          source: "config",
-          info: { id: "example-ai" },
-          options: {}
-        },
-        message: { id: "message-1" }
-      } as never,
-      output
-    );
-
-    expect(output.headers.Authorization).toBe("Bearer cached-access");
+describe("plugin identity", () => {
+  it("has a stable id", () => {
+    expect(PLUGIN_ID).toBe("vymalo.oauth2");
+    expect(createOpencodeOauth2Plugin().id).toBe(PLUGIN_ID);
+    expect(OpencodeOauth2Plugin.id).toBe(PLUGIN_ID);
   });
 
-  it("uses model.providerID when provider context is not populated by the host", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-providerid-"));
-    const cache = new FileCacheStore(cacheDir);
-    await cache.ensureReady();
+  it("registers a provider transform and the model.request / http.response hooks", async () => {
+    const harness = await start({ sources: [] });
+    expect([...harness.hooks.keys()].sort()).toEqual(["http.response", "model.request"]);
+  });
+});
 
-    await cache.saveServerState({
-      serverId: "example-ai",
-      updatedAt: Date.now(),
-      lastSyncAt: Date.now(),
-      token: {
-        accessToken: "cached-access",
-        tokenType: "Bearer",
-        refreshToken: "cached-refresh",
-        expiresAt: Date.now() + 60_000
-      },
-      rawModels: [{ id: "glm-5" }],
-      models: [{ id: "glm-5", displayName: "GLM 5" }]
-    });
+describe("provider transform + model.request", () => {
+  it("configures a settings.oauth2 provider, merges models and injects the bearer", async () => {
+    const cacheDir = await freshCacheDir("opencode-v2-settings-");
+    await seedCache(cacheDir);
+    const harness = await start({ cacheDir, sources: declared() });
 
-    const hooks = await createHooks(cacheDir);
+    harness.runTransform();
+    await harness.settle();
 
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          name: "Example AI",
-          options: {
-            baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid", "offline_access"]
-            }
-          }
-        }
-      }
-    };
+    const record = harness.provider("example-ai");
+    expect(record?.provider.package).toBe("aisdk:@ai-sdk/openai-compatible");
+    expect(record?.models.get("glm-5")?.name).toBe("GLM 5");
+    expect(harness.reloads()).toBe(1);
 
-    await hooks.config?.(config as never);
-
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.(
-      {
-        sessionID: "session-1",
-        agent: "general",
-        model: { id: "glm-5", providerID: "example-ai" },
-        message: { id: "message-1" }
-      } as never,
-      output
-    );
-
-    expect(output.headers.Authorization).toBe("Bearer cached-access");
+    const event = requestEvent("example-ai");
+    await harness.call("model.request", event);
+    expect(event.headers.Authorization).toBe("Bearer cached-access");
   });
 
-  it("propagates the cached bearer into provider.options.headers for downstream config-time consumers", async () => {
-    // The composition contract for @vymalo/opencode-models-info: by the time
-    // a later `config` hook walks `config.provider[*]`, every managed
-    // provider already carries a usable `Authorization` header so an
-    // OAuth2-protected `meta.modelsInfoUrl` fetch inherits the token without
-    // depending on this plugin.
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-propagate-"));
-    const cache = new FileCacheStore(cacheDir);
-    await cache.ensureReady();
+  it("propagates the cached bearer onto Provider.Info.headers for downstream consumers", async () => {
+    // The composition contract for @vymalo/opencode-models-info: once the
+    // managed provider has been reloaded it carries a usable Authorization
+    // header, so an OAuth2-protected metadata fetch inherits the token.
+    const cacheDir = await freshCacheDir("opencode-v2-propagate-");
+    await seedCache(cacheDir);
+    const harness = await start({ cacheDir, sources: declared() });
 
-    await cache.saveServerState({
-      serverId: "example-ai",
-      updatedAt: Date.now(),
-      lastSyncAt: Date.now(),
-      token: {
-        accessToken: "cached-access",
-        tokenType: "Bearer",
-        refreshToken: "cached-refresh",
-        expiresAt: Date.now() + 60_000
-      },
-      rawModels: [{ id: "glm-5" }],
-      models: [{ id: "glm-5", displayName: "GLM 5" }]
-    });
+    harness.runTransform();
+    // Before the background build there is no token to propagate.
+    expect(harness.provider("example-ai")?.provider.headers).toBeUndefined();
+    await harness.settle();
 
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          options: {
-            baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid", "offline_access"]
-            }
-          }
-        }
-      }
-    };
-
-    await hooks.config?.(config as never);
-
-    const providerOptions = (config.provider as Record<string, Record<string, unknown>>)[
-      "example-ai"
-    ].options as Record<string, unknown>;
-    const headers = providerOptions.headers as Record<string, string> | undefined;
-    expect(headers?.Authorization).toBe("Bearer cached-access");
+    const headers = harness.provider("example-ai")?.provider.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer cached-access");
   });
 
   it("refreshes a near-expiry token during propagation instead of skipping it", async () => {
     // Regression guard: a token minted moments ago for a short-lived realm used
-    // to fail the fixed config-time expiry-skew gate and never get stamped,
-    // leaving @vymalo/opencode-models-info to fetch an OAuth2-protected
-    // `meta.modelsInfoUrl` with no Authorization (HTTP 401). Propagation now
-    // goes through a refresh-only ensure, so the header carries a *fresh* token.
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-refresh-"));
-    const cache = new FileCacheStore(cacheDir);
-    await cache.ensureReady();
+    // to fail the fixed expiry-skew gate and never get stamped, leaving
+    // models-info to fetch an OAuth2-protected endpoint with no Authorization.
+    // Propagation goes through a refresh-only ensure, so the header carries a
+    // *fresh* token.
+    const cacheDir = await freshCacheDir("opencode-v2-refresh-");
+    // Inside the OAuth client's 30s validity skew -> treated as expired.
+    await seedCache(cacheDir, { accessToken: "stale-access", expiresAt: Date.now() + 5_000 });
 
-    await cache.saveServerState({
-      serverId: "example-ai",
-      updatedAt: Date.now(),
-      lastSyncAt: Date.now(),
-      token: {
-        accessToken: "stale-access",
-        tokenType: "Bearer",
-        refreshToken: "cached-refresh",
-        // Inside the OAuth client's 30s validity skew → treated as expired.
-        expiresAt: Date.now() + 5_000
-      },
-      rawModels: [{ id: "glm-5" }],
-      models: [{ id: "glm-5", displayName: "GLM 5" }]
-    });
-
-    const plugin = createOpencodeOauth2Plugin({
+    const harness = await start({
       cacheDir,
-      logger: createSilentLogger(),
-      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
-        const body = new URLSearchParams(String(init?.body ?? ""));
-        if (String(input) === "https://auth.example.com/token") {
-          expect(body.get("grant_type")).toBe("refresh_token");
-          return new Response(
-            JSON.stringify({
-              access_token: "refreshed-access",
-              refresh_token: "refreshed-refresh",
-              token_type: "Bearer",
-              expires_in: 3600
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-          );
-        }
-        throw new Error(`unexpected fetch: ${String(input)}`);
-      }) as typeof fetch
+      sources: declared({
+        // Explicit endpoints so refresh skips OIDC discovery (no network).
+        authorizationEndpoint: "https://auth.example.com/authorize",
+        tokenEndpoint: "https://auth.example.com/token"
+      }),
+      factory: {
+        fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (String(input) === "https://auth.example.com/token") {
+            expect(new URLSearchParams(String(init?.body ?? "")).get("grant_type")).toBe(
+              "refresh_token"
+            );
+            return new Response(
+              JSON.stringify({
+                access_token: "refreshed-access",
+                refresh_token: "refreshed-refresh",
+                token_type: "Bearer",
+                expires_in: 3600
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          // Model discovery against the gateway: nothing to report.
+          return new Response(JSON.stringify({ data: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }) as typeof fetch
+      }
     });
 
-    const hooks = await plugin({
-      client: { app: { log: async () => ({ data: true }) } },
-      project: { id: "project-1" },
-      directory: process.cwd(),
-      worktree: process.cwd(),
-      serverUrl: new URL("http://127.0.0.1:3000"),
-      $: {} as never
-    } as never);
+    harness.runTransform();
+    await harness.settle();
 
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          options: {
-            baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid", "offline_access"],
-              // Explicit endpoints so refresh skips OIDC discovery (no network).
-              authorizationEndpoint: "https://auth.example.com/authorize",
-              tokenEndpoint: "https://auth.example.com/token"
-            }
-          }
-        }
-      }
-    };
-
-    await hooks.config?.(config as never);
-
-    const headers = (
-      (config.provider as Record<string, Record<string, unknown>>)["example-ai"].options as Record<
-        string,
-        unknown
-      >
-    ).headers as Record<string, string> | undefined;
-    expect(headers?.Authorization).toBe("Bearer refreshed-access");
+    const headers = harness.provider("example-ai")?.provider.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer refreshed-access");
   });
 
   it("does not overwrite a user-set Authorization header during propagation", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-userauth-"));
-    const cache = new FileCacheStore(cacheDir);
-    await cache.ensureReady();
-
-    await cache.saveServerState({
-      serverId: "example-ai",
-      updatedAt: Date.now(),
-      lastSyncAt: Date.now(),
-      token: {
-        accessToken: "cached-access",
-        tokenType: "Bearer",
-        refreshToken: "cached-refresh",
-        expiresAt: Date.now() + 60_000
-      },
-      rawModels: [{ id: "glm-5" }],
-      models: [{ id: "glm-5", displayName: "GLM 5" }]
+    const cacheDir = await freshCacheDir("opencode-v2-userauth-");
+    await seedCache(cacheDir);
+    const harness = await start({
+      cacheDir,
+      // Lowercase to also exercise the case-insensitive guard.
+      sources: declared({}, { headers: { authorization: "Bearer user-override" } })
     });
 
-    const hooks = await createHooks(cacheDir);
+    harness.runTransform();
+    await harness.settle();
 
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          options: {
-            baseURL: "https://api.example.com/v1",
-            // Lowercase to also exercise the case-insensitive guard.
-            headers: { authorization: "Bearer user-override" },
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid", "offline_access"]
-            }
-          }
-        }
-      }
-    };
-
-    await hooks.config?.(config as never);
-
-    const headers = (
-      (config.provider as Record<string, Record<string, unknown>>)["example-ai"].options as Record<
-        string,
-        unknown
-      >
-    ).headers as Record<string, string>;
+    const headers = harness.provider("example-ai")?.provider.headers as Record<string, string>;
     expect(headers.authorization).toBe("Bearer user-override");
     expect(headers.Authorization).toBeUndefined();
   });
 
-  it("rejects invalid redirectPort in provider.options.oauth2", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-badport-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          options: {
+  it("materializes providers from options.servers", async () => {
+    const cacheDir = await freshCacheDir("opencode-v2-options-");
+    const harness = await start({
+      cacheDir,
+      options: {
+        servers: [
+          {
+            id: "server-from-options",
+            name: "Server from options",
+            issuer: "https://auth.example.com",
             baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid", "offline_access"],
-              redirectPort: 70000
-            }
+            clientId: "opencode-client",
+            scopes: ["openid", "offline_access"]
           }
-        }
+        ]
       }
-    };
+    });
 
-    await expect(hooks.config?.(config as never)).rejects.toThrow(/redirectPort/);
+    harness.runTransform();
+    const record = harness.provider("server-from-options");
+    expect(record?.provider.package).toBe("aisdk:@ai-sdk/openai-compatible");
+    expect(record?.provider.name).toBe("Server from options");
+    expect(record?.provider.activation).toBe("enabled");
+    expect(settingsOf(record).baseURL).toBe("https://api.example.com/v1");
   });
 
-  it("rejects invalid redirectPort in pluginConfig.oauth2ModelSync.servers", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-badport-plugincfg-"));
-    const hooks = await createHooks(cacheDir);
+  it("leaves every managed provider self-describing for other plugins' guards", async () => {
+    const harness = await start({
+      sources: declared(),
+      options: {
+        servers: [
+          {
+            id: "from-options",
+            issuer: "https://auth.example.com",
+            baseURL: "https://api.example.com/v1",
+            clientId: "c",
+            scopes: ["openid"]
+          }
+        ]
+      }
+    });
+    harness.runTransform();
 
-    const config: Record<string, unknown> = {
-      pluginConfig: {
-        oauth2ModelSync: {
+    // Declared block survives untouched; options.servers gets a marker.
+    expect(settingsOf(harness.provider("example-ai")).oauth2).toMatchObject({
+      clientId: "opencode-client"
+    });
+    expect(settingsOf(harness.provider("from-options")).oauth2).toEqual({
+      managed: true,
+      source: "options.servers"
+    });
+  });
+
+  it("does not manage a provider without an oauth2 opt-in", async () => {
+    const harness = await start({
+      sources: [{ id: "plain", settings: { baseURL: "https://x.test/v1" } }]
+    });
+    harness.runTransform();
+    await harness.settle();
+
+    const event = requestEvent("plain");
+    await harness.call("model.request", event);
+    expect(event.headers.Authorization).toBeUndefined();
+    expect(harness.handle.runtime()).toBeUndefined();
+  });
+
+  it("parses clientSecret + device_code authFlow from settings.oauth2", async () => {
+    const harness = await start({
+      sources: declared({
+        clientSecret: "secret-from-provider",
+        authFlow: "device_code",
+        deviceAuthorizationEndpoint: "https://auth.example.com/device/authorize"
+      })
+    });
+    harness.runTransform();
+    expect(harness.provider("example-ai")?.provider.package).toBe(
+      "aisdk:@ai-sdk/openai-compatible"
+    );
+  });
+
+  it("parses clientSecret + device_code authFlow from options.servers", async () => {
+    const harness = await start({
+      options: {
+        servers: [
+          {
+            id: "server-secret",
+            issuer: "https://auth.example.com",
+            baseURL: "https://api.example.com/v1",
+            clientId: "opencode-client",
+            clientSecret: "secret-from-options",
+            scopes: ["openid"],
+            authFlow: "device_code",
+            deviceAuthorizationEndpoint: "https://auth.example.com/device/authorize"
+          }
+        ]
+      }
+    });
+    harness.runTransform();
+    expect(harness.provider("server-secret")?.provider.package).toBe(
+      "aisdk:@ai-sdk/openai-compatible"
+    );
+  });
+
+  it("accepts the plugin's own logLevel option", async () => {
+    const harness = await start({
+      options: {
+        logLevel: "DEBUG",
+        servers: [
+          {
+            id: "server-1",
+            issuer: "https://auth.example.com",
+            baseURL: "https://api.example.com/v1",
+            clientId: "opencode-client",
+            scopes: ["openid"]
+          }
+        ]
+      }
+    });
+    harness.runTransform();
+    expect(harness.provider("server-1")?.provider.package).toBe("aisdk:@ai-sdk/openai-compatible");
+  });
+
+  it("serves only one runtime across repeated transform passes", async () => {
+    const cacheDir = await freshCacheDir("opencode-v2-repeat-");
+    await seedCache(cacheDir);
+    const harness = await start({ cacheDir, sources: declared() });
+
+    harness.runTransform();
+    await harness.settle();
+    const runtime = harness.handle.runtime();
+    expect(runtime).toBeDefined();
+
+    harness.runTransform();
+    harness.runTransform();
+    await harness.settle();
+    expect(harness.handle.runtime()).toBe(runtime);
+    // Only the build's own reload — passes with an unchanged server set queue nothing.
+    expect(harness.reloads()).toBe(1);
+  });
+
+  it("rebuilds when the server set changes and stops managing a removed provider", async () => {
+    const cacheDir = await freshCacheDir("opencode-v2-rebuild-");
+    await seedCache(cacheDir);
+    const sources = declared();
+    const harness = await start({ cacheDir, sources });
+
+    harness.runTransform();
+    await harness.settle();
+    const first = harness.handle.runtime();
+
+    sources[0].settings = {
+      baseURL: "https://api.example.com/v1",
+      oauth2: { ...OAUTH_BLOCK, scopes: ["openid", "offline_access", "extra"] }
+    };
+    harness.runTransform();
+    await harness.settle();
+    const second = harness.handle.runtime();
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+
+    sources.length = 0;
+    harness.runTransform();
+    await harness.settle();
+    expect(harness.handle.runtime()).toBeUndefined();
+  });
+});
+
+describe("tuning options", () => {
+  it("passes cacheNamespace, httpTimeoutMs and tokenExpirySkewMs through to the engine", async () => {
+    const cacheDir = await freshCacheDir("opencode-v2-tuning-");
+    const harness = await start({
+      cacheDir,
+      sources: declared(),
+      options: { cacheNamespace: "custom-ns", httpTimeoutMs: 1234, tokenExpirySkewMs: 5678 }
+    });
+    harness.runTransform();
+    await harness.settle();
+
+    const config = (harness.handle.runtime() as unknown as { config: Record<string, unknown> })
+      .config;
+    expect(config).toMatchObject({
+      cacheNamespace: "custom-ns",
+      httpTimeoutMs: 1234,
+      tokenExpirySkewMs: 5678
+    });
+  });
+
+  it("keeps the defaults, including the shared cache namespace, when unset", async () => {
+    const harness = await start({ sources: declared() });
+    harness.runTransform();
+    await harness.settle();
+
+    const config = (harness.handle.runtime() as unknown as { config: Record<string, unknown> })
+      .config;
+    expect(config).toMatchObject({
+      cacheNamespace: "opencode-oauth2-model-sync",
+      httpTimeoutMs: 15000,
+      tokenExpirySkewMs: 30000
+    });
+  });
+
+  it("logs an invalid tokenExpirySkewMs as a failed build", async () => {
+    const logger = recordingLogger();
+    const harness = await start({
+      sources: declared(),
+      options: { tokenExpirySkewMs: -1 },
+      factory: { logger }
+    });
+    harness.runTransform();
+    await harness.settle();
+    expect(logger.error).toHaveBeenCalledWith(
+      "oauth2_runtime_build_failed",
+      expect.objectContaining({ error: expect.stringMatching(/tokenExpirySkewMs/) })
+    );
+  });
+});
+
+describe("invalid user config is reported, not thrown", () => {
+  const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+    [
+      "an out-of-range redirectPort in settings.oauth2",
+      { sources: declared({ redirectPort: 70000 }) },
+      /redirectPort/
+    ],
+    [
+      "a non-numeric redirectPort in options.servers",
+      {
+        options: {
           servers: [
             {
               id: "bad-port-server",
@@ -376,465 +399,216 @@ describe("OpenCode plugin hooks", () => {
             }
           ]
         }
-      }
-    };
-
-    await expect(hooks.config?.(config as never)).rejects.toThrow(/redirectPort/);
-  });
-
-  it("parses clientSecret + device_code authFlow from provider.options.oauth2", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-secret-provider-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          name: "Example AI",
-          options: {
-            baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              clientSecret: "secret-from-provider",
-              scopes: ["openid", "offline_access"],
-              authFlow: "device_code",
-              deviceAuthorizationEndpoint: "https://auth.example.com/device/authorize"
-            }
-          }
-        }
-      }
-    };
-
-    // Resolve should accept without throwing; the runtime is constructed and
-    // wired up from this config — but we don't actually call the chat hook
-    // here (which would attempt an OAuth flow), we just confirm parsing.
-    await hooks.config?.(config as never);
-
-    const providers = config.provider as Record<string, Record<string, unknown>>;
-    expect(providers["example-ai"]?.npm).toBe("@ai-sdk/openai-compatible");
-  });
-
-  it("parses clientSecret + device_code authFlow from pluginConfig.oauth2ModelSync.servers", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-secret-plugincfg-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      pluginConfig: {
-        oauth2ModelSync: {
-          servers: [
-            {
-              id: "server-secret",
-              issuer: "https://auth.example.com",
-              baseURL: "https://api.example.com/v1",
-              clientId: "opencode-client",
-              clientSecret: "secret-from-plugin-config",
-              scopes: ["openid"],
-              authFlow: "device_code",
-              deviceAuthorizationEndpoint: "https://auth.example.com/device/authorize"
-            }
-          ]
-        }
-      }
-    };
-
-    await hooks.config?.(config as never);
-
-    const providers = config.provider as Record<string, Record<string, unknown>>;
-    expect(providers["server-secret"]).toBeDefined();
-    expect(providers["server-secret"]?.npm).toBe("@ai-sdk/openai-compatible");
-  });
-
-  it("rejects unknown authFlow values from both config shapes", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-bad-authflow-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          options: {
-            baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid"],
-              authFlow: "implicit"
-            }
-          }
-        }
-      }
-    };
-
-    await expect(hooks.config?.(config as never)).rejects.toThrow(/authFlow/);
-  });
-
-  it("supports pluginConfig.oauth2ModelSync.servers and materializes provider entries", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-pluginconfig-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      pluginConfig: {
-        oauth2ModelSync: {
-          servers: [
-            {
-              id: "server-from-plugin-config",
-              name: "Server from plugin config",
-              issuer: "https://auth.example.com",
-              baseURL: "https://api.example.com/v1",
-              clientId: "opencode-client",
-              scopes: ["openid", "offline_access"]
-            }
-          ]
-        }
-      }
-    };
-
-    await hooks.config?.(config as never);
-
-    const providers = config.provider as Record<string, Record<string, unknown>>;
-    expect(providers["server-from-plugin-config"]).toBeDefined();
-    expect(providers["server-from-plugin-config"]?.npm).toBe("@ai-sdk/openai-compatible");
-
-    const options = providers["server-from-plugin-config"]?.options as Record<string, unknown>;
-    expect(options.baseURL).toBe("https://api.example.com/v1");
-  });
-
-  it("accepts an OpenCode host logLevel without requiring a plugin-specific override", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-host-loglevel-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      logLevel: "DEBUG",
-      pluginConfig: {
-        oauth2ModelSync: {
-          servers: [
-            {
-              id: "server-1",
-              issuer: "https://auth.example.com",
-              baseURL: "https://api.example.com/v1",
-              clientId: "opencode-client",
-              scopes: ["openid"]
-            }
-          ]
-        }
-      }
-    };
-
-    await expect(hooks.config?.(config as never)).resolves.not.toThrow();
-
-    const providers = config.provider as Record<string, Record<string, unknown>>;
-    expect(providers["server-1"]?.npm).toBe("@ai-sdk/openai-compatible");
-  });
-
-  it("routes a responseApi provider through @ai-sdk/openai while still injecting the real bearer", async () => {
-    // responseApi swaps the emitted npm to the native OpenAI provider (Responses
-    // API by default since AI SDK v5) and stamps an inert placeholder apiKey so
-    // its construction-time key guard passes. The real token is still injected
-    // per-request by chat.headers — the placeholder never leaves the process.
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-responses-provider-"));
-    const cache = new FileCacheStore(cacheDir);
-    await cache.ensureReady();
-
-    await cache.saveServerState({
-      serverId: "example-ai",
-      updatedAt: Date.now(),
-      lastSyncAt: Date.now(),
-      token: {
-        accessToken: "cached-access",
-        tokenType: "Bearer",
-        refreshToken: "cached-refresh",
-        expiresAt: Date.now() + 60_000
       },
-      rawModels: [{ id: "glm-5" }],
-      models: [{ id: "glm-5", displayName: "GLM 5" }]
+      /redirectPort/
+    ],
+    ["an unknown authFlow", { sources: declared({ authFlow: "implicit" }) }, /authFlow/],
+    ["a non-boolean responseApi", { sources: declared({ responseApi: "yes" }) }, /responseApi/]
+  ];
+
+  for (const [name, startOptions, pattern] of cases) {
+    it(`logs oauth2_config_invalid for ${name} and manages nothing`, async () => {
+      const logger = recordingLogger();
+      const harness = await start({
+        ...(startOptions as Parameters<typeof startPlugin>[0]),
+        factory: { logger }
+      });
+
+      expect(() => harness.runTransform()).not.toThrow();
+      await harness.settle();
+
+      expect(logger.error).toHaveBeenCalledWith(
+        "oauth2_config_invalid",
+        expect.objectContaining({ error: expect.stringMatching(pattern) })
+      );
+      expect(harness.handle.runtime()).toBeUndefined();
     });
+  }
+});
 
-    const hooks = await createHooks(cacheDir);
+describe("responseApi", () => {
+  it("routes a settings.oauth2 responseApi provider through @ai-sdk/openai and still injects the real bearer", async () => {
+    // responseApi swaps the emitted package to the native OpenAI provider
+    // (Responses API) and stamps an inert placeholder apiKey so its
+    // construction-time key guard passes. The real token is injected
+    // per-request by model.request — the placeholder never leaves the process.
+    const cacheDir = await freshCacheDir("opencode-v2-responses-");
+    await seedCache(cacheDir);
+    const harness = await start({ cacheDir, sources: declared({ responseApi: true }) });
 
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          options: {
+    harness.runTransform();
+    await harness.settle();
+
+    const record = harness.provider("example-ai");
+    expect(record?.provider.package).toBe("aisdk:@ai-sdk/openai");
+    const settings = record?.provider.settings as Record<string, unknown>;
+    expect(settings.apiKey).toBe("oauth2-managed-bearer");
+    expect(settings.baseURL).toBe("https://api.example.com/v1");
+
+    // The host may merge the placeholder key into the request as Authorization;
+    // the plugin must replace it, whatever the header's case.
+    const event = requestEvent("example-ai", { authorization: "Bearer oauth2-managed-bearer" });
+    await harness.call("model.request", event);
+    expect(event.headers.Authorization).toBe("Bearer cached-access");
+    expect(event.headers.authorization).toBeUndefined();
+  });
+
+  it("routes a responseApi server from options.servers through @ai-sdk/openai", async () => {
+    const harness = await start({
+      options: {
+        servers: [
+          {
+            id: "responses-server",
+            issuer: "https://auth.example.com",
             baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid", "offline_access"],
-              responseApi: true
-            }
+            clientId: "opencode-client",
+            scopes: ["openid"],
+            responseApi: true
           }
-        }
+        ]
       }
-    };
+    });
+    harness.runTransform();
 
-    await hooks.config?.(config as never);
-
-    const providerConfig = (config.provider as Record<string, Record<string, unknown>>)[
-      "example-ai"
-    ];
-    expect(providerConfig.npm).toBe("@ai-sdk/openai");
-
-    const options = providerConfig.options as Record<string, unknown>;
-    expect(options.apiKey).toBe("oauth2-managed-bearer");
-    expect(options.baseURL).toBe("https://api.example.com/v1");
-
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.(
-      {
-        sessionID: "session-1",
-        agent: "general",
-        model: { id: "glm-5", providerID: "example-ai" },
-        message: { id: "message-1" }
-      } as never,
-      output
-    );
-
-    expect(output.headers.Authorization).toBe("Bearer cached-access");
+    const record = harness.provider("responses-server");
+    expect(record?.provider.package).toBe("aisdk:@ai-sdk/openai");
+    expect(settingsOf(record).apiKey).toBe("oauth2-managed-bearer");
   });
 
-  it("routes a responseApi server from pluginConfig through @ai-sdk/openai", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-responses-plugincfg-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      pluginConfig: {
-        oauth2ModelSync: {
-          servers: [
-            {
-              id: "responses-server",
-              issuer: "https://auth.example.com",
-              baseURL: "https://api.example.com/v1",
-              clientId: "opencode-client",
-              scopes: ["openid"],
-              responseApi: true
-            }
-          ]
-        }
-      }
-    };
-
-    await hooks.config?.(config as never);
-
-    const providers = config.provider as Record<string, Record<string, unknown>>;
-    expect(providers["responses-server"]?.npm).toBe("@ai-sdk/openai");
-
-    const options = providers["responses-server"]?.options as Record<string, unknown>;
-    expect(options.apiKey).toBe("oauth2-managed-bearer");
-  });
-
-  it("does not overwrite a user-supplied apiKey when responseApi is enabled", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-responses-userkey-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          options: {
+  it("does not overwrite a user-supplied apiKey", async () => {
+    const harness = await start({
+      sources: [
+        {
+          id: "example-ai",
+          settings: {
             baseURL: "https://api.example.com/v1",
             apiKey: "user-supplied-key",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid"],
-              responseApi: true
-            }
+            oauth2: { ...OAUTH_BLOCK, scopes: ["openid"], responseApi: true }
           }
         }
-      }
-    };
+      ]
+    });
+    harness.runTransform();
 
-    await hooks.config?.(config as never);
-
-    const providerConfig = (config.provider as Record<string, Record<string, unknown>>)[
-      "example-ai"
-    ];
-    expect(providerConfig.npm).toBe("@ai-sdk/openai");
-    expect((providerConfig.options as Record<string, unknown>).apiKey).toBe("user-supplied-key");
+    const record = harness.provider("example-ai");
+    expect(record?.provider.package).toBe("aisdk:@ai-sdk/openai");
+    expect(settingsOf(record).apiKey).toBe("user-supplied-key");
   });
 
   it("scrubs the placeholder apiKey when responseApi loses across duplicate config shapes", async () => {
-    // Same provider id in both shapes: the pluginConfig server enables
-    // responseApi (stamping the placeholder + npm @ai-sdk/openai), but the
-    // provider-embedded oauth2 block omits it and must win — leaving a clean
+    // Same provider id in both shapes: the options.servers entry enables
+    // responseApi (placeholder + @ai-sdk/openai), but the provider's own
+    // settings.oauth2 block omits it and must win — leaving a clean
     // Chat-Completions provider with no leftover fake key.
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-responses-dup-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      provider: {
-        "dup-ai": {
-          options: {
+    const harness = await start({
+      sources: [
+        {
+          id: "dup-ai",
+          settings: {
             baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid"]
-              // responseApi omitted -> Chat Completions wins
-            }
+            oauth2: { ...OAUTH_BLOCK, scopes: ["openid"] }
           }
         }
-      },
-      pluginConfig: {
-        oauth2ModelSync: {
-          servers: [
-            {
-              id: "dup-ai",
-              issuer: "https://auth.example.com",
-              baseURL: "https://api.example.com/v1",
-              clientId: "opencode-client",
-              scopes: ["openid"],
-              responseApi: true
-            }
-          ]
-        }
-      }
-    };
-
-    await hooks.config?.(config as never);
-
-    const providerConfig = (config.provider as Record<string, Record<string, unknown>>)["dup-ai"];
-    expect(providerConfig.npm).toBe("@ai-sdk/openai-compatible");
-    expect((providerConfig.options as Record<string, unknown>).apiKey).toBeUndefined();
-  });
-
-  it("rejects a non-boolean responseApi value", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-responses-bad-"));
-    const hooks = await createHooks(cacheDir);
-
-    const config: Record<string, unknown> = {
-      provider: {
-        "example-ai": {
-          options: {
+      ],
+      options: {
+        servers: [
+          {
+            id: "dup-ai",
+            issuer: "https://auth.example.com",
             baseURL: "https://api.example.com/v1",
-            oauth2: {
-              issuer: "https://auth.example.com",
-              clientId: "opencode-client",
-              scopes: ["openid"],
-              responseApi: "yes"
-            }
+            clientId: "opencode-client",
+            scopes: ["openid"],
+            responseApi: true
           }
-        }
-      }
-    };
-
-    await expect(hooks.config?.(config as never)).rejects.toThrow(/responseApi/);
-  });
-});
-
-describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
-  // Builds hooks WITHOUT an injected `logger` option, so the real
-  // `createOpenCodeLogger` (from src/opencode.ts) runs — unlike `createHooks`
-  // above, which always passes `createSilentLogger()` and therefore bypasses
-  // it entirely.
-  async function createRealLoggerHooks(cacheDir: string) {
-    const log = vi.fn(async () => ({ data: true }));
-    const plugin = createOpencodeOauth2Plugin({
-      cacheDir,
-      fetchImpl: async () => {
-        throw new Error("fetch is not expected in these hook tests");
+        ]
       }
     });
+    harness.runTransform();
 
-    const hooks = await plugin({
-      client: { app: { log } },
-      project: { id: "project-1" },
-      directory: process.cwd(),
-      worktree: process.cwd(),
-      serverUrl: new URL("http://127.0.0.1:3000"),
-      $: {} as never
-    } as never);
-
-    return { hooks, log };
-  }
-
-  // A malformed (non-object) entry in `pluginConfig.oauth2ModelSync.servers`
-  // is the simplest way to trigger a real `warn` record
-  // (`plugin_config_server_invalid`) purely from the `config` hook, with no
-  // network calls and no valid managed provider left over afterwards.
-  const invalidServerConfig: Record<string, unknown> = {
-    pluginConfig: {
-      oauth2ModelSync: {
-        servers: ["not-an-object"]
-      }
-    }
-  };
-
-  it("never mirrors a warn record to the console fallback", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-adr0014-console-"));
-    const { hooks } = await createRealLoggerHooks(cacheDir);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-
-    await hooks.config?.(invalidServerConfig as never);
-
-    expect(warn).not.toHaveBeenCalled();
-    expect(log).not.toHaveBeenCalled();
-    warn.mockRestore();
-    log.mockRestore();
-  });
-
-  it("still forwards the warn record to client.app.log at its true level", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-adr0014-hostlog-"));
-    const { hooks, log } = await createRealLoggerHooks(cacheDir);
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    await hooks.config?.(invalidServerConfig as never);
-
-    expect(log).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body: expect.objectContaining({
-          service: "opencode-oauth2-plugin",
-          level: "warn",
-          message: "plugin_config_server_invalid"
-        })
-      })
-    );
-    vi.restoreAllMocks();
-  });
-
-  it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "opencode-hook-adr0014-restore-"));
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
-    // createOpenCodeLogger reads this env var once, at plugin-construction
-    // time (inside the factory's returned hook, not per write() call) — so it
-    // must be set BEFORE building the hooks, not merely before invoking them.
-    process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
-
-    try {
-      const { hooks } = await createRealLoggerHooks(cacheDir);
-      await hooks.config?.(invalidServerConfig as never);
-      expect(warn).toHaveBeenCalled();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
-      } else {
-        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
-      }
-      warn.mockRestore();
-    }
+    const record = harness.provider("dup-ai");
+    expect(record?.provider.package).toBe("aisdk:@ai-sdk/openai-compatible");
+    expect(settingsOf(record).apiKey).toBeUndefined();
   });
 });
 
-describe("fromOpenCodeLogLevel", () => {
-  it("maps OpenCode's uppercase log levels to internal levels (DEBUG unlocks trace)", () => {
-    // Host DEBUG is intentionally mapped to the most-verbose `trace` tier so
-    // `--log-level DEBUG` surfaces the oauth2_* trace events.
-    expect(fromOpenCodeLogLevel("DEBUG")).toBe("trace");
-    expect(fromOpenCodeLogLevel("INFO")).toBe("info");
-    expect(fromOpenCodeLogLevel("WARN")).toBe("warn");
-    expect(fromOpenCodeLogLevel("ERROR")).toBe("error");
+describe("model.request", () => {
+  it("leaves a managed provider's request alone when no runtime exists for it", async () => {
+    const harness = await start({ sources: [] });
+    harness.runTransform();
+    const event = requestEvent("example-ai", { Authorization: "Bearer other" });
+    await harness.call("model.request", event);
+    expect(event.headers.Authorization).toBe("Bearer other");
   });
 
-  it("tolerates mixed-case input from non-canonical hosts", () => {
-    expect(fromOpenCodeLogLevel("debug")).toBe("trace");
-    expect(fromOpenCodeLogLevel("Info")).toBe("info");
+  it("fails closed and logs when no token can be obtained", async () => {
+    // Empty cache + a non-interactive-incapable flow with no endpoints: the
+    // lazy ensure cannot produce a token, so the request must not go out.
+    const logger = recordingLogger();
+    const harness = await start({
+      factory: { logger },
+      sources: declared({
+        authFlow: "client_credentials",
+        clientSecret: "s",
+        tokenEndpoint: "https://auth.example.com/token",
+        authorizationEndpoint: "https://auth.example.com/authorize"
+      })
+    });
+    harness.runTransform();
+    await harness.settle();
+
+    const event = requestEvent("example-ai", { Authorization: "Bearer placeholder" });
+    await expect(harness.call("model.request", event)).rejects.toBeDefined();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      "oauth2_model_request_token_failed",
+      expect.objectContaining({ providerId: "example-ai" })
+    );
   });
 
-  it("returns undefined for missing or unrecognized values so the caller can apply a default", () => {
-    expect(fromOpenCodeLogLevel(undefined)).toBeUndefined();
-    expect(fromOpenCodeLogLevel(null)).toBeUndefined();
-    // There is no host "TRACE" level; an unknown string still falls through.
-    expect(fromOpenCodeLogLevel("trace")).toBeUndefined();
-    expect(fromOpenCodeLogLevel(42)).toBeUndefined();
+  it("kicks off a lazy model sync and reloads once models appear", async () => {
+    const cacheDir = await freshCacheDir("opencode-v2-lazy-");
+    await seedCache(cacheDir);
+    // Warmup discovers nothing, so the provider has no models and a token; the
+    // first request then triggers the lazy sync, which finds one.
+    let discovered: Array<{ id: string }> = [];
+    const harness = await start({
+      cacheDir,
+      sources: declared(),
+      factory: {
+        fetchImpl: (async () =>
+          new Response(JSON.stringify({ data: discovered }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          })) as typeof fetch
+      }
+    });
+    harness.runTransform();
+    await harness.settle();
+    expect(harness.handle.runtime()?.getServerModels("example-ai")).toEqual([]);
+
+    discovered = [{ id: "late-model" }];
+    const before = harness.reloads();
+    await harness.call("model.request", requestEvent("example-ai"));
+    await vi.waitFor(() => expect(harness.reloads()).toBeGreaterThan(before));
+
+    expect(harness.provider("example-ai")?.models.has("late-model")).toBe(true);
+  });
+});
+
+describe("scope teardown", () => {
+  it("stops the engine's scheduler when the plugin scope closes", async () => {
+    const cacheDir = await freshCacheDir("opencode-v2-teardown-");
+    await seedCache(cacheDir);
+    const harness = await start({ cacheDir, sources: declared() });
+    harness.runTransform();
+    await harness.settle();
+
+    const runtime = harness.handle.runtime() as unknown as {
+      runtimeByServer: Map<string, { scheduler?: unknown; ownsScheduler?: boolean }>;
+    };
+    expect(runtime.runtimeByServer.get("example-ai")?.ownsScheduler).toBe(true);
+
+    await harness.close();
+    expect(runtime.runtimeByServer.get("example-ai")?.ownsScheduler).toBe(false);
   });
 });

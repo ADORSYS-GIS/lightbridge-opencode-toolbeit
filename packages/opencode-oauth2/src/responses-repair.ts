@@ -18,7 +18,7 @@
  *
  * Existing index fields are never overwritten, so the transform is a safe no-op
  * against a conformant gateway. Only the oauth2 plugin's `responseApi` path
- * installs it (as a wrapping `options.fetch`), and only for requests to the
+ * installs it (via `session.hook("http.response")`), and only for requests to the
  * `/responses` route with a `text/event-stream` body.
  */
 
@@ -122,45 +122,30 @@ export function makeResponsesRepairStream(): TransformStream<Uint8Array, Uint8Ar
   });
 }
 
-function urlOf(input: RequestInfo | URL): string {
-  if (typeof input === "string") {
-    return input;
-  }
-  if (input instanceof URL) {
-    return input.href;
-  }
-  return input.url;
-}
-
 /**
- * Wrap a `fetch` so Responses-API SSE responses are run through the index
- * repair before the AI SDK parses them. Non-`/responses` requests and
- * non-streaming responses pass through unchanged. Composes with a `delegate`
- * (a pre-existing `options.fetch`) so stacking with other fetch-wrapping
- * plugins works regardless of order.
+ * Run a Responses-API SSE response through the index repair before the AI SDK
+ * parses it. Non-`/responses` requests and non-streaming responses are returned
+ * unchanged (the very same object).
+ *
+ * v2 delivery: called from `session.hook("http.response")`, which hands the
+ * plugin the exchange (`request` + a replaceable `response`). v1 reached the
+ * same bytes by wrapping `provider.options.fetch`; `Provider.Info` has no
+ * `fetch` field, so that seam is gone.
  */
-export function createResponsesRepairFetch(delegate?: typeof fetch): typeof fetch {
-  const base = delegate ?? globalThis.fetch;
+export function repairResponsesResponse(request: Request, response: Response): Response {
+  // HTTP media types are case-insensitive, so normalize before matching.
+  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+  if (
+    !response.body ||
+    !request.url.includes("/responses") ||
+    !contentType.includes("text/event-stream")
+  ) {
+    return response;
+  }
 
-  const repaired: typeof fetch = async (input, init) => {
-    const response = await base(input, init);
-
-    // HTTP media types are case-insensitive, so normalize before matching.
-    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
-    if (
-      !response.body ||
-      !urlOf(input).includes("/responses") ||
-      !contentType.includes("text/event-stream")
-    ) {
-      return response;
-    }
-
-    return new Response(response.body.pipeThrough(makeResponsesRepairStream()), {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers
-    });
-  };
-
-  return repaired;
+  return new Response(response.body.pipeThrough(makeResponsesRepairStream()), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
 }

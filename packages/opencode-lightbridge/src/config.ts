@@ -53,7 +53,7 @@ export interface LightbridgeRegisterOptions {
   syncIntervalMinutes?: number;
   /**
    * Route inference through the OpenAI Responses API instead of Chat
-   * Completions — see `@vymalo/opencode-provider-sync`'s `resolveProviderNpm`.
+   * Completions — see `@vymalo/opencode-provider-sync`'s `resolveProviderPackage`.
    */
   responseApi?: boolean;
 }
@@ -236,62 +236,37 @@ export function parseLightbridgeOptions(raw: unknown): ParsedLightbridgeOptions 
 export function needsProjectToken(options: ParsedLightbridgeOptions): boolean {
   return Boolean(options.gateway) || Boolean(options.otel);
 }
-
 // ---- oauth2 provider-id collision guard (ADR-0017 requirement 4) ----------
 //
 // If a developer configures BOTH `@vymalo/opencode-oauth2` and lightbridge's
 // `register` block against the SAME OpenCode provider id, they must not both
-// register/own it — mirrors `@vymalo/opencode-repo-auth`'s
-// `hasOAuth2Conflict`/`oauth2ManagedProviderIds` (which defers to oauth2 the
-// same way). Kept as a lightbridge-local copy rather than a shared import:
-// each consumer's own config-key literals are intentionally NOT centralized
+// register/own it. v1 read oauth2's private `pluginConfig` off the shared
+// config object; v2 plugins cannot see each other's options, so the signal is
+// the provider RECORD: oauth2 stamps `settings.oauth2` (a user block, or the
+// marker `{ managed: true, source: "options.servers" }`) on every provider it
+// manages. Kept as a lightbridge-local literal rather than a shared import:
+// each consumer's own settings-key literals are intentionally NOT centralized
 // (see `@vymalo/opencode-provider-sync`'s `opencode-helpers.ts` module doc).
 
-const OAUTH2_OPTION_KEYS = ["oauth2", "oauth2ModelSync"] as const;
+const OAUTH2_SETTINGS_KEYS = ["oauth2", "oauth2ModelSync"] as const;
 
-export interface OpenCodeConfigLike {
-  provider?: unknown;
-  pluginConfig?: unknown;
+/** The slice of a `ProviderEditor` the collision guard reads. */
+export interface ProviderLookup {
+  get(id: string): { readonly provider: { readonly settings?: unknown } } | undefined;
 }
 
 /**
- * Provider ids managed by `@vymalo/opencode-oauth2` via its
- * `pluginConfig.oauth2ModelSync.servers` channel.
+ * Whether `providerId` is (also) managed by `@vymalo/opencode-oauth2`, judged
+ * from the provider record's `settings.oauth2` / `settings.oauth2ModelSync`
+ * block. Used by lightbridge's `register` module to skip registering or owning
+ * a provider oauth2 already claims (logged at `debug`).
+ *
+ * Order-sensitive: oauth2 stamps its marker inside its own provider transform,
+ * so oauth2 must be listed BEFORE lightbridge in `plugin` for lightbridge to
+ * see it on the first pass. A later pass (oauth2's own `provider.reload()`)
+ * still detects it and lightbridge then stands its engine down.
  */
-export function oauth2ManagedProviderIds(config: OpenCodeConfigLike): Set<string> {
-  const ids = new Set<string>();
-  const pluginConfig = isRecord(config.pluginConfig) ? config.pluginConfig : undefined;
-  const oauth2ModelSync = isRecord(pluginConfig?.oauth2ModelSync)
-    ? pluginConfig?.oauth2ModelSync
-    : undefined;
-  const servers = oauth2ModelSync?.servers;
-  if (Array.isArray(servers)) {
-    for (const raw of servers) {
-      const entry = isRecord(raw) ? raw : undefined;
-      const id = typeof entry?.id === "string" ? entry.id : undefined;
-      if (id) {
-        ids.add(id);
-      }
-    }
-  }
-  return ids;
-}
-
-/**
- * Whether `providerId` is (also) managed by `@vymalo/opencode-oauth2` —
- * either via that provider's own `options.oauth2` / `options.oauth2ModelSync`
- * block, or via the `pluginConfig.oauth2ModelSync.servers` channel. Used by
- * lightbridge's `register` module to skip registering/owning a provider
- * oauth2 already claims (logged at `debug` — see `opencode.ts`).
- */
-export function hasOAuth2Conflict(config: OpenCodeConfigLike, providerId: string): boolean {
-  const providers = isRecord(config.provider) ? config.provider : undefined;
-  const providerEntry = providers ? (providers as Record<string, unknown>)[providerId] : undefined;
-  const providerOptions =
-    isRecord(providerEntry) && isRecord(providerEntry.options) ? providerEntry.options : undefined;
-
-  if (providerOptions && OAUTH2_OPTION_KEYS.some((key) => isRecord(providerOptions[key]))) {
-    return true;
-  }
-  return oauth2ManagedProviderIds(config).has(providerId);
+export function hasOAuth2Conflict(editor: ProviderLookup, providerId: string): boolean {
+  const settings = editor.get(providerId)?.provider.settings;
+  return isRecord(settings) && OAUTH2_SETTINGS_KEYS.some((key) => isRecord(settings[key]));
 }

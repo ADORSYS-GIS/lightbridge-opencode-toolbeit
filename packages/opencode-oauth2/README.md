@@ -2,6 +2,8 @@
 
 OAuth2/OIDC model sync plugin for OpenCode. This is the canonical configuration reference for the plugin. Long-form usage guides (CI cookbooks, Kubernetes manifests, troubleshooting) live in [`/docs/`](../../docs/) at the repo root.
 
+> **Requires OpenCode v2.** This release targets the v2 plugin API and does not run on v1. Migrating from `0.17.x`? See [Migrating from v1](#migrating-from-v1).
+
 ## What It Does
 
 - Registers OpenAI-compatible providers into OpenCode config
@@ -22,7 +24,7 @@ Add plugin package to OpenCode:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@vymalo/opencode-oauth2"]
+  "plugins": [{ "package": "@vymalo/opencode-oauth2" }]
 }
 ```
 
@@ -33,11 +35,11 @@ Add plugin package to OpenCode:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@vymalo/opencode-oauth2"],
-  "provider": {
+  "plugins": [{ "package": "@vymalo/opencode-oauth2" }],
+  "providers": {
     "example-ai": {
       "name": "Example AI",
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.example.com",
@@ -54,32 +56,36 @@ Add plugin package to OpenCode:
 }
 ```
 
-### Option B: `pluginConfig.oauth2ModelSync.servers`
+### Option B: the plugin's own `options.servers`
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@vymalo/opencode-oauth2"],
-  "pluginConfig": {
-    "oauth2ModelSync": {
-      "servers": [
-        {
-          "id": "example-ai",
-          "name": "Example AI",
-          "issuer": "https://auth.example.com",
-          "baseURL": "https://api.example.com/v1",
-          "clientId": "opencode-client",
-          "scopes": ["openid", "profile", "offline_access"],
-          "syncIntervalMinutes": 60,
-          "nameOverrides": {
-            "glm-5": "GLM 5"
+  "plugins": [
+    {
+      "package": "@vymalo/opencode-oauth2",
+      "options": {
+        "servers": [
+          {
+            "id": "example-ai",
+            "name": "Example AI",
+            "issuer": "https://auth.example.com",
+            "baseURL": "https://api.example.com/v1",
+            "clientId": "opencode-client",
+            "scopes": ["openid", "profile", "offline_access"],
+            "syncIntervalMinutes": 60,
+            "nameOverrides": {
+              "glm-5": "GLM 5"
+            }
           }
-        }
-      ]
+        ]
+      }
     }
-  }
+  ]
 }
 ```
+
+Every provider the plugin manages carries a `settings.oauth2` block on its provider record, so other plugins (for example `repo-auth`'s double-management guard) can recognise it: a block you wrote is left as-is, and a provider created from `options.servers` gets the marker `{ "managed": true, "source": "options.servers" }`.
 
 ### Optional fields
 
@@ -98,10 +104,10 @@ These apply to both config shapes above.
 | `redirectPort` | random | Fixed port for the local callback server (authorization-code only). |
 | `nameOverrides` | `{}` | Map of model id → friendly display name. Applied during catalog normalization. |
 | `syncIntervalMinutes` | `60` | Per-server scheduler interval. Failures preserve the last-known-good model list. |
-| `responseApi` | `false` | Route inference through the OpenAI **Responses API** (`/v1/responses`) instead of Chat Completions (`/v1/chat/completions`). When `true`, the provider is registered with `npm: "@ai-sdk/openai"` (the native OpenAI provider, whose default model targets Responses since AI SDK v5) rather than `@ai-sdk/openai-compatible`. The plugin stamps an inert placeholder `apiKey` so the native provider can be constructed (the real OAuth bearer is still injected per request, so the placeholder is never sent) and wraps the provider's `fetch` to repair Responses SSE streams that omit `output_index`/`content_index` (seen with Envoy AI Gateway; otherwise OpenCode fails with `text part <id> not found`). Only enable this when your gateway implements the OpenAI Responses contract for the model you use. |
+| `responseApi` | `false` | Route inference through the OpenAI **Responses API** (`/v1/responses`) instead of Chat Completions (`/v1/chat/completions`). When `true`, the provider is registered with `package: "aisdk:@ai-sdk/openai"` (the native OpenAI provider, whose default model targets Responses since AI SDK v5) rather than `aisdk:@ai-sdk/openai-compatible`. The plugin stamps an inert placeholder `apiKey` so the native provider can be constructed (the real OAuth bearer is still injected per request, so the placeholder is never sent) and repairs, via `session.hook("http.response")`, Responses SSE streams that omit `output_index`/`content_index` (seen with Envoy AI Gateway; otherwise OpenCode fails with `text part <id> not found`). Only enable this when your gateway implements the OpenAI Responses contract for the model you use. |
 | `jwksUri` | _(unset)_ | Reserved; not currently used at runtime. |
 
-Plus the top-level `pluginConfig.oauth2ModelSync` block accepts:
+The plugin's own `options` (next to `servers` and `logLevel`) also accept the tuning knobs v1 kept in `pluginConfig.oauth2ModelSync`. Changing `cacheNamespace` moves the on-disk cache path, so it forces a new login and detaches you from the cache shared with lightbridge — leave it unless you need isolation. An invalid value is logged as `oauth2_runtime_build_failed`.
 
 | Field | Default | Notes |
 | --- | --- | --- |
@@ -109,7 +115,7 @@ Plus the top-level `pluginConfig.oauth2ModelSync` block accepts:
 | `httpTimeoutMs` | `15000` | Timeout for token-endpoint / `/models` round trips. |
 | `tokenExpirySkewMs` | `30000` | Treat a token as expired this many ms before its real `expiresAt`. |
 
-The plugin's log level follows the host's top-level `logLevel` (`"DEBUG" | "INFO" | "WARN" | "ERROR"`) — set it once in your OpenCode config and the plugin honors the same threshold for both console output and forwarded `app.log` records. Defaults to `"info"` when the host doesn't set one.
+The plugin's log level comes from its own `options.logLevel` (`"DEBUG" | "INFO" | "WARN" | "ERROR"`), else the host's `OPENCODE_LOG_LEVEL`, else `"info"`. Records go to the host's log file, never the terminal ([ADR-0014](../../docs/adr/0014-suite-wide-no-terminal-mirror.md)); the host's own minimum level applies on top, so `DEBUG`/`trace` records also need `OPENCODE_LOG_LEVEL=DEBUG`.
 
 ## Federated identity (no long-lived secrets in CI)
 
@@ -135,9 +141,9 @@ End-to-end recipes:
 
 ```jsonc
 {
-  "provider": {
+  "providers": {
     "example-ai": {
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.example.com/realms/example",
@@ -161,9 +167,9 @@ Workflow needs `permissions: { id-token: write }`. No `clientSecret` anywhere.
 
 ```jsonc
 {
-  "provider": {
+  "providers": {
     "example-ai": {
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.example.com/realms/example",
@@ -197,16 +203,17 @@ Refresh tokens are mandatory for the flows that issue them (`authorization_code`
 
 ### One rotating refresh token, several OpenCode processes
 
-The cached state lives in a single `<cacheNamespace>/<serverId>.json` that every OpenCode process on the machine shares, and a refresh token is single-use. So the plugin **re-reads that file before every refresh decision** (warmup, scheduler tick, and the per-request `chat.headers` path alike) instead of trusting the copy it loaded at startup: the persisted state wins unless the in-memory one is strictly newer, and it is adopted as a whole. Without this, a second process replays a refresh token the first has already rotated, and the IdP's reuse detection revokes the chain out from under both.
+The cached state lives in a single `<cacheNamespace>/<serverId>.json` that every OpenCode process on the machine shares, and a refresh token is single-use. So the plugin **re-reads that file before every refresh decision** (warmup, scheduler tick, and the per-request `model.request` path alike) instead of trusting the copy it loaded at startup: the persisted state wins unless the in-memory one is strictly newer, and it is adopted as a whole. Without this, a second process replays a refresh token the first has already rotated, and the IdP's reuse detection revokes the chain out from under both.
 
 Coordinating the refresh itself — single-flight, the cross-process lock, and the retry when the IdP rejects a token another process just rotated — belongs to `TokenRuntime` in [`@vymalo/opencode-auth-core`](../opencode-auth-core), not to this plugin. Details: [architecture.md → Shared across processes](../../docs/architecture.md#shared-across-processes).
 
-## Hooks Used
+## Registrations used
 
-- `config`: register/patch provider config and merge cached discovered models
-- `chat.headers`: ensure valid token and set `Authorization` header
+- `provider.transform`: register/patch managed providers, merge cached discovered models, stamp the cached bearer on `Provider.Info.headers.Authorization` (synchronous; token and sync work runs in a background queue that calls `provider.reload()`)
+- `session.hook("model.request")`: ensure a valid token and set `Authorization` on the request
+- `session.hook("http.response")`: repair Responses-API SSE streams for `responseApi` providers
 
-See [architecture.md](../../docs/architecture.md#the-two-hooks) for the full hook semantics.
+None of the five auth flows is an OpenCode v2 Integration method; they remain on the plugin-owned token runtime, see [ADR-0020](../../docs/adr/0020-oauth2-integration-domain.md). See [architecture.md](../../docs/architecture.md#the-two-hooks) for the behaviour of each step.
 
 ## Relationship to `@vymalo/opencode-lightbridge`
 
@@ -215,13 +222,13 @@ optional `register` block does everything this plugin does — provider registra
 discovery via the same shared `@vymalo/opencode-provider-sync` engine — plus an optional gateway
 bearer and OTEL export credential off the same login. Run this plugin standalone when you only need
 provider registration, or when it needs to manage several unrelated IdPs via
-`pluginConfig.oauth2ModelSync.servers`; run lightbridge instead when you want the shared credential
+`options.servers`; run lightbridge instead when you want the shared credential
 too.
 
 **If both are configured, configure them for DIFFERENT provider ids** — lightbridge's `register`
 module deliberately skips (never registers, never runs its own scheduler) any provider id it detects
-this plugin already manages (via `pluginConfig.oauth2ModelSync.servers[].id` or a provider's own
-`options.oauth2`/`options.oauth2ModelSync` block), logged at `debug`. See
+this plugin already manages (via `options.servers[].id` or a provider's own
+`settings.oauth2`/`settings.oauth2ModelSync` block), logged at `debug`. See
 [`docs/lightbridge.md` → `register`](../../docs/lightbridge.md#register--provider-registration--model-discovery-adr-0017).
 
 **Shared login, not just a shared engine.** If a developer configures the SAME `id`/`issuer`/
@@ -245,3 +252,45 @@ pnpm --filter @vymalo/opencode-oauth2 build
 - `OpencodeOauth2Plugin` (default OpenCode plugin export)
 - `createOpencodeOauth2Plugin()` (factory for testing / custom wiring)
 - `OAuth2ModelSyncPlugin` (runtime orchestrator — useful for embedding outside OpenCode)
+
+## Migrating from v1
+
+`0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See
+[ADR-0019](../../docs/adr/0019-opencode-v2-cutover.md) for why there is no dual-support build.
+
+| v1 | v2 |
+| --- | --- |
+| `"plugin": ["@vymalo/opencode-oauth2"]` | `"plugins": [{ "package": "@vymalo/opencode-oauth2" }]` |
+| `"provider": { ... }` | `"providers": { ... }` |
+| `"npm": "@ai-sdk/openai-compatible"` | `"package": "aisdk:@ai-sdk/openai-compatible"` |
+| `options.baseURL` | `settings.baseURL` |
+| `options.oauth2` / `options.oauth2ModelSync` | `settings.oauth2` / `settings.oauth2ModelSync` |
+| `options.apiKey` | `settings.apiKey` |
+| `options.headers` | `headers` (on the provider) |
+| `pluginConfig.oauth2ModelSync.servers` | the plugin's `options.servers` |
+| `pluginConfig.oauth2ModelSync.{cacheNamespace,httpTimeoutMs,tokenExpirySkewMs}` | the plugin's `options.{cacheNamespace,httpTimeoutMs,tokenExpirySkewMs}`, same defaults |
+| host `config.logLevel` | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
+| `chat.headers` hook | `session.hook("model.request")` |
+| `options.fetch` Responses-SSE wrapper | `session.hook("http.response")` |
+| `createResponsesRepairFetch` (internal) | `repairResponsesResponse` (exported from `./lib`) |
+| `fromOpenCodeLogLevel` | `resolveLogLevel` |
+
+The `oauth2` block's own fields (`issuer`, `clientId`, `authFlow`, `pkce`, `responseApi`, …), the five
+auth flows, the token cache layout and every `oauth2_*` event name are unchanged — an existing login
+survives the upgrade.
+
+### Behaviour changes in v2
+
+- **Invalid user config no longer rejects plugin load.** v1 failed loudly on a bad `redirectPort`,
+  unknown `authFlow` or non-boolean `responseApi`. In v2 the plugin logs
+  `oauth2_config_invalid` (level `error`, field `error` holds the validation message) and **manages
+  no providers**, because a throw inside a provider transform could take down the whole provider
+  pipeline. A typo therefore shows up as a *missing provider*, not an error screen. Logs go to the
+  host log file, not the terminal ([ADR-0014](../../docs/adr/0014-suite-wide-no-terminal-mirror.md)):
+  to debug "why is my provider missing", search the OpenCode log for `oauth2_config_invalid`.
+  (An invalid tuning option is logged as `oauth2_runtime_build_failed` instead.)
+- **Startup no longer blocks on warmup.** v1 awaited the first sync (and, on a TTY, the interactive
+  login) inside the `config` hook. In v2 the transform is synchronous, so the runtime builds in the
+  background: providers first appear without models and are filled in by a `provider.reload()` once
+  warmup finishes, and the first login prompt appears in the background rather than before the UI.
+  A request that arrives mid-warmup waits for it.
