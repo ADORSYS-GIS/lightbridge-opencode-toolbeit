@@ -47,7 +47,11 @@ export interface OpenRouterModelsResponse {
   data: OpenRouterModel[];
 }
 
-export interface MetaProviderOptions {
+/**
+ * A provider's parsed `settings.modelsInfo*` opt-in (v2: `Provider.Info.settings`
+ * replaces v1's `options.meta`).
+ */
+export interface ModelsInfoSettings {
   modelsInfoUrl: string;
   modelsInfoTtlSeconds: number;
   modelsInfoTimeoutMs: number;
