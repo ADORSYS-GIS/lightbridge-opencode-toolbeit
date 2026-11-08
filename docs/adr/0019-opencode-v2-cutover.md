@@ -148,7 +148,7 @@ not consume the plugin API and are unaffected.
   `client.app.log` took whatever we handed it. Document this per plugin; it is the likeliest
   "why are my trace events missing" support question.
 - **LSP config is accepted but inert in v2** (no language servers, no LSP tools, no diagnostics).
-  Nothing in this suite depends on it today; `code-index` should not grow to depend on it.
+  Nothing in this suite depends on it today, and nothing here should grow to depend on it. (This bullet originally named the experimental `code-index` plugin, which was dropped at the cutover.)
 - **`$` (the Bun shell helper) is gone**, as is the direct `client` object. Nothing in this suite
   used `$`.
 

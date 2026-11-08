@@ -118,7 +118,7 @@ v1 detected a provider "also managed by oauth2" from the config object, via two 
 | `settings.oauth2` / `settings.oauth2ModelSync` present | v1 `options.oauth2` / `options.oauth2ModelSync` |
 | `integrationID` set (the provider is owned by a v2 Integration, which supplies its own credentials) | new in v2 — the structural marker of an OAuth-managed provider |
 
-**Known gap:** the `pluginConfig.oauth2ModelSync.servers` channel cannot be re-derived. The guard is therefore only as complete as the markers oauth2's v2 port puts on the providers it registers; until it sets `integrationID` or `settings.oauth2`, a provider registered that way is not recognised as oauth2-owned. Don't enable both plugins on one provider.
+**The old `pluginConfig.oauth2ModelSync.servers` channel cannot be read directly** (another plugin's `ctx.options` is private), so oauth2's v2 port closes that gap from its side: every provider it manages carries a `settings.oauth2` block — the user's own, or a `{ managed: true, source: "options.servers" }` marker for one created from `options.servers` (`markManaged`, `packages/opencode-oauth2/src/opencode.ts:71`). The guard therefore sees every oauth2-managed provider **once oauth2's provider transform has run**, so `@vymalo/opencode-oauth2` **must** be listed before repo-auth. Listed after, repo-auth's first pass can still claim an oauth2-managed provider until oauth2's `provider.reload()` shows the marker and a later pass drops it. Don't enable both plugins on one provider.
 
 ### Per-request (`ctx.session.hook("model.request")`) — replaces `chat.headers`
 

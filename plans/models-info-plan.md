@@ -1,5 +1,7 @@
 # Models Info Plugin — Plan
 
+> **Historical design record (OpenCode v1).** Written against the v1 plugin API (`Hooks.*`, `chat.headers`, `options.meta.*`, `pluginConfig`, `provider.options.fetch`). The suite is now v2-only ([ADR-0019](../docs/adr/0019-opencode-v2-cutover.md)); read those names as the v1 design, and see [`docs/models-info.md`](../docs/models-info.md) for current behaviour and config.
+
 ## Name
 
 `@vymalo/opencode-models-info`

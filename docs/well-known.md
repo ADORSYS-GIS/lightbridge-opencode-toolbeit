@@ -74,7 +74,7 @@ After login, OpenCode stores a credential of type `wellknown` in `auth.json` (th
 
 ### The `echo plugin-managed` placeholder pattern
 
-Notice the command is just `echo plugin-managed` — it doesn't fetch a real key. That's deliberate. This server's real credential is an **OAuth2 token managed per-request by `@vymalo/opencode-oauth2`**, not a static API key. So the well-known `auth` step only needs to satisfy OpenCode's "every provider has *some* key" requirement with a harmless placeholder; the oauth2 plugin's `chat.headers` hook then overwrites `Authorization` with a freshly-ensured Bearer on every request (see [architecture.md](./architecture.md#chatheaders--per-request)).
+Notice the command is just `echo plugin-managed` — it doesn't fetch a real key. That's deliberate. This server's real credential is an **OAuth2 token managed per-request by `@vymalo/opencode-oauth2`**, not a static API key. So the well-known `auth` step only needs to satisfy OpenCode's "every provider has *some* key" requirement with a harmless placeholder; the oauth2 plugin's `model.request` hook then overwrites `Authorization` with a freshly-ensured Bearer on every request (see [architecture.md](./architecture.md#sessionhookmodelrequest--per-request)).
 
 The upshot: `OPENAI_API_KEY=plugin-managed` would, on its own, send `Authorization: Bearer plugin-managed` and 401 — but for any provider the oauth2 plugin manages, that value is never actually used at request time. It's a stub that keeps OpenCode happy until the plugin takes over.
 
@@ -121,7 +121,7 @@ These are the two traps we actually hit bringing this up.
 
 ### 1. The provider `id` must match what the plugin manages
 
-`@vymalo/opencode-oauth2` keys everything — its token cache, its `chat.headers` injection, its model sync — by the **provider id** (the key under `config.provider`, here `camer-digital`). If you *also* have a locally-defined provider for the same backend under a different id (say `cd`), you'll have two providers: the plugin authenticates one and you may invoke the other, yielding a silent 401. Pick one id and delete the duplicate. The fastest tell is the `serverId` field in the plugin's log events — it's the id the plugin is actually working on.
+`@vymalo/opencode-oauth2` keys everything — its token cache, its `model.request` injection, its model sync — by the **provider id** (the key under the config's providers map, here `camer-digital`). If you *also* have a locally-defined provider for the same backend under a different id (say `cd`), you'll have two providers: the plugin authenticates one and you may invoke the other, yielding a silent 401. Pick one id and delete the duplicate. The fastest tell is the `serverId` field in the plugin's log events — it's the id the plugin is actually working on.
 
 ### 2. "Logged in" instantly, with no device-code prompt
 

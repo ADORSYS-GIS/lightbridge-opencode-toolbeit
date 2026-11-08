@@ -29,7 +29,7 @@ flowchart LR
   subgraph LB["@vymalo/opencode-lightbridge"]
     TR["one TokenRuntime · one cache dir<br/>ensure() → exchangeTo(project_id)"]
   end
-  TR -->|"chat.headers (per request)"| GW["LLM gateway"]
+  TR -->|"model.request hook (per request)"| GW["LLM gateway"]
   TR -->|"TokenSource.headers() (per export)"| COL["OTEL collector"]
   GW & COL -.->|"both validate the same issuer + aud=lightbridge-api-key"| AZ["lightbridge-authz JWKS"]
 ```
@@ -205,8 +205,8 @@ the same: `exchange: false` fails when the IdP login is missing or expired and c
 - **oauth2 collision detection is order-sensitive.** v1 read oauth2's private `pluginConfig`. A v2
   plugin cannot see another plugin's options, so lightbridge looks for the `settings.oauth2` marker
   oauth2 stamps on every provider it manages. List `@vymalo/opencode-oauth2` **before**
-  lightbridge in `plugins`. If lightbridge is listed first it may start its engine on the first
-  pass; it stands the engine down (`engine.stop()`, releasing its scheduler slot) as soon as a later
+  lightbridge in `plugins`. This is a requirement, not a preference. If lightbridge is listed first it starts its engine and
+  runs a warmup sync against the shared token cache on the first pass; it stands the engine down (`engine.stop()`, releasing its scheduler slot) as soon as a later
   pass shows the marker. The scheduler-ownership guard in `ProviderModelSyncEngine` still prevents
   two engines polling the same cache file in the meantime.
 - **`oauth2ManagedProviderIds`, `OpenCodeConfigLike` and the config-shaped `hasOAuth2Conflict`

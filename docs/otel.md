@@ -98,11 +98,14 @@ headers immediately before each export, so the refresh happens underneath a long
 
 ```jsonc
 {
-  "plugin": [
-    ["@vymalo/opencode-otel", {
-      "endpoint": "https://otel.example.com",
-      "tokenCommand": "governance-auth token"
-    }]
+  "plugins": [
+    {
+      "package": "@vymalo/opencode-otel",
+      "options": {
+        "endpoint": "https://otel.example.com",
+        "tokenCommand": "governance-auth token"
+      }
+    }
   ]
 }
 ```

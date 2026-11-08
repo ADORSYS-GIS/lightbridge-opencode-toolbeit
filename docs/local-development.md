@@ -17,11 +17,11 @@ Write your `opencode.json` there:
 cat > "$OPENCODE_CONFIG_DIR/opencode.json" <<'JSON'
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["./plugins/opencode-oauth2.ts"],
-  "provider": {
+  "plugins": [{ "package": "./plugins/opencode-oauth2" }],
+  "providers": {
     "miaou": {
       "name": "Miaou (local)",
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.verif.fyi/realms/camer-digital",
@@ -40,16 +40,18 @@ Now `opencode run --model "miaou/glm-5" "..."` uses the sandbox; your real confi
 
 ### Plugin re-export trick
 
-OpenCode loads plugin paths relative to `$OPENCODE_CONFIG_DIR`. To iterate on a locally-checked-out version of the plugin without `npm link`:
+OpenCode v2 loads a configured local plugin path as a **directory** (containing `index.ts` / `index.js`), relative to `$OPENCODE_CONFIG_DIR`; a single `.ts` file path is skipped with a warning in the host log. To iterate on a locally-checked-out version of the plugin without `npm link`:
 
 ```sh
-mkdir -p "$OPENCODE_CONFIG_DIR/plugins"
-cat > "$OPENCODE_CONFIG_DIR/plugins/opencode-oauth2.ts" <<'TS'
-// Re-export so OpenCode treats this as the plugin module while still
-// loading code from your local checkout.
+mkdir -p "$OPENCODE_CONFIG_DIR/plugins/opencode-oauth2"
+cat > "$OPENCODE_CONFIG_DIR/plugins/opencode-oauth2/index.ts" <<'TS'
+// Re-export so OpenCode treats this directory as the plugin module while
+// still loading code from your local checkout.
 export { default } from "/absolute/path/to/lightbridge-opencode/packages/opencode-oauth2/dist/index.js";
 TS
 ```
+
+> This directory layout follows the official [OpenCode v1 to v2 plugin migration guide](https://opencode.ai/docs/build/plugins/migrate-v1); it has not been exercised against a real v2 host in this repo.
 
 Build the plugin in watch mode:
 
@@ -69,30 +71,28 @@ A full real-host e2e for `@vymalo/opencode-repo-auth`: actual `opencode` binary,
 pnpm test:env:up   # WireMock on 127.0.0.1:18080
 
 SANDBOX=/tmp/opencode/repo-auth-e2e
-rm -rf "$SANDBOX" && mkdir -p "$SANDBOX/config/plugins" "$SANDBOX/repo" "$SANDBOX/cache"
+rm -rf "$SANDBOX" && mkdir -p "$SANDBOX/config/plugins/repo-auth" "$SANDBOX/repo" "$SANDBOX/cache"
 
 # 1. Scoped OpenCode config: provider pointed at WireMock, opted into repoAuth.
 cat > "$SANDBOX/config/opencode.json" <<'JSON'
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["./plugins/repo-auth.ts"],
-  "provider": {
+  "plugins": [{ "package": "./plugins/repo-auth" }],
+  "providers": {
     "gateway": {
       "name": "Gateway (WireMock)",
-      "options": {
+      "settings": {
         "baseURL": "http://127.0.0.1:18080/v1",
         "apiKey": "dummy-not-used",
-        "meta": {
-          "repoAuth": {
-            "projectId": "proj-123",
-            "issuer": "https://idp.example.com/realms/acme",
-            "clientId": "opencode-cli",
-            "scopes": ["openid", "offline_access"],
-            "authFlow": "device_code",
-            "pkce": false,
-            "tokenEndpoint": "http://127.0.0.1:18080/realms/acme/protocol/openid-connect/token",
-            "deviceAuthorizationEndpoint": "http://127.0.0.1:18080/realms/acme/protocol/openid-connect/auth/device"
-          }
+        "repoAuth": {
+          "projectId": "proj-123",
+          "issuer": "https://idp.example.com/realms/acme",
+          "clientId": "opencode-cli",
+          "scopes": ["openid", "offline_access"],
+          "authFlow": "device_code",
+          "pkce": false,
+          "tokenEndpoint": "http://127.0.0.1:18080/realms/acme/protocol/openid-connect/token",
+          "deviceAuthorizationEndpoint": "http://127.0.0.1:18080/realms/acme/protocol/openid-connect/auth/device"
         }
       },
       "models": { "e2e-model": { "name": "E2E Model" } }
@@ -101,8 +101,9 @@ cat > "$SANDBOX/config/opencode.json" <<'JSON'
 }
 JSON
 
-# 2. Plugin re-export from your local checkout (absolute path).
-cat > "$SANDBOX/config/plugins/repo-auth.ts" <<'TS'
+# 2. Plugin re-export from your local checkout (absolute path). v2 expects a
+#    plugin DIRECTORY with an index.ts (same layout as the oauth2 re-export above).
+cat > "$SANDBOX/config/plugins/repo-auth/index.ts" <<'TS'
 export { default } from "/ABSOLUTE/PATH/TO/lightbridge-opencode-toolbeit/packages/opencode-repo-auth/dist/index.js";
 TS
 
@@ -196,9 +197,9 @@ Config:
 
 ```jsonc
 {
-  "provider": {
+  "providers": {
     "miaou": {
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.verif.fyi/realms/camer-digital",
@@ -236,13 +237,7 @@ cat ~/Library/Caches/opencode-oauth2/opencode-oauth2-model-sync/miaou.json | jq 
 cat ~/.cache/opencode-oauth2/opencode-oauth2-model-sync/miaou.json | jq .
 ```
 
-Tail the plugin's JSON logs (when running opencode with stderr redirected):
-
-```sh
-opencode run --model "miaou/glm-5" "say hi" 2>&1 \
-  | jq -Rr 'fromjson? // .' \
-  | grep -E '"event":"(oauth|sync|model)'
-```
+Read the plugin's structured logs. In v2 they go to the host's log (OpenCode's own log file), never the terminal ([ADR-0014](./adr/0014-suite-wide-no-terminal-mirror.md)), so redirecting stderr shows nothing. Raise verbosity with `OPENCODE_LOG_LEVEL=DEBUG` (or the plugin's `options.logLevel`) and look for the `oauth2_*` events in the host log.
 
 Run the test suite while iterating:
 
