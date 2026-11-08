@@ -7,9 +7,7 @@ import {
   createJsonConsoleLogger,
   createProviders,
   DEFAULT_LOG_LEVEL,
-  type DeferredAttribute,
   deferredAttribute,
-  describeError,
   type EnvSource,
   type ExporterFactories,
   fromOpenCodeLogLevel,
@@ -20,9 +18,9 @@ import {
   type LogLevel,
   type PropagationConfigInput,
   readVcsInfo,
+  registerExitHandlers,
   resolveOtelConfig,
   TelemetryRecorder,
-  type TelemetryProviders,
   type VcsInfo
 } from "@vymalo/opencode-core-otel";
 
@@ -38,7 +36,7 @@ export interface OtelPluginFactoryOptions {
   exporters?: ExporterFactories;
   /** Injectable clock; defaults to `Date.now`. */
   now?: () => number;
-  /** Skip `beforeExit`/`SIGINT`/`SIGTERM` registration (tests). */
+  /** Skip the `beforeExit`/`SIGINT`/`SIGTERM` exit handlers (tests). See ADR-0018. */
   registerProcessHandlers?: boolean;
   /** Override the resolved host metadata (hostname, version) for tests. */
   hostInfo?: { hostname?: string; version?: string };
@@ -90,40 +88,6 @@ function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => 
     warn: (event, fields) => write("warn", event, fields),
     error: (event, fields) => write("error", event, fields)
   };
-}
-
-/**
- * Drain buffered telemetry on process exit. The plugin API gained a `dispose`
- * hook in @opencode-ai/plugin 1.18.32, but this plugin does not register it —
- * these handlers plus `session.idle` already cover both exit paths, so a
- * dispose flush would be a redundant third drain (tracked follow-up). Without
- * them a short CLI invocation loses everything still in a batch processor.
- * Handlers are registered once and never keep the loop alive.
- */
-function registerExitHandlers(
-  providers: TelemetryProviders,
-  logger: Logger,
-  deferred: DeferredAttribute[]
-): void {
-  let done = false;
-  const drain = () => {
-    if (done) {
-      return;
-    }
-    done = true;
-    // Settle any still-pending resource attribute first. Exporters await those
-    // promises, and their timers are `unref`'d — so on `beforeExit` the timer
-    // may never fire and the shutdown would hang, losing everything buffered.
-    for (const attribute of deferred) {
-      attribute.abandon();
-    }
-    void providers.shutdown().catch((error) => {
-      logger.warn("otel_shutdown_failed", { error: describeError(error) });
-    });
-  };
-  process.once("beforeExit", drain);
-  process.once("SIGINT", drain);
-  process.once("SIGTERM", drain);
 }
 
 export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}): Plugin {
@@ -193,7 +157,10 @@ export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}):
     });
 
     if (factoryOptions.registerProcessHandlers !== false) {
-      registerExitHandlers(providers, logger, [version, branch]);
+      // Flush on exit, and hand the default signal action back (ADR-0018). The `dispose`
+      // hook (plugin API 1.18.32) is deliberately not registered: these handlers plus
+      // `session.idle` already cover both exit paths (tracked follow-up).
+      registerExitHandlers(providers, logger, [version, branch], { eventPrefix: "otel" });
     }
 
     logger.info("otel_plugin_enabled", {

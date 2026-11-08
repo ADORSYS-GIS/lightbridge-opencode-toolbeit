@@ -319,8 +319,12 @@ describe("ADR-0013: the plugin's own diagnostics never touch the terminal", () =
 });
 
 describe("exit handling", () => {
-  it("drains telemetry on beforeExit, exactly once", async () => {
-    const before = process.listenerCount("beforeExit");
+  it("registers the shared exit handlers and drains telemetry on beforeExit, exactly once", async () => {
+    const before = {
+      beforeExit: process.listenerCount("beforeExit"),
+      SIGINT: process.listenerCount("SIGINT"),
+      SIGTERM: process.listenerCount("SIGTERM")
+    };
 
     await createOtelPlugin({
       logger: silentLogger(),
@@ -332,12 +336,16 @@ describe("exit handling", () => {
       }
     })(pluginInput(), {});
 
-    expect(process.listenerCount("beforeExit")).toBe(before + 1);
+    expect(process.listenerCount("beforeExit")).toBe(before.beforeExit + 1);
+    expect(process.listenerCount("SIGINT")).toBe(before.SIGINT + 1);
+    expect(process.listenerCount("SIGTERM")).toBe(before.SIGTERM + 1);
     try {
       process.emit("beforeExit", 0);
       process.emit("beforeExit", 0);
     } finally {
-      // `once` handlers self-remove, but SIGINT/SIGTERM were never fired.
+      // Never fire a real signal here: ours would re-raise it at the test runner.
+      // The re-raise semantics are tested against an injected process in
+      // `@vymalo/opencode-core-otel` (test/exit-handlers.test.ts).
       for (const signal of ["SIGINT", "SIGTERM"] as const) {
         const [handler] = process.listeners(signal).slice(-1);
         if (handler) {
@@ -346,7 +354,9 @@ describe("exit handling", () => {
       }
     }
     // The `once` handler removed itself, so a second beforeExit is a no-op.
-    expect(process.listenerCount("beforeExit")).toBe(before);
+    expect(process.listenerCount("beforeExit")).toBe(before.beforeExit);
+    expect(process.listenerCount("SIGINT")).toBe(before.SIGINT);
+    expect(process.listenerCount("SIGTERM")).toBe(before.SIGTERM);
   });
 });
 
