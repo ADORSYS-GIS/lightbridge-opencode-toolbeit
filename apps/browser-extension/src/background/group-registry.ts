@@ -1,4 +1,4 @@
-import { browser } from "wxt/browser";
+import { type Browser, browser } from "wxt/browser";
 
 import { db } from "../shared/db";
 import type { GroupRecord } from "../shared/types";
@@ -18,7 +18,7 @@ function hasTabGroups(): boolean {
 async function waitForComplete(
   tabId: number,
   timeoutMs = LOAD_TIMEOUT_MS
-): Promise<chrome.tabs.Tab> {
+): Promise<Browser.tabs.Tab> {
   const deadline = Date.now() + timeoutMs;
   let tab = await browser.tabs.get(tabId);
   while (tab.status !== "complete" && Date.now() < deadline) {
