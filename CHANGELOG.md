@@ -4,9 +4,13 @@ All notable changes to the **OpenCode Toolbelt** — the `@vymalo/*` plugin suit
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
+All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`, `plugin-bundle`). PR references link to the change.
 
 ## [Unreleased]
+
+### Fixed
+
+- **plugin-bundle:** The bundled oauth2 artifact (`dist/index.mjs`) was shipping its own copy of `effect` (plus `@opencode/plugin` and `@opencode/schema`). The Rolldown externals list still named the v1 package `@opencode-ai/plugin`, so none of the v2 dependencies were external; the artifact was 807 KB instead of 125 KB, and a second `effect` copy cannot reach the host's log sink (ADR-0019, ADR-0014). `@opencode/plugin` (including `/effect`) and `effect` are now external, and `build` fails if either is ever inlined again. Docs and `pnpm-workspace.yaml` comments no longer cite `@opencode-ai/plugin`. ([#143](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/143))
 
 ### Removed
 
