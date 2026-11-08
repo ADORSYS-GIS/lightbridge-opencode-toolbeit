@@ -27,6 +27,15 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - cronstrue@3.20.0
+  # AI SDK v7 line (ai 7.x / @ai-sdk/* 4.x): freshly-published majors that trip
+  # pnpm's release-freshness gate on publish age alone. DevDependencies only
+  # (opencode-oauth2's e2e test) — the gate is noise here, same loose-mode
+  # mechanism as cronstrue above.
+  - '@ai-sdk/gateway@4.0.90'
+  - '@ai-sdk/openai@4.0.73'
+  - '@ai-sdk/provider-utils@5.0.46'
+  - '@ai-sdk/provider@4.0.18'
+  - ai@7.0.112
 
 # Transitive dependencies pulled in through @modelcontextprotocol/sdk (by
 # opencode-browser-mcp / opencode-devtools-mcp) that carry high-severity
