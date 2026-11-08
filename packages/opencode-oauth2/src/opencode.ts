@@ -157,7 +157,16 @@ export function createOpencodeOauth2Plugin(
 
         const pluginConfig: OAuth2ModelSyncConfigInput = {
           servers,
-          cacheNamespace: CACHE_NAMESPACE,
+          // Optional tuning read from the plugin's own `options`. Unset keeps the
+          // defaults (`cacheNamespace` falls back to CACHE_NAMESPACE). An invalid
+          // value makes `validateConfig` throw, which is logged as
+          // `oauth2_runtime_build_failed`.
+          cacheNamespace:
+            typeof ctx.options.cacheNamespace === "string"
+              ? ctx.options.cacheNamespace
+              : CACHE_NAMESPACE,
+          httpTimeoutMs: ctx.options.httpTimeoutMs,
+          tokenExpirySkewMs: ctx.options.tokenExpirySkewMs,
           logLevel
         };
         const signature = runtimeSignature(pluginConfig);

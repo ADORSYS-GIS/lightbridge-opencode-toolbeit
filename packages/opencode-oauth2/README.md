@@ -107,7 +107,7 @@ These apply to both config shapes above.
 | `responseApi` | `false` | Route inference through the OpenAI **Responses API** (`/v1/responses`) instead of Chat Completions (`/v1/chat/completions`). When `true`, the provider is registered with `package: "aisdk:@ai-sdk/openai"` (the native OpenAI provider, whose default model targets Responses since AI SDK v5) rather than `aisdk:@ai-sdk/openai-compatible`. The plugin stamps an inert placeholder `apiKey` so the native provider can be constructed (the real OAuth bearer is still injected per request, so the placeholder is never sent) and repairs, via `session.hook("http.response")`, Responses SSE streams that omit `output_index`/`content_index` (seen with Envoy AI Gateway; otherwise OpenCode fails with `text part <id> not found`). Only enable this when your gateway implements the OpenAI Responses contract for the model you use. |
 | `jwksUri` | _(unset)_ | Reserved; not currently used at runtime. |
 
-The `cacheNamespace` / `httpTimeoutMs` / `tokenExpirySkewMs` tuning knobs of v1's `pluginConfig.oauth2ModelSync` block are not exposed through `options` in v2; the defaults apply (`cacheNamespace` is fixed at `opencode-oauth2-model-sync`, which is part of the on-disk cache path and the login shared with lightbridge). For reference:
+The plugin's own `options` (next to `servers` and `logLevel`) also accept the tuning knobs v1 kept in `pluginConfig.oauth2ModelSync`. Changing `cacheNamespace` moves the on-disk cache path, so it forces a new login and detaches you from the cache shared with lightbridge — leave it unless you need isolation. An invalid value is logged as `oauth2_runtime_build_failed`.
 
 | Field | Default | Notes |
 | --- | --- | --- |
@@ -268,7 +268,7 @@ pnpm --filter @vymalo/opencode-oauth2 build
 | `options.apiKey` | `settings.apiKey` |
 | `options.headers` | `headers` (on the provider) |
 | `pluginConfig.oauth2ModelSync.servers` | the plugin's `options.servers` |
-| `pluginConfig.oauth2ModelSync.{cacheNamespace,httpTimeoutMs,tokenExpirySkewMs}` | not exposed; defaults apply |
+| `pluginConfig.oauth2ModelSync.{cacheNamespace,httpTimeoutMs,tokenExpirySkewMs}` | the plugin's `options.{cacheNamespace,httpTimeoutMs,tokenExpirySkewMs}`, same defaults |
 | host `config.logLevel` | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
 | `chat.headers` hook | `session.hook("model.request")` |
 | `options.fetch` Responses-SSE wrapper | `session.hook("http.response")` |
@@ -277,5 +277,20 @@ pnpm --filter @vymalo/opencode-oauth2 build
 
 The `oauth2` block's own fields (`issuer`, `clientId`, `authFlow`, `pkce`, `responseApi`, …), the five
 auth flows, the token cache layout and every `oauth2_*` event name are unchanged — an existing login
-survives the upgrade. A configuration error (bad `redirectPort`, unknown `authFlow`) no longer
-rejects plugin load: it is logged as `oauth2_config_invalid` and the plugin manages nothing.
+survives the upgrade.
+
+### Behaviour changes in v2
+
+- **Invalid user config no longer rejects plugin load.** v1 failed loudly on a bad `redirectPort`,
+  unknown `authFlow` or non-boolean `responseApi`. In v2 the plugin logs
+  `oauth2_config_invalid` (level `error`, field `error` holds the validation message) and **manages
+  no providers**, because a throw inside a provider transform could take down the whole provider
+  pipeline. A typo therefore shows up as a *missing provider*, not an error screen. Logs go to the
+  host log file, not the terminal ([ADR-0014](../../docs/adr/0014-suite-wide-no-terminal-mirror.md)):
+  to debug "why is my provider missing", search the OpenCode log for `oauth2_config_invalid`.
+  (An invalid tuning option is logged as `oauth2_runtime_build_failed` instead.)
+- **Startup no longer blocks on warmup.** v1 awaited the first sync (and, on a TTY, the interactive
+  login) inside the `config` hook. In v2 the transform is synchronous, so the runtime builds in the
+  background: providers first appear without models and are filled in by a `provider.reload()` once
+  warmup finishes, and the first login prompt appears in the background rather than before the UI.
+  A request that arrives mid-warmup waits for it.

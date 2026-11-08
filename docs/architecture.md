@@ -32,6 +32,14 @@ If you just want to copy YAML, jump to the [GitHub Actions](./github-actions.md)
 > ([ADR-0020](adr/0020-oauth2-integration-domain.md)). Where the text below says `config`,
 > `chat.headers`, `options.*` or `pluginConfig`, read the v2 equivalent; the step-by-step behaviour is
 > otherwise accurate.
+>
+> **Behaviour changes in v2.** (1) Invalid user config (bad `redirectPort`, unknown `authFlow`,
+> non-boolean `responseApi`) no longer rejects plugin load: the plugin logs `oauth2_config_invalid`
+> at `error` and manages no providers, so a typo yields a *missing provider* rather than a loud
+> failure. Search the host log for `oauth2_config_invalid`. (2) Startup no longer blocks on warmup:
+> the runtime builds in the background and `provider.reload()` fills in models, so the first login
+> prompt appears after the UI is up. `options.{cacheNamespace,httpTimeoutMs,tokenExpirySkewMs}`
+> configure the engine as `pluginConfig.oauth2ModelSync` did.
 
 ## The two hooks
 

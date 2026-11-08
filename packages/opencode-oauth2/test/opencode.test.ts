@@ -327,6 +327,56 @@ describe("provider transform + model.request", () => {
   });
 });
 
+describe("tuning options", () => {
+  it("passes cacheNamespace, httpTimeoutMs and tokenExpirySkewMs through to the engine", async () => {
+    const cacheDir = await freshCacheDir("opencode-v2-tuning-");
+    const harness = await start({
+      cacheDir,
+      sources: declared(),
+      options: { cacheNamespace: "custom-ns", httpTimeoutMs: 1234, tokenExpirySkewMs: 5678 }
+    });
+    harness.runTransform();
+    await harness.settle();
+
+    const config = (harness.handle.runtime() as unknown as { config: Record<string, unknown> })
+      .config;
+    expect(config).toMatchObject({
+      cacheNamespace: "custom-ns",
+      httpTimeoutMs: 1234,
+      tokenExpirySkewMs: 5678
+    });
+  });
+
+  it("keeps the defaults, including the shared cache namespace, when unset", async () => {
+    const harness = await start({ sources: declared() });
+    harness.runTransform();
+    await harness.settle();
+
+    const config = (harness.handle.runtime() as unknown as { config: Record<string, unknown> })
+      .config;
+    expect(config).toMatchObject({
+      cacheNamespace: "opencode-oauth2-model-sync",
+      httpTimeoutMs: 15000,
+      tokenExpirySkewMs: 30000
+    });
+  });
+
+  it("logs an invalid tokenExpirySkewMs as a failed build", async () => {
+    const logger = recordingLogger();
+    const harness = await start({
+      sources: declared(),
+      options: { tokenExpirySkewMs: -1 },
+      factory: { logger }
+    });
+    harness.runTransform();
+    await harness.settle();
+    expect(logger.error).toHaveBeenCalledWith(
+      "oauth2_runtime_build_failed",
+      expect.objectContaining({ error: expect.stringMatching(/tokenExpirySkewMs/) })
+    );
+  });
+});
+
 describe("invalid user config is reported, not thrown", () => {
   const cases: Array<[string, Record<string, unknown>, RegExp]> = [
     [

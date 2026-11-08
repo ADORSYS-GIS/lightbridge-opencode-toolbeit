@@ -134,7 +134,7 @@ The v2 manifest is `{ auth?, config?, remote_config? }`, and a well-known origin
 - **Bad user config is reported, not thrown.** v1 rejected the `config` hook with the validation
   message (`redirectPort`, `authFlow`, `responseApi`). A throw inside a v2 transform would take down
   the provider pipeline for every plugin, so the plugin logs `oauth2_config_invalid` at `error` and
-  manages nothing. Per [ADR-0014](0014-suite-wide-no-terminal-mirror.md) that log is not on the
+  manages nothing. Search the host log for `oauth2_config_invalid`. Per [ADR-0014](0014-suite-wide-no-terminal-mirror.md) that log is not on the
   terminal; a misconfigured provider is simply absent until the host log is read.
 - **Periodic sync still does not push models into the host.** As in v1, the scheduler refreshes the
   cache; the provider list is rebuilt after warmup and after the lazy first-request sync, not on every
