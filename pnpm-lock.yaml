@@ -366,13 +366,16 @@ importers:
 
   packages/opencode-repo-auth:
     dependencies:
-      '@opencode-ai/plugin':
-        specifier: 1.18.32
-        version: 1.18.32
+      '@opencode/plugin':
+        specifier: 2.2.6
+        version: 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
       '@vymalo/opencode-auth-core':
         specifier: workspace:*
         version: link:../opencode-auth-core
     devDependencies:
+      effect:
+        specifier: 4.1.0
+        version: 4.1.0
       vite:
         specifier: ^8.3.0
         version: 8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1)

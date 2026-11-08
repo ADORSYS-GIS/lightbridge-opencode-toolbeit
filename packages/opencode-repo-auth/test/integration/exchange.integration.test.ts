@@ -2,13 +2,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { Hooks, PluginInput } from "@opencode-ai/plugin";
+import type { Plugin } from "@opencode/plugin/effect";
 import {
   FileCacheStore,
   hashCacheKey,
   type Logger,
   type TokenSet
 } from "@vymalo/opencode-auth-core/lib";
+import { Effect } from "effect";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createOpencodeRepoAuthPlugin } from "../../src/opencode.js";
@@ -19,68 +20,80 @@ const TOKEN_URL = process.env.INTEGRATION_REPO_AUTH_TOKEN_URL;
 // test-env/wiremock/mappings/repo-auth-token.json).
 const SEALED_MEMBER_TOKEN = "eyJhbGciOiJSUzI1NiJ9.sealed-project-bearer-for-proj-123.sig";
 
-type OpenCodeConfig = Parameters<NonNullable<Hooks["config"]>>[0];
-
 function logger(): Logger {
   // Silence everything by default; flip to console for debugging.
   const noop = () => undefined;
   return { trace: noop, debug: noop, info: noop, warn: noop, error: noop };
 }
 
-function pluginInput(): PluginInput {
-  return { client: { app: { log: async () => undefined } } } as unknown as PluginInput;
-}
-
-function repoAuthMeta(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function repoAuthSettings(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   const origin = new URL(TOKEN_URL ?? "http://127.0.0.1:18080").origin;
   return {
-    projectId: "proj-123",
-    issuer: "https://idp.example.com/realms/acme",
-    clientId: "opencode-cli",
-    scopes: ["openid", "offline_access"],
-    authFlow: "device_code",
-    pkce: false,
-    tokenEndpoint: TOKEN_URL,
-    deviceAuthorizationEndpoint: `${origin}/realms/acme/protocol/openid-connect/auth/device`,
-    ...overrides
+    repoAuth: {
+      projectId: "proj-123",
+      issuer: "https://idp.example.com/realms/acme",
+      clientId: "opencode-cli",
+      scopes: ["openid", "offline_access"],
+      authFlow: "device_code",
+      pkce: false,
+      tokenEndpoint: TOKEN_URL,
+      deviceAuthorizationEndpoint: `${origin}/realms/acme/protocol/openid-connect/auth/device`,
+      ...overrides
+    }
   };
 }
 
-function configWithProvider(providerId: string, meta: Record<string, unknown>): OpenCodeConfig {
-  return {
-    provider: {
-      [providerId]: {
-        options: { meta: { repoAuth: meta } },
-        models: { "test/model": {} }
-      }
-    }
-  } as OpenCodeConfig;
-}
-
 interface StartedPlugin {
-  chatHeaders: NonNullable<Hooks["chat.headers"]>;
-  /** The config object the config hook mutated (stamped Authorization). */
-  mutatedConfig: OpenCodeConfig;
+  /** Fire `model.request` for a provider and return the mutated headers. */
+  modelRequest: (providerID: string) => Promise<Record<string, string>>;
 }
 
 async function startPlugin(
   cacheDir: string,
   providerId: string,
-  meta: Record<string, unknown>
+  overrides: Record<string, unknown> = {}
 ): Promise<StartedPlugin> {
-  const hooks = await createOpencodeRepoAuthPlugin({
-    logger: logger(),
-    cacheDir,
-    cwd: tmpdir()
-  })(pluginInput());
-  const configHook = hooks.config;
-  const chatHeaders = hooks["chat.headers"];
-  if (!configHook || !chatHeaders) {
-    throw new Error("plugin did not register config / chat.headers hooks");
+  let transformCb: ((editor: unknown) => void) | undefined;
+  let modelRequestHook: ((event: Record<string, unknown>) => Effect.Effect<void>) | undefined;
+  const registration = Effect.succeed({ dispose: Effect.void });
+  const ctx = {
+    options: {},
+    location: { directory: tmpdir() },
+    provider: {
+      transform: (cb: (editor: unknown) => void) => {
+        transformCb = cb;
+        return registration;
+      }
+    },
+    session: {
+      hook: (name: string, cb: (event: Record<string, unknown>) => Effect.Effect<void>) => {
+        if (name === "model.request") {
+          modelRequestHook = cb;
+        }
+        return registration;
+      }
+    }
+  } as unknown as Plugin.Context;
+
+  await Effect.runPromise(
+    Effect.scoped(
+      createOpencodeRepoAuthPlugin({ logger: logger(), cacheDir, cwd: tmpdir() }).effect(ctx)
+    )
+  );
+  if (!transformCb || !modelRequestHook) {
+    throw new Error("plugin did not register provider.transform / model.request");
   }
-  const mutatedConfig = configWithProvider(providerId, meta);
-  await configHook(mutatedConfig);
-  return { chatHeaders, mutatedConfig };
+  transformCb({
+    list: () => [{ provider: { id: providerId, settings: repoAuthSettings(overrides) } }]
+  });
+  const hook = modelRequestHook;
+  return {
+    modelRequest: async (providerID) => {
+      const headers: Record<string, string> = {};
+      await Effect.runPromise(hook({ model: { providerID, id: "test/model" }, headers }));
+      return headers;
+    }
+  };
 }
 
 function humanToken(): TokenSet {
@@ -90,13 +103,6 @@ function humanToken(): TokenSet {
     refreshToken: "human-root-refresh-token",
     expiresAt: Date.now() + 3_600_000
   };
-}
-
-function stampedAuthorization(config: OpenCodeConfig, providerKey: string): string | undefined {
-  const provider = config.provider?.[providerKey] as
-    | { options?: { headers?: Record<string, string> } }
-    | undefined;
-  return provider?.options?.headers?.Authorization;
 }
 
 interface JournalEntry {
