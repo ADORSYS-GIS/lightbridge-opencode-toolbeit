@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, relative, resolve } from "node:path";
 
 import config from "../rolldown.config.mjs";
+import { assertExternalsNotInlined } from "./check-artifact.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../../..");
@@ -27,7 +28,10 @@ async function main() {
   });
 
   try {
-    await bundle.write(output);
+    const { output: chunks } = await bundle.write(output);
+    const entry = chunks.find((chunk) => chunk.type === "chunk" && chunk.isEntry);
+    if (!entry) throw new Error("rolldown produced no entry chunk");
+    assertExternalsNotInlined(entry);
   } finally {
     await bundle.close();
   }
