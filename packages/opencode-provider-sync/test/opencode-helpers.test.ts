@@ -14,7 +14,8 @@ import {
   propagateCachedBearer,
   resolveCachedBearer,
   resolveProviderPackage,
-  runtimeSignature
+  runtimeSignature,
+  upsertManagedProvider
 } from "../src/opencode-helpers.js";
 
 const KEYS = { settingsKeys: ["oauth2", "oauth2ModelSync"] as const };
@@ -287,6 +288,59 @@ describe("parsePluginOptionsServers", () => {
     expect(() =>
       parsePluginOptionsServers({ servers: [{ ...SERVER, redirectPort: 0 }] }, silentLogger())
     ).toThrow(/options\.servers\[0\] \(id=srv-1\)/);
+  });
+});
+
+describe("upsertManagedProvider", () => {
+  const NEXT = {
+    name: "Gateway",
+    package: "aisdk:@ai-sdk/openai-compatible",
+    settings: { baseURL: "https://api.example.com/v1" }
+  };
+
+  it("adds an absent provider enabled, with the given fields and an empty model list", () => {
+    const { editor, providers, models } = fakeEditor();
+
+    upsertManagedProvider(editor, "gw", NEXT);
+
+    const info = providers.get("gw");
+    expect(info).toMatchObject({ id: "gw", activation: "enabled", ...NEXT });
+    expect(models.get("gw")?.size).toBe(0);
+    expect(() => Schema.decodeUnknownSync(Provider.Info)(info)).not.toThrow();
+  });
+
+  it("updates an existing provider in place, keeping activation, headers and its models", () => {
+    const { editor, providers, models } = fakeEditor([
+      {
+        id: "gw",
+        name: "Old",
+        activation: "auto",
+        package: "something-else",
+        settings: { stale: true },
+        headers: { "x-team": "a" }
+      }
+    ]);
+    editor.models.set("gw", [modelOf("gw", "m1")]);
+
+    upsertManagedProvider(editor, "gw", NEXT);
+
+    expect(providers.get("gw")).toMatchObject({
+      id: "gw",
+      activation: "auto",
+      headers: { "x-team": "a" },
+      ...NEXT
+    });
+    // `settings` is replaced wholesale: merging prior settings is the caller's job.
+    expect(providers.get("gw")?.settings).toEqual(NEXT.settings);
+    expect([...(models.get("gw")?.keys() ?? [])]).toEqual(["m1"]);
+  });
+
+  it("is idempotent", () => {
+    const { editor, providers } = fakeEditor();
+    upsertManagedProvider(editor, "gw", NEXT);
+    const once = structuredClone(providers.get("gw"));
+    upsertManagedProvider(editor, "gw", NEXT);
+    expect(providers.get("gw")).toEqual(once);
   });
 });
 

@@ -42,6 +42,7 @@ export {
   resolveCachedBearer,
   resolveProviderPackage,
   runtimeSignature,
+  upsertManagedProvider,
   type CollectManagedProvidersOptions,
   type HasProviderSettings,
   type ManagedProviders,
@@ -49,5 +50,6 @@ export {
   type ProviderEditor,
   type ProviderExtension,
   type ProviderInfo,
-  type ProviderServerConfigInput
+  type ProviderServerConfigInput,
+  type UpsertManagedProviderInput
 } from "./opencode-helpers.js";

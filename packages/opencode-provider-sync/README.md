@@ -25,6 +25,7 @@ share it instead of forking it.
   fused model+token on-disk state, atomic-write via auth-core's generic store.
 - `scheduler.ts` — a backoff-retrying interval runner.
 - Provider-editor wiring helpers (`./lib` only) — `collectManagedProviders`,
+  `upsertManagedProvider` (add-or-update-in-place of one provider, shared by both consumers),
   `parsePluginOptionsServers`, `parseOAuthExtension`, `mergeDiscoveredModels`,
   `resolveCachedBearer` / `propagateCachedBearer`, `resolveProviderPackage`,
   `applyResponsesApiSettings`, `runtimeSignature` — the OpenCode v2
