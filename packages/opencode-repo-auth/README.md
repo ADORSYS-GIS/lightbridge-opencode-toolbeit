@@ -54,8 +54,8 @@ npm install @vymalo/opencode-repo-auth
 ```
 
 The plugin opts in **per provider** via `settings.repoAuth`; a missing or malformed block
-warns-and-skips that provider rather than aborting the whole transform. Nothing is exchanged at
-startup — the first model request logs in (if needed) and exchanges.
+warns-and-skips that provider rather than aborting the whole transform. Loading never blocks on
+login: a non-interactive warmup exchanges in the background and stamps `Provider.Info.headers.Authorization` (so `models-info` can fetch a protected `modelsInfoUrl`) only if it succeeds; with no login yet, the first model request logs in.
 
 Plugin option: `logLevel` (`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`), else the host's `OPENCODE_LOG_LEVEL`.
 Diagnostics go to OpenCode's own log, never the terminal (the device-code login prompt is the one
@@ -99,7 +99,7 @@ MIT
 | `options.baseURL` | `settings.baseURL` |
 | `options.meta.repoAuth` | `settings.repoAuth` |
 | host `config.logLevel` drove the log level | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
-| config-time bearer stamp onto `options.headers` | **removed** — the bearer is set per request only |
+| config-time bearer stamp onto `options.headers` | `Provider.Info.headers.Authorization`, resolved async then stamped on `provider.reload()`; never stamped if the exchange fails |
 
 The `repoAuth` block's own fields, the exchange wire contract, the cache location (so an existing
 login survives) and the surviving `repo_auth_*` event names are unchanged. `effect` `^4.0.0` is now a

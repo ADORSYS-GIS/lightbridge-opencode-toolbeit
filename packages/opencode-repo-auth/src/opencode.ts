@@ -2,6 +2,7 @@ import { Plugin } from "@opencode/plugin/effect";
 import type { AuthServerConfigInput } from "@vymalo/opencode-auth-core/lib";
 import { Effect } from "effect";
 
+import { dropStampedAuthorization, propagateCachedBearer, resolveCachedBearer } from "./bearer.js";
 import { hasOAuth2Conflict, parseRepoAuthSettings } from "./config.js";
 import { resolveOriginRemote, resolveRepoRoot } from "./git.js";
 import {
@@ -35,6 +36,12 @@ export interface ManagedProvider {
 interface RuntimeState {
   pluginByProvider: Map<string, RepoAuthPlugin>;
   signature?: string;
+  /** Last bearer resolved (async, outside the transform) per provider. */
+  bearers: Map<string, string>;
+  /** What `propagateCachedBearer` last wrote per provider. */
+  stamped: Map<string, string>;
+  /** Signature a warmup has already been started for (loop guard). */
+  warmedSignature?: string;
 }
 
 /** What the transform reads off each `ProviderRecord` — decoupled for tests. */
@@ -190,10 +197,12 @@ function runtimeSignature(managed: Map<string, ManagedProvider>): string {
  *    the project token and writes `Authorization` onto the mutable
  *    `event.headers`. **Fails closed** — on any exchange error no header is set.
  *
- * v1 also stamped the bearer onto `provider.options.headers` at config time so
- * `models-info` could fetch an OAuth2-protected endpoint. That is dropped: a
- * transform cannot await a token, and a stamped header would survive a failed
- * exchange as a stale bearer, which contradicts fail-closed.
+ * Config-time bearer handoff (for `models-info`'s OAuth2-protected endpoint)
+ * is split in two, as in provider-sync: an async `resolveCachedBearer` runs
+ * outside the transform, then `ctx.provider.reload()` re-runs the transform,
+ * whose sync `propagateCachedBearer` stamps `Provider.Info.headers` only if a
+ * token was obtained. If a later exchange fails, `model.request` strips the
+ * stamp it wrote, so no stale bearer survives.
  */
 export function createOpencodeRepoAuthPlugin(
   factoryOptions: OpenCodePluginFactoryOptions = {}
@@ -217,7 +226,36 @@ export function createOpencodeRepoAuthPlugin(
 
       const state: RuntimeState = {
         pluginByProvider: new Map<string, RepoAuthPlugin>(),
-        signature: undefined
+        signature: undefined,
+        bearers: new Map<string, string>(),
+        stamped: new Map<string, string>()
+      };
+
+      // Needed to run `ctx.provider.reload()` from the async warmup, which
+      // outlives the plugin's own fiber. Providing the captured host context
+      // keeps any logging it does on the host logger (ADR-0014).
+      const hostContext = yield* captureHostContext;
+
+      /**
+       * ASYNC half of the models-info handshake, run outside the transform:
+       * resolve each managed provider's bearer non-interactively, then reload
+       * the providers so the transform stamps whatever succeeded. A failed
+       * exchange yields no bearer, so nothing is stamped (fail closed).
+       */
+      const warmBearers = async (signature: string): Promise<void> => {
+        let changed = false;
+        for (const [providerId, plugin] of [...state.pluginByProvider.entries()]) {
+          const bearer = await resolveCachedBearer(providerId, plugin, log);
+          if (bearer && state.bearers.get(providerId) !== bearer) {
+            state.bearers.set(providerId, bearer);
+            changed = true;
+          } else if (!bearer) {
+            state.bearers.delete(providerId);
+          }
+        }
+        if (changed && state.signature === signature) {
+          await Effect.runPromise(Effect.provideContext(ctx.provider.reload(), hostContext));
+        }
       };
 
       log.trace("repo_auth_plugin_start", { logLevel });
@@ -237,7 +275,10 @@ export function createOpencodeRepoAuthPlugin(
 
         if (managed.size === 0) {
           state.pluginByProvider.clear();
+          state.bearers.clear();
+          state.stamped.clear();
           state.signature = undefined;
+          state.warmedSignature = undefined;
           log.trace("repo_auth_transform_finished", { managedCount: 0 });
           return;
         }
@@ -275,10 +316,36 @@ export function createOpencodeRepoAuthPlugin(
           }
           state.pluginByProvider = rebuilt;
           state.signature = signature;
+          state.bearers.clear();
+          state.stamped.clear();
         } else {
           log.trace("repo_auth_runtime_reused", { providerCount: managed.size });
         }
+
+        // SYNC half: write only bearers already resolved. Never awaits.
+        for (const providerId of state.pluginByProvider.keys()) {
+          propagateCachedBearer(
+            editor,
+            providerId,
+            state.bearers.get(providerId),
+            log,
+            state.stamped
+          );
+        }
         log.trace("repo_auth_transform_finished", { managedCount: state.pluginByProvider.size });
+
+        // Kick the async warmup once per managed-set signature; its reload
+        // re-enters this transform with the same signature and so does not
+        // warm again.
+        if (state.warmedSignature !== state.signature && state.signature) {
+          const warmSignature = state.signature;
+          state.warmedSignature = warmSignature;
+          void warmBearers(warmSignature).catch((error) => {
+            log.debug("repo_auth_bearer_warmup_failed", {
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+        }
       });
 
       yield* ctx.session.hook("model.request", (event) =>
@@ -308,7 +375,10 @@ export function createOpencodeRepoAuthPlugin(
               tokenType: token.tokenType || "Bearer"
             });
           } catch {
-            log.trace("repo_auth_model_request_no_bearer", { providerId });
+            // The config-time stamp must not outlive a failed exchange: strip
+            // it if (and only if) it is the exact value we wrote.
+            const dropped = dropStampedAuthorization(event.headers, state.stamped.get(providerId));
+            log.trace("repo_auth_model_request_no_bearer", { providerId, droppedStamp: dropped });
           }
         })
       );

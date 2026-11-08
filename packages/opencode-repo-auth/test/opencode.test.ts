@@ -42,12 +42,19 @@ interface ProviderFixture {
   id: string;
   settings?: Record<string, unknown>;
   integrationID?: string;
+  headers?: Record<string, string>;
 }
 
 interface Harness {
   hooks: Map<string, AnyHook>;
   /** Run the registered provider transform over a fresh editor. */
   transform: (providers: ProviderFixture[]) => void;
+  /** Number of `ctx.provider.reload()` calls so far. */
+  reloads: () => number;
+  /** Wait until the async bearer warmup has reloaded (or time out quietly). */
+  settle: (reloads?: number) => Promise<void>;
+  /** The provider fixtures the transform last ran over (mutated in place). */
+  providers: () => ProviderFixture[];
   /** Fire `model.request` for a provider; returns the (mutated) headers. */
   modelRequest: (
     providerID: string,
@@ -58,6 +65,8 @@ interface Harness {
 function fakeCtx(options: Record<string, unknown>, directory: string) {
   const hooks = new Map<string, AnyHook>();
   let transformCb: ((editor: unknown) => void) | undefined;
+  let current: ProviderFixture[] = [];
+  let reloadCount = 0;
   const registration = Effect.succeed({ dispose: Effect.void });
   const ctx = {
     options,
@@ -66,7 +75,12 @@ function fakeCtx(options: Record<string, unknown>, directory: string) {
       transform: (cb: (editor: unknown) => void) => {
         transformCb = cb;
         return registration;
-      }
+      },
+      reload: () =>
+        Effect.sync(() => {
+          reloadCount += 1;
+          transformCb?.(editorOf(current));
+        })
     },
     session: {
       hook: (name: string, cb: AnyHook) => {
@@ -75,11 +89,32 @@ function fakeCtx(options: Record<string, unknown>, directory: string) {
       }
     }
   } as unknown as Plugin.Context;
-  return { ctx, hooks, transformCb: () => transformCb };
+  return {
+    ctx,
+    hooks,
+    transformCb: () => transformCb,
+    reloads: () => reloadCount,
+    setProviders: (providers: ProviderFixture[]) => {
+      current = providers;
+    },
+    providers: () => current
+  };
 }
 
 function editorOf(providers: ProviderFixture[]) {
-  return { list: () => providers.map((provider) => ({ provider })) };
+  return {
+    list: () => providers.map((provider) => ({ provider })),
+    get: (id: string) => {
+      const provider = providers.find((candidate) => candidate.id === id);
+      return provider ? { provider } : undefined;
+    },
+    update: (id: string, fn: (provider: ProviderFixture) => void) => {
+      const provider = providers.find((candidate) => candidate.id === id);
+      if (provider) {
+        fn(provider);
+      }
+    }
+  };
 }
 
 function run(plugin: Plugin.Plugin, ctx: Plugin.Context) {
@@ -100,7 +135,15 @@ async function start(
       if (!cb) {
         throw new Error("provider.transform was not registered");
       }
+      fake.setProviders(providers);
       cb(editorOf(providers));
+    },
+    reloads: fake.reloads,
+    providers: fake.providers,
+    settle: async (reloads = 1) => {
+      for (let i = 0; i < 100 && fake.reloads() < reloads; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
     },
     modelRequest: async (providerID, headers = {}) => {
       const hook = fake.hooks.get("model.request");
@@ -213,7 +256,7 @@ describe("createOpencodeRepoAuthPlugin", () => {
     expect(headers.Authorization).toBeUndefined();
   });
 
-  it("does not resolve any token inside the transform (no I/O, sync and cheap)", async () => {
+  it("does not resolve any token inside the transform itself (sync and cheap)", async () => {
     const cacheDir = await tmp("repo-auth-oc-sync-");
     await seedHuman(cacheDir);
     const fetchImpl = vi.fn(async () => makeJsonResponse({}));
@@ -454,6 +497,147 @@ describe("createOpencodeRepoAuthPlugin", () => {
     const logger = createRecordingLogger();
     await start({ logger });
     expect(logger.events.some((e) => e.event === "repo_auth_remote_missing")).toBe(true);
+  });
+});
+
+describe("config-time bearer handoff (async resolve, sync stamp)", () => {
+  const ok = async () =>
+    makeJsonResponse({ access_token: "project-bearer", token_type: "Bearer", expires_in: 300 });
+
+  it("stamps Provider.Info.headers.Authorization after the async warmup reloads", async () => {
+    const cacheDir = await tmp("repo-auth-oc-stamp-");
+    await seedHuman(cacheDir);
+    const logger = createRecordingLogger();
+    const harness = await start({ logger, cacheDir, fetchImpl: ok });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+
+    harness.transform([provider]);
+    // Synchronously after the transform nothing is stamped.
+    expect(provider.headers).toBeUndefined();
+
+    await harness.settle();
+    expect(harness.reloads()).toBe(1);
+    expect(provider.headers?.Authorization).toBe("Bearer project-bearer");
+    expect(
+      logger.events.some((e) => e.event === "repo_auth_bearer_propagated_to_provider_headers")
+    ).toBe(true);
+  });
+
+  it("warms once per managed set: the reload does not trigger another warmup", async () => {
+    const cacheDir = await tmp("repo-auth-oc-once-");
+    await seedHuman(cacheDir);
+    const fetchImpl = vi.fn(ok);
+    const harness = await start({ logger: createSilentLogger(), cacheDir, fetchImpl });
+
+    harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
+    await harness.settle();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(harness.reloads()).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("never overwrites a user-set Authorization (case-insensitive)", async () => {
+    const cacheDir = await tmp("repo-auth-oc-userset-");
+    await seedHuman(cacheDir);
+    const logger = createRecordingLogger();
+    const harness = await start({ logger, cacheDir, fetchImpl: ok });
+    const provider: ProviderFixture = {
+      id: "gateway",
+      settings: repoAuthSettings(),
+      headers: { authorization: "Bearer user-supplied" }
+    };
+
+    harness.transform([provider]);
+    await harness.settle();
+
+    expect(provider.headers).toEqual({ authorization: "Bearer user-supplied" });
+    expect(
+      logger.events.some((e) => e.event === "repo_auth_bearer_propagation_skipped_user_set")
+    ).toBe(true);
+  });
+
+  it("stamps nothing and never reloads on a cold cache (no interactive login at load)", async () => {
+    const cacheDir = await tmp("repo-auth-oc-coldstamp-");
+    const logger = createRecordingLogger();
+    const harness = await start({
+      logger,
+      cacheDir,
+      fetchImpl: async () => {
+        throw new Error("load-time warmup must not attempt interactive auth");
+      }
+    });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+
+    harness.transform([provider]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(provider.headers).toBeUndefined();
+    expect(harness.reloads()).toBe(0);
+    expect(
+      logger.events.some((e) => e.event === "repo_auth_bearer_propagation_skipped_no_token")
+    ).toBe(true);
+  });
+
+  it("FAILS CLOSED: a failed exchange at load stamps nothing", async () => {
+    const cacheDir = await tmp("repo-auth-oc-failstamp-");
+    await seedHuman(cacheDir);
+    const harness = await start({
+      logger: createSilentLogger(),
+      cacheDir,
+      fetchImpl: async () => new Response(JSON.stringify({ error: "denied" }), { status: 403 })
+    });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+
+    harness.transform([provider]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(provider.headers).toBeUndefined();
+    expect(harness.reloads()).toBe(0);
+  });
+
+  it("FAILS CLOSED: a later exchange failure strips the stamp it wrote, but not a user header", async () => {
+    const cacheDir = await tmp("repo-auth-oc-stripstamp-");
+    await seedHuman(cacheDir);
+    let fail = false;
+    const harness = await start({
+      logger: createSilentLogger(),
+      cacheDir,
+      // expires_in 1 is inside the skew window, so every request re-exchanges.
+      fetchImpl: async () =>
+        fail
+          ? new Response(JSON.stringify({ error: "revoked" }), { status: 403 })
+          : makeJsonResponse({
+              access_token: "project-bearer",
+              token_type: "Bearer",
+              expires_in: 1
+            })
+    });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+    harness.transform([provider]);
+    await harness.settle();
+    expect(provider.headers?.Authorization).toBe("Bearer project-bearer");
+
+    fail = true;
+    // The host merges Provider.Info.headers into the request headers.
+    const stale = await harness.modelRequest("gateway", { ...provider.headers });
+    expect(stale.Authorization).toBeUndefined();
+
+    const user = await harness.modelRequest("gateway", { Authorization: "Bearer user-set" });
+    expect(user.Authorization).toBe("Bearer user-set");
+  });
+
+  it("clears the stamp bookkeeping when the opt-in disappears", async () => {
+    const cacheDir = await tmp("repo-auth-oc-clearstamp-");
+    await seedHuman(cacheDir);
+    const harness = await start({ logger: createSilentLogger(), cacheDir, fetchImpl: ok });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+    harness.transform([provider]);
+    await harness.settle();
+
+    const bare: ProviderFixture = { id: "gateway" };
+    harness.transform([bare]);
+    expect(bare.headers).toBeUndefined();
   });
 });
 

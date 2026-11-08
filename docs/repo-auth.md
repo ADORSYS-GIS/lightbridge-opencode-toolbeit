@@ -56,7 +56,7 @@ project_id=<declared project id>
 
 ## Plugin behavior
 
-Two registrations on the v2 plugin context (`Plugin.define({ id: "vymalo.repo-auth", effect })`,
+Two registrations (plus an async warmup between them) on the v2 plugin context (`Plugin.define({ id: "vymalo.repo-auth", effect })`,
 [`opencode.ts`](../packages/opencode-repo-auth/src/opencode.ts)):
 
 ```mermaid
@@ -78,6 +78,10 @@ sequenceDiagram
     Note over OC,RA: provider (re)load — synchronous, no I/O
     OC->>RA: transform(editor)
     RA->>RA: read settings.repoAuth per provider, apply guards, rebuild runtimes if the signature changed
+    RA->>RA: stamp Provider.Info.headers.Authorization from already-resolved bearers (sync)
+    RA--)KC: (async, once per managed set) resolveCachedBearer, non-interactive
+    KC--)RA: project token, or failure (nothing stamped)
+    RA->>OC: ctx.provider.reload() only if a bearer was obtained
 
     Note over OC,RA: every model request
     OC->>RA: session.hook("model.request", event)
@@ -101,6 +105,7 @@ Runs on every provider load/reload. It must stay **synchronous and cheap**, so i
 2. **oauth2-conflict guard** (see below): a provider that looks oauth2-managed is skipped with `repo_auth_skipped_oauth2_provider` (warn).
 3. **Single-IdP guard:** two opted-in providers must resolve to the same IdP (they share one human root file); the first IdP group wins, the rest are skipped with `repo_auth_multiple_idps_unsupported`.
 4. **Build the runtimes** over `auth-core`: one `TokenRuntime` keyed by the human identity, `cacheDir = <cacheRoot>/opencode-repo-auth`. They are rebuilt only when the managed-set signature changes (`repo_auth_runtime_rebuild` / `repo_auth_runtime_reused`).
+5. **Stamp already-resolved bearers** (sync): `propagateCachedBearer(editor, id, authorization, logger, stamped)` writes `Provider.Info.headers.Authorization` only if it was handed a value. See [Config-time bearer handoff](#config-time-bearer-handoff-for-models-info).
 
 The git identity is resolved **once at plugin load** (not per transform): `repo_auth_remote_resolved` or `repo_auth_remote_missing`. Log-only, as before.
 
@@ -138,14 +143,19 @@ stateDiagram-v2
 
 The project token is **never refreshed** — exchanged tokens carry no refresh token and re-exchange is the canonical renewal (epic risk mitigation: "Exchange `aud` not preserved across refresh → default to re-exchange from the offline root"). The human root token *is* refreshed via its `offline_access` refresh token.
 
-### What v2 dropped: the config-time bearer stamp
+### Config-time bearer handoff (for `models-info`)
 
-v1 also warmed the exchange at config time and stamped `Authorization` onto `provider.options.headers`, so `@vymalo/opencode-models-info` could fetch an OAuth2-protected `meta.modelsInfoUrl`. That is gone, deliberately:
+v1 warmed the exchange at config time and stamped `provider.options.headers.Authorization`, so
+`@vymalo/opencode-models-info` could fetch an OAuth2-protected `modelsInfoUrl`. v2 keeps that capability, split in
+two because a `provider.transform` callback is synchronous and cannot await a token (the same shape as
+`@vymalo/opencode-provider-sync`'s `resolveCachedBearer` / `propagateCachedBearer`;
+[`bearer.ts`](../packages/opencode-repo-auth/src/bearer.ts)):
 
-- a `provider.transform` callback is synchronous — it cannot await a token exchange; and
-- a header stamped onto the provider would **survive a failed exchange as a stale bearer**, which contradicts fail-closed. The per-request hook is now the only place a credential is ever written.
+- **async, outside the transform:** `resolveCachedBearer(id, plugin, logger)` runs `resolveProjectToken({ interactive: false })` — never a browser/device prompt at load. It returns `"<type> <token>"`, or `undefined` on any failure (`repo_auth_bearer_propagation_skipped_no_token` / `..._empty_token`).
+- **sync, inside the transform:** `propagateCachedBearer(editor, id, authorization, logger, stamped)` writes `Provider.Info.headers.Authorization` and records the value in `stamped`. `undefined` is a no-op — **absence means "no credential"**, so a failed exchange stamps nothing. A user-set `Authorization` (case-insensitive) always wins (`repo_auth_bearer_propagation_skipped_user_set`); the `stamped` map is what lets the plugin refresh its own earlier value but never a user's.
+- **glue:** the warmup runs once per managed-set signature, then calls `ctx.provider.reload()` only if it obtained a bearer. The reload re-enters the transform with an unchanged signature, so it does not warm again.
 
-Consequence: nothing is exchanged at plugin load; the first model request pays the exchange. An OAuth2-protected metadata endpoint can no longer inherit repo-auth's bearer — that handshake belongs to the `models-info` v2 port.
+**Fail-closed is preserved, including across the stamp's lifetime.** The stamp can go stale (the project token is short-lived), and a stale stamped header on `Provider.Info.headers` would otherwise ride out on a request whose fresh exchange just failed. So on a `model.request` exchange failure the hook strips the `Authorization` header **iff its value equals the one this plugin stamped** (`dropStampedAuthorization`, reported as `droppedStamp` on `repo_auth_model_request_no_bearer`); a user-set header is never touched. On success the per-request bearer overwrites the stamp as before.
 
 ### No-op matrix
 
@@ -155,7 +165,7 @@ Consequence: nothing is exchanged at plugin load; the first model request pays t
 | Provider without `settings.repoAuth` | skipped, untouched |
 | `settings.repoAuth` without `projectId` | `repo_auth_skipped_no_project_id` (warn); no crash |
 | Provider carries `settings.oauth2` / `settings.oauth2ModelSync`, or has an `integrationID` | `repo_auth_skipped_oauth2_provider` (warn); skipped |
-| No human login yet | nothing happens at load; the first `model.request` runs the device-code login |
+| No human login yet | load-time warmup skipped, nothing stamped (`repo_auth_bearer_propagation_skipped_no_token`); the first `model.request` runs the device-code login |
 | Exchange fails (non-member / resolver error) | no header; `repo_auth_exchange_failed`; gateway 401s (fail closed) |
 
 ## Concrete walkthrough (Alice, `acme/webapp`, `proj-123`)
@@ -205,7 +215,8 @@ The flow is two-phase — **boot** (plugin load + provider transform) and **per 
 2. **Git identity (log-only):** the plugin reads `.git/config` (worktree-aware — `.git` is a *file* here pointing at the common dir) and finds `origin = git@github.com:acme/webapp.git`, normalizes it to `github.com/acme/webapp` (userinfo stripped, scp form normalized), logs `repo_auth_remote_resolved`. Nothing is derived from it in v1.
 3. **Provider transform:** the plugin finds `gateway` carries `settings.repoAuth` → parses it → `projectId = "proj-123"` + the auth config. This is the only provider it will ever touch.
 4. **Runtime:** one `TokenRuntime` (auth-core) keyed by the human identity, cache dir `~/.cache/opencode-repo-auth/`.
-5. Boot is done. **No token was read, refreshed or exchanged, and nothing was sent anywhere.** (v1 warmed the exchange here; see [What v2 dropped](#what-v2-dropped-the-config-time-bearer-stamp).)
+5. **Warmup (async, non-interactive):** `resolveCachedBearer` refreshes the human token if needed and does the exchange below. On first run there is no cached login, so it is skipped (`repo_auth_bearer_propagation_skipped_no_token`) and the login happens on the first request instead. On success the plugin calls `ctx.provider.reload()` and the transform stamps `Provider.Info.headers.Authorization` so `models-info` can fetch an OAuth2-protected `modelsInfoUrl`. A user-set `Authorization` still wins.
+6. Boot is done. Nothing was sent to the gateway.
 
 ### A chat request — what happens when Alice sends a message
 
@@ -384,6 +395,8 @@ cache + inject
 | `repo_auth_human_token_ensured` | `ensure(human)` result | debug |
 | `repo_auth_exchange_started` / `_success` / `_failed` | token exchange | info / info / error |
 | `repo_auth_exchange_cache_hit` / `_miss` | project-token cache read | trace |
+| `repo_auth_bearer_propagated_to_provider_headers` / `..._skipped_user_set` / `..._skipped_no_token` / `..._skipped_empty_token` | config-time stamp | debug |
+| `repo_auth_bearer_warmup_failed` | warmup / reload threw | debug |
 | `repo_auth_model_request_bearer_injected` / `repo_auth_model_request_skipped` / `repo_auth_model_request_no_bearer` | per-request injection / unmanaged provider / exchange failure degraded to no header | trace |
 
 Happy-path lifecycle events sit at `debug`/`trace` (silent at default `info`), failures at `warn`/`error` — same convention as oauth2.
@@ -424,24 +437,24 @@ sequenceDiagram
 - **oauth2-conflict guard** — never both plugins on one provider; skip + warn, never crash.
 - **Redaction** — auth-core's logger redacts `token|secret|password` fields; `scrubSecrets` masks token-shaped substrings in error bodies; `redactUrl` strips userinfo/query from logged endpoints. The normalized remote has userinfo stripped before it is ever logged.
 - **Disk** — `0o600` files, atomic rename, `0o700` dirs (auth-core `FileCacheStore`, ADR-0005).
-- **Fail closed** — exchange failure ⇒ no header ⇒ gateway 401. The plugin never invents a token, and (since v2) never writes a credential anywhere but the per-request `event.headers`, so there is no stale stamp to outlive a failed exchange.
+- **Fail closed** — exchange failure ⇒ no header ⇒ gateway 401. The plugin never invents a token, and never lets its config-time stamp outlive a failed exchange (`dropStampedAuthorization`).
 - **No content capture** — the plugin only reads/writes headers and the token cache; it never sees prompts or responses.
 
 ## Composition contract
 
-- **Ordering in `plugins`:** repo-auth only writes request headers per request, so it no longer needs to precede `models-info` for a config-time handshake (that handshake was dropped in v2). Order is otherwise cosmetic.
+- **Ordering in `plugins`:** `models-info` reads the stamped `Provider.Info.headers.Authorization` (set after repo-auth's async warmup and `provider.reload()`), so the fetch must be re-run after that reload if it 401s first; see the models-info port. ratelimit is auth-independent, so its position is cosmetic.
 - **Never on the same provider as `@vymalo/opencode-oauth2`** — documented + guarded (see [No-op matrix](#no-op-matrix)). A dev may run both plugins on *different* providers (oauth2 for one IdP, repo-auth for the gateway); they share nothing — separate cache namespaces, separate runtimes.
-- **"After any user-bearer"** (ticket wording) is interpreted as: on a managed provider, the project bearer **wins** per request (it is the more specific credential and the gateway requires it). v1's "a user-set `Authorization` wins at config time" rule went away with the config-time stamp.
+- **"After any user-bearer"** (ticket wording) is interpreted as: on a managed provider, the project bearer **wins** per request (it is the more specific credential and the gateway requires it). At config time a user-set `Authorization` still wins over the stamp.
 
 ## Testing
 
 - **Unit** (`test/*.test.ts`, vitest):
   - `git.ts`: scp vs https normalization, `user:pass@` stripping, query/fragment drop, linked-worktree `.git` file resolution, missing remote.
   - `config.ts`: `settings.repoAuth` parsing, missing `projectId`, oauth2-conflict detection (`settings.oauth2*`, `integrationID`), `AuthServerConfigInput` mapping.
-  - `opencode.ts`: a fake v2 `Plugin.Context` drives `provider.transform` and `model.request`; fail-closed on exchange error / network error / cold cache; managed-provider-only injection; IdP guard; runtime reuse; no I/O in the transform.
+  - `opencode.ts`: a fake v2 `Plugin.Context` drives `provider.transform` and `model.request`; fail-closed on exchange error / network error / cold cache / stale-stamp stripping; managed-provider-only injection; IdP guard; runtime reuse; no I/O in the transform; async-resolve + sync-stamp handoff (warm once, user header wins, nothing stamped on failure).
   - `logging.ts` (**ADR-0014 regression**): a recording `Logger.make` installed with `Logger.layer(..., { mergeWithExisting: false })` and captured through the production `captureHostContext`; asserts severity + annotations at the host sink and that `console.*` is never called by default.
   - `plugin.ts`: cache keying (`identity-<hash(identity:key)>` deterministic, NTFS-safe), exchange request shape (asserts `project_id` form param present, no `audience`), model-b re-exchange on expiry, in-flight exchange dedup, no-op matrix, reset clears human + project tokens, fail-closed on exchange error.
-- **Integration** (`test/integration/exchange.integration.test.ts`, WireMock via the [`test-env`](../test-env/) compose stack, self-skips unless `INTEGRATION_REPO_AUTH_TOKEN_URL` is set): real-HTTP exchange of a seeded human root (asserts via WireMock's request journal that the POST carries `grant_type=token-exchange` + `subject_token` + `project_id` and **no** `audience`), `model.request` injection of the sealed bearer (and no exchange at load), cache-hit without a second exchange, stale-bearer re-exchange, and non-member → 403 → fail-closed no header.
+- **Integration** (`test/integration/exchange.integration.test.ts`, WireMock via the [`test-env`](../test-env/) compose stack, self-skips unless `INTEGRATION_REPO_AUTH_TOKEN_URL` is set): real-HTTP exchange of a seeded human root (asserts via WireMock's request journal that the POST carries `grant_type=token-exchange` + `subject_token` + `project_id` and **no** `audience`), load-time warmup stamping `Provider.Info.headers` (and no stamp on a failed exchange), `model.request` injection of the sealed bearer, cache-hit without a second exchange, stale-bearer re-exchange, and non-member → 403 → fail-closed no header.
 - **Manual e2e** against the real gateway: enrolled repo + logged-in dev → gateway sees the project bearer; unenrolled repo → no header. A scripted variant against the test-env stack (real `opencode` binary, WireMock as IdP + gateway) is in [`docs/local-development.md`](local-development.md#repo-auth-end-to-end-against-the-test-env-stack).
 
 ## Out of scope / deferred
@@ -475,7 +488,7 @@ sequenceDiagram
 | `pluginConfig.repoAuth.logLevel` / host `config.logLevel` | the plugin's own `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
 | `config` hook (provider walk) | `ctx.provider.transform` |
 | `chat.headers` hook | `ctx.session.hook("model.request")` (`event.headers`, `event.model.providerID`) |
-| config-time warmup + `options.headers.Authorization` stamp | **removed** — the first request exchanges; nothing is stamped |
+| config-time warmup + `options.headers.Authorization` stamp | kept, split: async warmup then `ctx.provider.reload()`; the transform stamps `Provider.Info.headers.Authorization` |
 | oauth2 guard: `options.oauth2*` or `pluginConfig…servers` ids | `settings.oauth2*` or `integrationID` on the provider record |
 | `client.app.log` | the host's Effect logger via `captureHostContext` |
 | peer deps: none | `effect` `^4.0.0` (peer) |
@@ -484,4 +497,4 @@ The `repoAuth` block's own fields (`projectId`, `issuer`, `clientId`, `scopes`, 
 `clientSecret`, `subjectTokenSource`) are unchanged, as are the exchange wire contract, the cache layout
 (`~/.cache/opencode-repo-auth`, so an existing login survives the upgrade), and every surviving `repo_auth_*`
 event name. Renamed: `repo_auth_config_hook_*` → `repo_auth_plugin_start` / `repo_auth_transform_finished`,
-`repo_auth_chat_headers_*` → `repo_auth_model_request_*`. Removed: `repo_auth_bearer_propagat*`.
+`repo_auth_chat_headers_*` → `repo_auth_model_request_*`. The `repo_auth_bearer_propagat*` events are unchanged.

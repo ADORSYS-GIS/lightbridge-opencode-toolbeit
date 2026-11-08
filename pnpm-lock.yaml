@@ -183,7 +183,7 @@ importers:
         version: 2.2.5
       '@opencode/plugin':
         specifier: 2.2.6
-        version: 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
+        version: 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
       cron-parser:
         specifier: ^5.10.1
         version: 5.10.1
@@ -220,7 +220,7 @@ importers:
         version: 8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1)
       vitest:
         specifier: ^5.0.1
-        version: 5.1.0(@opentelemetry/api@1.9.0)(@types/node@25.9.1)(@vitest/coverage-v8@5.0.1(vitest@5.0.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
+        version: 5.1.0(@opentelemetry/api@1.9.1)(@types/node@25.9.1)(@vitest/coverage-v8@5.0.1(vitest@5.0.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
 
   packages/opencode-devtools-mcp:
     dependencies:
@@ -368,7 +368,7 @@ importers:
     dependencies:
       '@opencode/plugin':
         specifier: 2.2.6
-        version: 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.0))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
+        version: 2.2.6(@opentelemetry/semantic-conventions@1.43.0)(redis@6.3.1(@opentelemetry/api@1.9.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
       '@vymalo/opencode-auth-core':
         specifier: workspace:*
         version: link:../opencode-auth-core
@@ -3563,11 +3563,6 @@ packages:
     resolution: {integrity: sha512-YgvUTfwqyc7UXVMrB+SImsVYSmTS8X/tSrtdNZMImM+n7+QTriRXyXim0mBrTXNeqzVF0KWGgHPeiyViFFrNDw==}
     engines: {node: '>=18'}
 
-  yaml@2.9.0:
-    resolution: {integrity: sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==}
-    engines: {node: '>= 14.6'}
-    hasBin: true
-
   yaml@2.9.1:
     resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
     engines: {node: '>= 14.6'}
@@ -5319,7 +5314,7 @@ snapshots:
       multipasta: 0.2.7
       toml: 4.3.0
       uuid: 14.0.2
-      yaml: 2.9.0
+      yaml: 2.9.1
 
   effect@4.1.0: {}
 
@@ -6795,8 +6790,6 @@ snapshots:
   yallist@4.0.0: {}
 
   yallist@5.0.0: {}
-
-  yaml@2.9.0: {}
 
   yaml@2.9.1: {}
 

@@ -43,7 +43,17 @@ function repoAuthSettings(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+interface FakeProvider {
+  id: string;
+  settings: Record<string, unknown>;
+  headers?: Record<string, string>;
+}
+
 interface StartedPlugin {
+  /** The provider record as stamped by the transform (headers filled by the warmup). */
+  provider: FakeProvider;
+  /** Wait for the load-time bearer warmup (reloaded on success; a quiet wait on failure). */
+  settle: (expectReload: boolean) => Promise<void>;
   /** Fire `model.request` for a provider and return the mutated headers. */
   modelRequest: (providerID: string) => Promise<Record<string, string>>;
 }
@@ -55,6 +65,13 @@ async function startPlugin(
 ): Promise<StartedPlugin> {
   let transformCb: ((editor: unknown) => void) | undefined;
   let modelRequestHook: ((event: Record<string, unknown>) => Effect.Effect<void>) | undefined;
+  let reloads = 0;
+  const provider: FakeProvider = { id: providerId, settings: repoAuthSettings(overrides) };
+  const editor = {
+    list: () => [{ provider }],
+    get: () => ({ provider }),
+    update: (_id: string, fn: (p: FakeProvider) => void) => fn(provider)
+  };
   const registration = Effect.succeed({ dispose: Effect.void });
   const ctx = {
     options: {},
@@ -63,7 +80,12 @@ async function startPlugin(
       transform: (cb: (editor: unknown) => void) => {
         transformCb = cb;
         return registration;
-      }
+      },
+      reload: () =>
+        Effect.sync(() => {
+          reloads += 1;
+          transformCb?.(editor);
+        })
     },
     session: {
       hook: (name: string, cb: (event: Record<string, unknown>) => Effect.Effect<void>) => {
@@ -83,13 +105,20 @@ async function startPlugin(
   if (!transformCb || !modelRequestHook) {
     throw new Error("plugin did not register provider.transform / model.request");
   }
-  transformCb({
-    list: () => [{ provider: { id: providerId, settings: repoAuthSettings(overrides) } }]
-  });
+  transformCb(editor);
   const hook = modelRequestHook;
   return {
+    provider,
+    settle: async (expectReload) => {
+      for (let i = 0; i < 100 && expectReload && reloads === 0; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (!expectReload) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    },
     modelRequest: async (providerID) => {
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { ...provider.headers };
       await Effect.runPromise(hook({ model: { providerID, id: "test/model" }, headers }));
       return headers;
     }
@@ -155,22 +184,20 @@ describe.skipIf(!TOKEN_URL)("repo-auth ↔ WireMock integration", () => {
     return dir;
   }
 
-  it("exchanges the seeded human root for a sealed project bearer over real HTTP and stamps both hooks", async () => {
+  it("exchanges the seeded human root for a sealed bearer over real HTTP, stamps it, and injects it per request", async () => {
     const cacheDir = await makeCacheDir();
     await new FileCacheStore(cacheDir).save("human", humanToken());
 
-    const started = await startPlugin(cacheDir, "gateway", repoAuthMeta());
+    const started = await startPlugin(cacheDir, "gateway");
+    await started.settle(true);
 
-    // Config-time warmup already exchanged over the wire and stamped the
-    // provider headers with the sealed project bearer.
-    expect(stampedAuthorization(started.mutatedConfig, "gateway")).toBe(
-      `Bearer ${SEALED_MEMBER_TOKEN}`
-    );
+    // The load-time warmup exchanged (outside the transform) and the reload
+    // stamped Provider.Info.headers with the sealed project bearer.
+    expect(started.provider.headers?.Authorization).toBe(`Bearer ${SEALED_MEMBER_TOKEN}`);
 
-    // The per-request surface injects the same sealed bearer.
-    const output = { headers: {} as Record<string, string> };
-    await started.chatHeaders({ model: { providerID: "gateway" } }, output);
-    expect(output.headers.Authorization).toBe(`Bearer ${SEALED_MEMBER_TOKEN}`);
+    // The per-request surface injects the same sealed bearer from cache.
+    const headers = await started.modelRequest("gateway");
+    expect(headers.Authorization).toBe(`Bearer ${SEALED_MEMBER_TOKEN}`);
 
     // The wire contract of that one exchange POST: RFC 8693 grant carrying the
     // human root as subject_token + the project_id, and NO audience param.
@@ -186,18 +213,17 @@ describe.skipIf(!TOKEN_URL)("repo-auth ↔ WireMock integration", () => {
   it("reuses the cached project bearer without another exchange", async () => {
     const cacheDir = await makeCacheDir();
     await new FileCacheStore(cacheDir).save("human", humanToken());
-    const started = await startPlugin(cacheDir, "gateway", repoAuthMeta());
+    const started = await startPlugin(cacheDir, "gateway");
+    await started.settle(true);
 
     // The warmup exchange is the only request so far…
     expect(await exchangeJournal(origin)).toHaveLength(1);
 
-    // …and both subsequent chat.headers calls are pure cache hits.
-    const first = { headers: {} as Record<string, string> };
-    await started.chatHeaders({ model: { providerID: "gateway" } }, first);
-    const second = { headers: {} as Record<string, string> };
-    await started.chatHeaders({ model: { providerID: "gateway" } }, second);
+    // …and both subsequent model requests are pure cache hits.
+    const first = await started.modelRequest("gateway");
+    const second = await started.modelRequest("gateway");
 
-    expect(second.headers.Authorization).toBe(first.headers.Authorization);
+    expect(second.Authorization).toBe(first.Authorization);
     expect(await exchangeJournal(origin)).toHaveLength(1);
   });
 
@@ -212,16 +238,14 @@ describe.skipIf(!TOKEN_URL)("repo-auth ↔ WireMock integration", () => {
       expiresAt: Date.now() - 60_000
     });
 
-    // Config-time warmup detects the stale bearer and re-exchanges…
-    const started = await startPlugin(cacheDir, "gateway", repoAuthMeta());
-    expect(stampedAuthorization(started.mutatedConfig, "gateway")).toBe(
-      `Bearer ${SEALED_MEMBER_TOKEN}`
-    );
+    // The warmup detects the stale bearer and re-exchanges…
+    const started = await startPlugin(cacheDir, "gateway");
+    await started.settle(true);
+    expect(started.provider.headers?.Authorization).toBe(`Bearer ${SEALED_MEMBER_TOKEN}`);
 
     // …and the per-request surface then serves the fresh token from cache.
-    const output = { headers: {} as Record<string, string> };
-    await started.chatHeaders({ model: { providerID: "gateway" } }, output);
-    expect(output.headers.Authorization).toBe(`Bearer ${SEALED_MEMBER_TOKEN}`);
+    const headers = await started.modelRequest("gateway");
+    expect(headers.Authorization).toBe(`Bearer ${SEALED_MEMBER_TOKEN}`);
 
     const journal = await exchangeJournal(origin);
     expect(journal).toHaveLength(1);
@@ -230,27 +254,21 @@ describe.skipIf(!TOKEN_URL)("repo-auth ↔ WireMock integration", () => {
     expect(journal[0].body).not.toContain("stale-project-bearer");
   });
 
-  it("fails closed for a non-member project: no header, hook resolves", async () => {
+  it("fails closed for a non-member project: nothing stamped, no header, hook resolves", async () => {
     const cacheDir = await makeCacheDir();
     await new FileCacheStore(cacheDir).save("human", humanToken());
     // proj-999 misses the member mapping → WireMock's catch-all answers 403.
-    const started = await startPlugin(
-      cacheDir,
-      "gateway-other",
-      repoAuthMeta({ projectId: "proj-999" })
-    );
+    const started = await startPlugin(cacheDir, "gateway-other", { projectId: "proj-999" });
+    await started.settle(false);
 
-    // Config-time warmup already failed (non-interactive) → nothing stamped.
-    expect(stampedAuthorization(started.mutatedConfig, "gatewayOther")).toBeUndefined();
+    // The warmup failed (non-interactive) → nothing stamped.
+    expect(started.provider.headers).toBeUndefined();
 
     // The per-request hook degrades to no header instead of throwing.
-    const output = { headers: {} as Record<string, string> };
-    await expect(
-      started.chatHeaders({ model: { providerID: "gateway-other" } }, output)
-    ).resolves.toBeUndefined();
-    expect(output.headers.Authorization).toBeUndefined();
+    const headers = await started.modelRequest("gateway-other");
+    expect(headers.Authorization).toBeUndefined();
 
-    // Both attempts (warmup + chat.headers) hit the endpoint and were refused.
+    // Both attempts (warmup + model.request) hit the endpoint and were refused.
     const journal = await exchangeJournal(origin);
     expect(journal).toHaveLength(2);
     for (const entry of journal) {
