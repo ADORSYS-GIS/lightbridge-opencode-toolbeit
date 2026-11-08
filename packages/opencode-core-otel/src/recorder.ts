@@ -8,23 +8,29 @@ import {
   trace
 } from "@opentelemetry/api";
 import { SeverityNumber } from "@opentelemetry/api-logs";
-import type { Hooks } from "@opencode-ai/plugin";
-
 import { createInstruments, detectLanguage, type Instruments } from "./instruments.js";
 import type { Logger } from "./logging.js";
 import type { TelemetryProviders } from "./providers.js";
+import type {
+  ChatMessageInput,
+  ChatMessageOutput,
+  ChatParamsInput,
+  ChatParamsOutput,
+  FileDiff,
+  MessageInfo,
+  PartInfo,
+  PermissionAskInput,
+  PermissionAskOutput,
+  RecorderEvent,
+  SessionErrorInfo,
+  SessionInfo,
+  SessionStatusInfo,
+  TodoInfo,
+  ToolAfterInput,
+  ToolBeforeInput,
+  ToolResultOutput
+} from "./recorder-input.js";
 import type { ResolvedOtelConfig } from "./types.js";
-
-type OpencodeEvent = Parameters<NonNullable<Hooks["event"]>>[0]["event"];
-type ChatMessageInput = Parameters<NonNullable<Hooks["chat.message"]>>[0];
-type ChatMessageOutput = Parameters<NonNullable<Hooks["chat.message"]>>[1];
-type ToolBeforeInput = Parameters<NonNullable<Hooks["tool.execute.before"]>>[0];
-type ToolAfterInput = Parameters<NonNullable<Hooks["tool.execute.after"]>>[0];
-type ChatParamsInput = Parameters<NonNullable<Hooks["chat.params"]>>[0];
-type ChatParamsOutput = Parameters<NonNullable<Hooks["chat.params"]>>[1];
-type TextCompleteInput = Parameters<NonNullable<Hooks["experimental.text.complete"]>>[0];
-type PermissionAskInput = Parameters<NonNullable<Hooks["permission.ask"]>>[0];
-type CompactionInput = Parameters<NonNullable<Hooks["experimental.compaction.autocontinue"]>>[0];
 
 export interface RecorderDeps {
   providers: TelemetryProviders;
@@ -83,6 +89,23 @@ function diffKey(sessionID: string, file: string): string {
 
 function diffKeyPrefix(sessionID: string): string {
   return `${sessionID}${DIFF_KEY_SEPARATOR}`;
+}
+
+/**
+ * Total length of a tool result's text, or `undefined` when it has none
+ * (absent content, or only non-text parts). Length only: the text is never kept.
+ */
+function textLength(content: ToolResultOutput["content"]): number | undefined {
+  if (typeof content === "string") {
+    return content.length;
+  }
+  let total: number | undefined;
+  for (const part of content ?? []) {
+    if (typeof part.text === "string") {
+      total = (total ?? 0) + part.text.length;
+    }
+  }
+  return total;
 }
 
 /** Terminal tool outcomes, as reported by `ToolPart.state.status`. */
@@ -183,7 +206,7 @@ export class TelemetryRecorder {
 
   // ----------------------------------------------------------------- events
 
-  onEvent(event: OpencodeEvent): void {
+  onEvent(event: RecorderEvent): void {
     try {
       this.dispatch(event);
     } catch (error) {
@@ -195,7 +218,7 @@ export class TelemetryRecorder {
     }
   }
 
-  private dispatch(event: OpencodeEvent): void {
+  private dispatch(event: RecorderEvent): void {
     switch (event.type) {
       case "session.created":
         this.onSessionCreated(event.properties.info);
@@ -268,7 +291,7 @@ export class TelemetryRecorder {
     }
   }
 
-  private onSessionCreated(info: { id: string; parentID?: string; directory?: string }): void {
+  private onSessionCreated(info: SessionInfo): void {
     const kind = info.parentID ? "child" : "root";
     const startedAt = this.now();
 
@@ -315,7 +338,7 @@ export class TelemetryRecorder {
     );
   }
 
-  private onSessionStatus(sessionID: string, status: { type: string; attempt?: number }): void {
+  private onSessionStatus(sessionID: string, status: SessionStatusInfo): void {
     const state = this.session(sessionID);
     if (status.type === "busy") {
       state.busySince ??= this.now();
@@ -402,8 +425,8 @@ export class TelemetryRecorder {
     );
   }
 
-  private onSessionError(sessionID: string | undefined, error: unknown): void {
-    const named = error as { name?: string; data?: { statusCode?: number; isRetryable?: boolean } };
+  private onSessionError(sessionID: string | undefined, error: SessionErrorInfo | undefined): void {
+    const named = error;
     const state = sessionID ? this.session(sessionID) : undefined;
     this.emit(
       "opencode.api_error",
@@ -422,10 +445,7 @@ export class TelemetryRecorder {
     );
   }
 
-  private onSessionDiff(
-    sessionID: string,
-    diff: Array<{ file: string; additions: number; deletions: number }>
-  ): void {
+  private onSessionDiff(sessionID: string, diff: ReadonlyArray<FileDiff>): void {
     const state = this.session(sessionID);
     for (const entry of diff) {
       const key = diffKey(sessionID, entry.file);
@@ -471,25 +491,7 @@ export class TelemetryRecorder {
     }
   }
 
-  private onMessageUpdated(info: unknown): void {
-    const message = info as {
-      id: string;
-      sessionID: string;
-      role: string;
-      modelID?: string;
-      providerID?: string;
-      mode?: string;
-      cost?: number;
-      tokens?: {
-        input: number;
-        output: number;
-        reasoning: number;
-        cache: { read: number; write: number };
-      };
-      time?: { created: number; completed?: number };
-      error?: { name?: string; data?: { statusCode?: number; isRetryable?: boolean } };
-      finish?: string;
-    };
+  private onMessageUpdated(message: MessageInfo): void {
     if (message.role !== "assistant" || this.finalizedMessages.has(message.id)) {
       return;
     }
@@ -538,23 +540,7 @@ export class TelemetryRecorder {
   }
 
   private finalizeMessage(
-    message: {
-      id: string;
-      sessionID: string;
-      modelID?: string;
-      providerID?: string;
-      mode?: string;
-      cost?: number;
-      tokens?: {
-        input: number;
-        output: number;
-        reasoning: number;
-        cache: { read: number; write: number };
-      };
-      time?: { created: number; completed?: number };
-      error?: { name?: string; data?: { statusCode?: number; isRetryable?: boolean } };
-      finish?: string;
-    },
+    message: MessageInfo,
     chat: ChatState,
     session: SessionState,
     baseAttributes: Attributes
@@ -652,14 +638,7 @@ export class TelemetryRecorder {
     }
   }
 
-  private onPartUpdated(part: unknown): void {
-    const typed = part as {
-      type: string;
-      callID?: string;
-      tool?: string;
-      sessionID?: string;
-      state?: { status: string; time?: { start: number; end?: number } };
-    };
+  private onPartUpdated(typed: PartInfo): void {
     if (typed.type !== "tool" || !typed.callID || !typed.state) {
       return;
     }
@@ -692,7 +671,7 @@ export class TelemetryRecorder {
 
   private recordDecision(
     sessionID: string,
-    permissionID: string,
+    permissionID: string | undefined,
     decision: string,
     source: "user" | "auto",
     tool?: string
@@ -712,7 +691,7 @@ export class TelemetryRecorder {
         "gen_ai.conversation.id": sessionID,
         "opencode.permission.decision": decision,
         "opencode.permission.source": source,
-        "opencode.permission.id": permissionID,
+        ...(permissionID ? { "opencode.permission.id": permissionID } : {}),
         ...toolAttr
       },
       SeverityNumber.INFO,
@@ -801,7 +780,7 @@ export class TelemetryRecorder {
     );
   }
 
-  private onTodoUpdated(sessionID: string, todos: Array<{ status?: string }>): void {
+  private onTodoUpdated(sessionID: string, todos: ReadonlyArray<TodoInfo>): void {
     const state = this.session(sessionID);
     const byStatus: Record<string, number> = {};
     for (const todo of todos ?? []) {
@@ -831,11 +810,10 @@ export class TelemetryRecorder {
     let promptLength = 0;
     const partTypes: Record<string, number> = {};
     for (const part of parts) {
-      const typed = part as { type?: string; text?: string };
-      const type = typed.type ?? "unknown";
+      const type = part.type ?? "unknown";
       partTypes[type] = (partTypes[type] ?? 0) + 1;
-      if (typeof typed.text === "string") {
-        promptLength += typed.text.length;
+      if (typeof part.text === "string") {
+        promptLength += part.text.length;
       }
     }
 
@@ -849,7 +827,7 @@ export class TelemetryRecorder {
           Object.entries(partTypes).map(([type, count]) => [`opencode.prompt.parts.${type}`, count])
         ),
         ...(input.agent ? { "gen_ai.agent.name": input.agent } : {}),
-        ...(input.model?.modelID ? { "gen_ai.request.model": input.model.modelID } : {}),
+        ...(input.model?.id ? { "gen_ai.request.model": input.model.id } : {}),
         ...(input.model?.providerID ? { "gen_ai.provider.name": input.model.providerID } : {})
       },
       SeverityNumber.INFO,
@@ -865,15 +843,14 @@ export class TelemetryRecorder {
    */
   onChatParams(input: ChatParamsInput, output: ChatParamsOutput): void {
     const session = this.session(input.sessionID);
-    const model = input.model as { id?: string; modelID?: string } | undefined;
-    const modelId = model?.id ?? model?.modelID;
+    const modelId = input.model?.id;
 
     const params: Attributes = {};
     const numeric: Array<[string, unknown]> = [
       ["gen_ai.request.temperature", output?.temperature],
       ["gen_ai.request.top_p", output?.topP],
       ["gen_ai.request.top_k", output?.topK],
-      ["gen_ai.request.max_tokens", output?.maxOutputTokens]
+      ["gen_ai.request.max_tokens", output?.maxTokens]
     ];
     for (const [key, value] of numeric) {
       if (typeof value === "number" && Number.isFinite(value)) {
@@ -906,13 +883,14 @@ export class TelemetryRecorder {
     });
   }
 
-  /** Assistant text finished streaming — record its size, never its content. */
-  onTextComplete(input: TextCompleteInput, output: { text?: string }): void {
-    if (typeof output?.text !== "string") {
-      return;
-    }
-    const previous = this.responseLengths.get(input.messageID) ?? 0;
-    this.responseLengths.set(input.messageID, previous + output.text.length);
+  /**
+   * Assistant text finished streaming: record its size, never its content.
+   * v2 source: the `session.text.ended` event (`assistantMessageID`, `text`);
+   * v1's `experimental.text.complete` hook no longer exists.
+   */
+  onTextComplete(messageID: string, text: string): void {
+    const previous = this.responseLengths.get(messageID) ?? 0;
+    this.responseLengths.set(messageID, previous + text.length);
   }
 
   /**
@@ -922,35 +900,21 @@ export class TelemetryRecorder {
    * this hook, auto-allowed permissions were invisible and the decision counter
    * silently undercounted.
    */
-  onPermissionAsk(input: PermissionAskInput, output: { status?: string }): void {
+  onPermissionAsk(input: PermissionAskInput, output: PermissionAskOutput): void {
     const decision = output?.status;
     if (!decision || decision === "ask") {
       return;
     }
-    this.autoDecided.add(input.id);
+    if (input.id) {
+      this.autoDecided.add(input.id);
+    }
     this.recordDecision(input.sessionID, input.id, decision, "auto", input.type);
-  }
-
-  /** Compaction finished — `overflow` says whether the context forced it. */
-  onCompactionAutocontinue(input: CompactionInput, output: { enabled?: boolean }): void {
-    const state = this.session(input.sessionID);
-    this.emit(
-      "opencode.compaction_autocontinue",
-      {
-        "gen_ai.conversation.id": input.sessionID,
-        "opencode.compaction.overflow": Boolean(input.overflow),
-        "opencode.compaction.autocontinue_enabled": output?.enabled !== false,
-        ...(input.agent ? { "gen_ai.agent.name": input.agent } : {})
-      },
-      SeverityNumber.INFO,
-      state.context
-    );
   }
 
   onToolBefore(input: ToolBeforeInput): void {
     const session = this.session(input.sessionID);
     const filtered = this.deps.config.filteredTools.has(input.tool);
-    this.tools.set(input.callID, {
+    this.tools.set(input.id, {
       tool: input.tool,
       sessionID: input.sessionID,
       startedAt: this.now(),
@@ -966,7 +930,7 @@ export class TelemetryRecorder {
               attributes: {
                 "gen_ai.operation.name": "execute_tool",
                 "gen_ai.tool.name": input.tool,
-                "gen_ai.tool.call.id": input.callID,
+                "gen_ai.tool.call.id": input.id,
                 "gen_ai.conversation.id": input.sessionID
               }
             },
@@ -975,12 +939,12 @@ export class TelemetryRecorder {
     });
   }
 
-  onToolAfter(input: ToolAfterInput, output: { output?: string }): void {
-    this.finishTool(input.callID, {
+  onToolAfter(input: ToolAfterInput, result?: ToolResultOutput): void {
+    this.finishTool(input.id, {
       tool: input.tool,
       sessionID: input.sessionID,
-      status: "ok",
-      outputSize: typeof output?.output === "string" ? output.output.length : undefined
+      status: input.status === "error" ? "error" : "ok",
+      outputSize: textLength(result?.content)
     });
   }
 

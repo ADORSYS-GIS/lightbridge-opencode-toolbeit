@@ -18,6 +18,7 @@ import {
   type LogLevel,
   type PropagationConfigInput,
   readVcsInfo,
+  type RecorderEvent,
   registerExitHandlers,
   resolveOtelConfig,
   TelemetryRecorder,
@@ -182,29 +183,67 @@ export function createOtelPlugin(factoryOptions: OtelPluginFactoryOptions = {}):
           logger.debug("otel_trace_propagation_ready", { providerCount: wrapped });
         }
       },
+      // v1 -> engine adapters. `core-otel` owns its input types and no longer
+      // reads the v1 plugin API, so each v1 payload is narrowed here. This whole
+      // block is replaced by the v2 hooks when `otel` is ported (ADR-0019).
       event: async ({ event }) => {
-        recorder.onEvent(event);
+        // The recorder ignores event types it does not handle.
+        recorder.onEvent(event as unknown as RecorderEvent);
       },
       "chat.message": async (chatInput, chatOutput) => {
-        recorder.onChatMessage(chatInput, chatOutput);
+        recorder.onChatMessage(
+          {
+            sessionID: chatInput.sessionID,
+            agent: chatInput.agent,
+            model: chatInput.model && {
+              id: chatInput.model.modelID,
+              providerID: chatInput.model.providerID
+            }
+          },
+          { parts: chatOutput.parts }
+        );
       },
       "tool.execute.before": async (toolInput) => {
-        recorder.onToolBefore(toolInput);
+        recorder.onToolBefore({
+          tool: toolInput.tool,
+          sessionID: toolInput.sessionID,
+          id: toolInput.callID
+        });
       },
       "tool.execute.after": async (toolInput, toolOutput) => {
-        recorder.onToolAfter(toolInput, toolOutput);
+        recorder.onToolAfter(
+          {
+            tool: toolInput.tool,
+            sessionID: toolInput.sessionID,
+            id: toolInput.callID,
+            status: "completed"
+          },
+          { content: toolOutput.output }
+        );
       },
       "chat.params": async (paramsInput, paramsOutput) => {
-        recorder.onChatParams(paramsInput, paramsOutput);
+        recorder.onChatParams(
+          { sessionID: paramsInput.sessionID, agent: paramsInput.agent, model: paramsInput.model },
+          {
+            temperature: paramsOutput.temperature,
+            topP: paramsOutput.topP,
+            topK: paramsOutput.topK,
+            maxTokens: paramsOutput.maxOutputTokens
+          }
+        );
       },
       "permission.ask": async (permissionInput, permissionOutput) => {
-        recorder.onPermissionAsk(permissionInput, permissionOutput);
+        recorder.onPermissionAsk(
+          {
+            sessionID: permissionInput.sessionID,
+            id: permissionInput.id,
+            type: permissionInput.type
+          },
+          permissionOutput
+        );
       },
       "experimental.text.complete": async (textInput, textOutput) => {
-        recorder.onTextComplete(textInput, textOutput);
-      },
-      "experimental.compaction.autocontinue": async (compactionInput, compactionOutput) => {
-        recorder.onCompactionAutocontinue(compactionInput, compactionOutput);
+        recorder.onTextComplete(textInput.messageID, textOutput.text);
       }
     };
   };

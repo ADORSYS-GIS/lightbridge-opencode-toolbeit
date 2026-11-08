@@ -282,7 +282,6 @@ Each record carries an `event.name` attribute and the session id as `gen_ai.conv
 | `opencode.api_error` | `error.type`, `http.response.status_code`, `opencode.error.retryable`, `opencode.retry.attempt` |
 | `opencode.file_edited` | `code.language`, `opencode.file.additions`, `opencode.file.deletions` |
 | `opencode.compaction` | — |
-| `opencode.compaction_autocontinue` | `opencode.compaction.overflow`, `opencode.compaction.autocontinue_enabled`, `gen_ai.agent.name` |
 | `opencode.command_executed` | `opencode.command.name`, `opencode.command.has_arguments` |
 | `opencode.todo_updated` | `opencode.todo.total`, `opencode.todo.{status}` counts |
 
@@ -389,13 +388,14 @@ can afford it.
 
 ## What is deliberately not collected
 
-The plugin observes 9 of the 21 plugin hooks and 16 of the 32 SDK event types. The rest are left
+The plugin observes 8 of the 21 plugin hooks and 16 of the 32 SDK event types. The rest are left
 alone on purpose, and it is worth knowing which, so an absence is never mistaken for a bug.
 
 | Source | Why not |
 | --- | --- |
 | `chat.headers`, `shell.env` | Carry credentials and environment. Reading them to emit shape would mean handling secrets for no telemetry gain. |
 | `experimental.chat.messages.transform`, `experimental.chat.system.transform` | Content — the conversation and the system prompt. |
+| `experimental.compaction.autocontinue` | Removed in OpenCode v2 with no replacement ([ADR-0019](adr/0019-opencode-v2-cutover.md)); the engine's `opencode.compaction_autocontinue` event and its `overflow` / `autocontinue_enabled` attributes are gone with it. The plain `opencode.compaction` event and counter remain. |
 | `experimental.provider.small_model` | Experimental model-routing hook (added in `@opencode-ai/plugin` 1.18.32); the chosen small model is a routing decision, not an inference call, so there is no telemetry to attach. Revisit if small-model routing becomes a telemetry need. |
 | `dispose` | Plugin teardown (added in `@opencode-ai/plugin` 1.18.32). Flushing already happens on `session.idle` + `beforeExit` / `SIGINT` / `SIGTERM`; a dispose flush would be a redundant third drain of the same buffers. Adopting it is a tracked follow-up. |
 | `tool.definition` | Tool descriptions, static and identical every run. |
@@ -408,6 +408,33 @@ alone on purpose, and it is worth knowing which, so an absence is never mistaken
 
 `auth` / `provider` / `tool` are registration hooks, not observation points — this plugin registers
 nothing.
+
+## Recorder input contract
+
+`@vymalo/opencode-core-otel` is an engine: it registers no hooks and imports no OpenCode plugin API.
+`TelemetryRecorder` reads only the structural types declared in
+[`recorder-input.ts`](../packages/opencode-core-otel/src/recorder-input.ts) (re-exported from
+`@vymalo/opencode-core-otel/lib`), and the plugin that feeds it adapts the host's payloads to them.
+Hook payloads use the OpenCode v2 field names (`id` for the tool call id, `model.id`, `maxTokens`,
+`status`), so adapting is a field pick.
+
+| Recorder method | Input type | OpenCode v2 source |
+| --- | --- | --- |
+| `onChatMessage` | `ChatMessageInput` / `ChatMessageOutput` | `session.hook("prompt")`; flatten `Prompt { text, files }` to `parts` |
+| `onChatParams` | `ChatParamsInput` / `ChatParamsOutput` | `session.hook("context")`; `options` supplies `temperature`, `topP`, `topK`, `maxTokens` |
+| `onToolBefore` | `ToolBeforeInput` | `tool.hook("execute.before")` |
+| `onToolAfter` | `ToolAfterInput` / `ToolResultOutput` | `tool.hook("execute.after")`; `status: "error"` is now reported here |
+| `onPermissionAsk` | `PermissionAskInput` / `PermissionAskOutput` | `permission.hook("evaluate")`; `action` becomes `type`, `effect` becomes `status`, `id` is optional (v2 gives auto-decisions none) |
+| `onTextComplete(messageID, text)` | plain arguments | the `session.text.ended` **event** (`assistantMessageID`, `text`); the `experimental.text.complete` hook no longer exists |
+| `onEvent` | `RecorderEvent` | see below |
+
+`RecorderEvent` is the engine's own event vocabulary, in the `{ type, properties }` shape. OpenCode v2
+reports the same facts under different names and a `{ type, data }` shape, and several v1 events
+have no single v2 counterpart (`message.updated`, `message.part.updated`, `session.diff`,
+`todo.updated`, `command.executed`, `session.compacted`, `session.error`,
+`server.instance.disposed`). The v2 `otel` port translates (for example `session.step.ended` carries
+the cost, tokens and finish reason that `message.updated` used to), so that translation lives in
+the adapter, not the engine.
 
 ## Flushing
 

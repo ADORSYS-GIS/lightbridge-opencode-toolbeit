@@ -23,6 +23,7 @@ import {
   readVcsInfo,
   registerExitHandlers,
   resolveOtelConfig,
+  type RecorderEvent,
   TelemetryRecorder,
   type EnvSource,
   type ExporterFactories,
@@ -436,29 +437,67 @@ async function buildOtelModule(
 
 function registerOtelHooks(hooks: Hooks, otel: OtelModule): void {
   const { recorder } = otel;
+  // v1 -> engine adapters. `core-otel` owns its input types and no longer reads
+  // the v1 plugin API, so each v1 payload is narrowed here. This whole function
+  // is replaced by the v2 hooks when `lightbridge` is ported (ADR-0019).
   hooks.event = async ({ event }) => {
-    recorder.onEvent(event);
+    // The recorder ignores event types it does not handle.
+    recorder.onEvent(event as unknown as RecorderEvent);
   };
   hooks["chat.message"] = async (chatInput, chatOutput) => {
-    recorder.onChatMessage(chatInput, chatOutput);
+    recorder.onChatMessage(
+      {
+        sessionID: chatInput.sessionID,
+        agent: chatInput.agent,
+        model: chatInput.model && {
+          id: chatInput.model.modelID,
+          providerID: chatInput.model.providerID
+        }
+      },
+      { parts: chatOutput.parts }
+    );
   };
   hooks["tool.execute.before"] = async (toolInput) => {
-    recorder.onToolBefore(toolInput);
+    recorder.onToolBefore({
+      tool: toolInput.tool,
+      sessionID: toolInput.sessionID,
+      id: toolInput.callID
+    });
   };
   hooks["tool.execute.after"] = async (toolInput, toolOutput) => {
-    recorder.onToolAfter(toolInput, toolOutput);
+    recorder.onToolAfter(
+      {
+        tool: toolInput.tool,
+        sessionID: toolInput.sessionID,
+        id: toolInput.callID,
+        status: "completed"
+      },
+      { content: toolOutput.output }
+    );
   };
   hooks["chat.params"] = async (paramsInput, paramsOutput) => {
-    recorder.onChatParams(paramsInput, paramsOutput);
+    recorder.onChatParams(
+      { sessionID: paramsInput.sessionID, agent: paramsInput.agent, model: paramsInput.model },
+      {
+        temperature: paramsOutput.temperature,
+        topP: paramsOutput.topP,
+        topK: paramsOutput.topK,
+        maxTokens: paramsOutput.maxOutputTokens
+      }
+    );
   };
   hooks["permission.ask"] = async (permissionInput, permissionOutput) => {
-    recorder.onPermissionAsk(permissionInput, permissionOutput);
+    recorder.onPermissionAsk(
+      {
+        sessionID: permissionInput.sessionID,
+        id: permissionInput.id,
+        type: permissionInput.type
+      },
+      permissionOutput
+    );
   };
   hooks["experimental.text.complete"] = async (textInput, textOutput) => {
-    recorder.onTextComplete(textInput, textOutput);
-  };
-  hooks["experimental.compaction.autocontinue"] = async (compactionInput, compactionOutput) => {
-    recorder.onCompactionAutocontinue(compactionInput, compactionOutput);
+    recorder.onTextComplete(textInput.messageID, textOutput.text);
   };
 }
 

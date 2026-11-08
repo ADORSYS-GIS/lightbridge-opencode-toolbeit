@@ -367,7 +367,6 @@ describe("the full hook surface", () => {
     expect(hooks["chat.params"]).toBeDefined();
     expect(hooks["permission.ask"]).toBeDefined();
     expect(hooks["experimental.text.complete"]).toBeDefined();
-    expect(hooks["experimental.compaction.autocontinue"]).toBeDefined();
 
     await hooks.event?.({
       event: { type: "session.created", properties: { info: { id: "ses_1" } } }
@@ -383,10 +382,6 @@ describe("the full hook surface", () => {
     await hooks["permission.ask"]?.(
       { id: "perm_1", sessionID: "ses_1", type: "edit" } as never,
       { status: "allow" } as never
-    );
-    await hooks["experimental.compaction.autocontinue"]?.(
-      { sessionID: "ses_1", overflow: true } as never,
-      { enabled: true } as never
     );
     await hooks.event?.({
       event: { type: "installation.updated", properties: { version: "1.15.10" } }
@@ -404,7 +399,6 @@ describe("the full hook surface", () => {
     await vi.waitFor(() => expect(logs.getFinishedLogRecords().length).toBeGreaterThan(0));
     const names = logs.getFinishedLogRecords().map((r) => r.attributes["event.name"]);
     expect(names).toContain("opencode.tool_decision");
-    expect(names).toContain("opencode.compaction_autocontinue");
     expect(names).toContain("opencode.assistant_response");
 
     const response = logs
