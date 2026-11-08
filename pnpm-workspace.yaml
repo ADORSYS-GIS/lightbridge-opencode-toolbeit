@@ -14,13 +14,6 @@ packages:
 allowBuilds:
   esbuild: true
   msgpackr-extract: true
-  # tree-sitter + grammar ship a node-gyp native build (used by
-  # @vymalo/opencode-code-index to parse source into a symbol graph).
-  # @duckdb/node-api ships prebuilt binaries (no build step), so it is not listed.
-  tree-sitter: true
-  tree-sitter-typescript: true
-  # tree-sitter-typescript depends on the JS grammar (also a node-gyp build).
-  tree-sitter-javascript: true
   # spawn-sync (a transitive WXT/web-ext dep) ships a native build step we do
   # not need — the prebuilt JS works fine. Deny it.
   spawn-sync: false

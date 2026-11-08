@@ -125,13 +125,13 @@ Two entry points per published package: `"."` → `dist/index.js` (kept intentio
 
 ## Releasing (maintainers)
 
-Versions are bumped **manually** — no changesets. All seventeen workspace packages sit on **one
+Versions are bumped **manually** — no changesets. All sixteen workspace packages sit on **one
 version line** and are bumped together in a single PR that also adds the `CHANGELOG.md` entry: the
 thirteen published ones (`opencode-auth-core`, `opencode-core-otel`, `opencode-provider-sync`,
 `opencode-oauth2`, `opencode-models-info`, `opencode-ratelimit`, `opencode-browser`,
 `opencode-browser-mcp`, `opencode-devtools`, `opencode-devtools-mcp`, `opencode-otel`,
-`opencode-repo-auth`, `opencode-lightbridge`) plus four private (workspace root, `plugin-bundle`,
-`browser-extension`, `opencode-code-index`).
+`opencode-repo-auth`, `opencode-lightbridge`) plus three private (workspace root, `plugin-bundle`,
+`browser-extension`).
 
 After that PR merges, a maintainer publishes by dispatching the workflow:
 
