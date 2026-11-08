@@ -73,6 +73,30 @@ export {
 } from "./logging.js";
 
 export type {
+  ChatMessageInput,
+  ChatMessageOutput,
+  ChatParamsInput,
+  ChatParamsOutput,
+  FileDiff,
+  MessageInfo,
+  PartInfo,
+  PermissionAskInput,
+  PermissionAskOutput,
+  PromptPart,
+  RecorderEvent,
+  RecorderModelRef,
+  SessionErrorInfo,
+  SessionInfo,
+  SessionStatusInfo,
+  TodoInfo,
+  TokenCounts,
+  ToolAfterInput,
+  ToolBeforeInput,
+  ToolContentPart,
+  ToolResultOutput
+} from "./recorder-input.js";
+
+export type {
   ExporterKind,
   MetricTemporality,
   OtelPluginOptions,

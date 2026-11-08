@@ -7,6 +7,8 @@
 ![node: >=22](https://img.shields.io/badge/node-%3E%3D22-339933)
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue)
 
+> **Requires OpenCode v2.** This release targets the v2 plugin API and does not run on v1. Migrating from `0.17.x`? See [Migrating from v1](#migrating-from-v1).
+
 An OpenCode plugin that registers a set of pure, in-process tools the model can call — no bridge, no
 server, no auth. Tools are organised into **groups** (gated by the `groups` option, like the browser
 plugin): `math`, `codec`, `crypto`, `datetime`, `convert` (on by default) and an opt-in, SSRF-guarded
@@ -17,7 +19,7 @@ plugin): `math`, `codec`, `crypto`, `datetime`, `convert` (on by default) and an
 ```jsonc
 // opencode.json
 {
-  "plugin": ["@vymalo/opencode-devtools"]
+  "plugins": ["@vymalo/opencode-devtools"]
 }
 ```
 
@@ -25,11 +27,14 @@ Enable the `http` group (off by default — it performs network egress):
 
 ```jsonc
 {
-  "plugin": [
-    ["@vymalo/opencode-devtools", {
-      "groups": ["math", "codec", "crypto", "datetime", "convert", "http"],
-      "http": { "allowPrivateNetwork": false }
-    }]
+  "plugins": [
+    {
+      "package": "@vymalo/opencode-devtools",
+      "options": {
+        "groups": ["math", "codec", "crypto", "datetime", "convert", "http"],
+        "http": { "allowPrivateNetwork": false }
+      }
+    }
   ]
 }
 ```
@@ -56,3 +61,25 @@ deterministic utilities nobody else maintains well.
 ## License
 
 MIT
+
+## Migrating from v1
+
+`0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See
+[ADR-0019](../../docs/adr/0019-opencode-v2-cutover.md) for why there is no dual-support build.
+
+| v1 | v2 |
+| --- | --- |
+| `"plugin": [...]` | `"plugins": [...]` |
+| `["@vymalo/opencode-devtools", { ... }]` tuple | `{ "package": "@vymalo/opencode-devtools", "options": { ... } }` |
+| `pluginConfig` / the tuple's options | the plugin's own `options` (`ctx.options`) |
+| `groups`, `http`, `enabled` options | unchanged |
+| host `config.logLevel` drove the log level | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
+| `Hooks.tool` map built with `tool.schema` (zod) | `ctx.tool.transform`, raw JSON Schema input, one tool *namespace* per group |
+| tool names `math_eval`, `codec_base64`, ... | unchanged (namespace `math` + tool `eval` is exposed as `math_eval`) |
+
+Every tool's arguments, result text and `devtools_*` log event name are unchanged. `effect` is now a
+**peer dependency** supplied by OpenCode; do not install a second copy.
+
+The `./lib` subpath (shared with `@vymalo/opencode-devtools-mcp`) no longer re-exports the plugin
+factory, `createDevtoolsTools` or the logger implementations; it carries the catalog, schema,
+options and execution context only, and has no `effect` dependency.

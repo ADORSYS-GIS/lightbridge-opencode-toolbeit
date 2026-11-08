@@ -7,6 +7,8 @@
 ![node: >=22](https://img.shields.io/badge/node-%3E%3D22-339933)
 ![license: MIT](https://img.shields.io/badge/license-MIT-blue)
 
+> **Requires OpenCode v2.** This release targets the v2 plugin API and does not run on v1. Migrating from `0.17.x`? See [Migrating from v1](#migrating-from-v1).
+
 This is the **OpenCode plugin** half of a dual plugin. It registers `browser_*` tools the model
 can call and hosts a localhost WebSocket **bridge**. A companion **browser extension**
 (Chromium MV3 + Firefox) connects to the bridge and drives real tabs.
@@ -28,7 +30,7 @@ flowchart LR
 - [Install](#install)
 - [Quickstart](#quickstart)
 - [Options](#options)
-- [The 33 tools](#the-33-tools)
+- [The 34 tools](#the-34-tools)
 - [Targeting elements](#targeting-elements--prefer-refs)
 - [Screenshots](#screenshots)
 - [Named groups](#named-groups)
@@ -56,7 +58,7 @@ mirrored into the extension so the two never drift.
 // opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [["@vymalo/opencode-browser", { "port": 4517 }]]
+  "plugins": [{ "package": "@vymalo/opencode-browser", "options": { "port": 4517 } }]
 }
 ```
 
@@ -97,7 +99,7 @@ every action and keeps a screenshot gallery.
 
 ## Options
 
-Second argument to the plugin tuple in `opencode.json`:
+The plugin entry's `options` in `opencode.json`:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -108,9 +110,10 @@ Second argument to the plugin tuple in `opencode.json`:
 | `groups` | `["page","control"]` | Tool groups to register (`page` \| `control` \| `debug`). |
 | `executor` | `"auto"` | `auto` \| `cdp` \| `content` — forwarded to the extension as a preference. |
 | `timeoutMs` | `30000` | Per-command timeout. |
-| `screenshotDir` | `".opencode/browser"` | Screenshot output dir (relative → resolved against the worktree). |
+| `screenshotDir` | `".opencode/browser"` | Screenshot output dir (relative → resolved against the project directory). |
+| `logLevel` | `"info"` | `debug`/`trace` unlock the verbose tiers. Falls back to `OPENCODE_LOG_LEVEL`. Records go to OpenCode's own logger, which gates them again (Effect's default minimum is `Info`) — set `OPENCODE_LOG_LEVEL=DEBUG` too. |
 
-## The 33 tools
+## The 34 tools
 
 Names are stable `browser_*` identifiers, partitioned into three **groups** gated by the
 `groups` option. Every tool takes a `group` (the named tab group) unless noted.
@@ -233,7 +236,7 @@ all groups once and give each agent only the tools it needs with **flat string**
 ```jsonc
 {
   // full surface registered once — global
-  "plugin": [["@vymalo/opencode-browser", { "groups": ["page", "control", "debug"] }]],
+  "plugins": [{ "package": "@vymalo/opencode-browser", "options": { "groups": ["page", "control", "debug"] } }],
   "agent": {
     "researcher": {
       // FLAT STRING form → denied tools are dropped from this agent's injected
@@ -286,7 +289,7 @@ content script. Force one with `"cdp"` / `"content"`.
 Control is **plugin-managed** — you never disconnect by hand. It's released when:
 
 - the model/plugin calls **`browser_release`** (mid-session), or
-- **OpenCode exits** — the plugin's `exit` hook shuts the bridge down, and the dropped socket
+- **OpenCode exits** — the plugin's scope closes (with a process `exit` safety net) and shuts the bridge down, and the dropped socket
   independently makes the extension release. A hard kill releases too.
 
 ## Security
@@ -312,3 +315,20 @@ Full architecture, wire protocol, and tool reference: [`docs/browser.md`](https:
 ## License
 
 [MIT](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/LICENSE) © vymalo contributors
+
+## Migrating from v1
+
+`0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See
+[ADR-0019](../../docs/adr/0019-opencode-v2-cutover.md) for why there is no dual-support build.
+
+| v1 | v2 |
+| --- | --- |
+| `"plugin": [["@vymalo/opencode-browser", { ... }]]` | `"plugins": [{ "package": "@vymalo/opencode-browser", "options": { ... } }]` |
+| host `config.logLevel` drove the log level | the plugin's own `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
+| diagnostics via `client.app.log` | the host's Effect logger (same events, `key=value` fields; still never the terminal) |
+| `screenshotDir` resolved against `ctx.worktree` | resolved against the plugin's `location.project.directory` |
+| `dispose` / `process.on("exit")` | the bridge is owned by the plugin scope and shut down when it closes |
+
+Every option (`enabled`, `host`, `port`, `token`, `executor`, `groups`, `timeoutMs`,
+`screenshotDir`), every `browser_*` tool name and argument, the wire protocol and the extension
+are unchanged. Per-agent `permission` rules on `browser_*` names keep working as before.

@@ -4,7 +4,7 @@ A belt of everyday, **deterministic, local** developer utilities the model can c
 maths, encoding, crypto primitives, date/time, structured-data conversion, and an opt-in HTTP
 client. Two packages, one tool surface:
 
-- **`@vymalo/opencode-devtools`** — the OpenCode plugin (registers the tools via `Hooks.tool`).
+- **`@vymalo/opencode-devtools`** — the OpenCode plugin (v2 plugin API; registers the tools via `ctx.tool.transform`, one tool namespace per group).
 - **`@vymalo/opencode-devtools-mcp`** — an MCP stdio server exposing the same catalog to any MCP
   client (Claude Code, Cursor, Cline, …).
 
@@ -76,16 +76,21 @@ Per-agent control is also available via OpenCode's tool allow/deny on the indivi
 
 ### As an OpenCode plugin
 
+Requires OpenCode **v2**. Plugin id `vymalo.devtools`.
+
 ```jsonc
 // opencode.json
 {
-  "plugin": [
+  "plugins": [
     "@vymalo/opencode-devtools",
     // or, to enable the http group + reach internal hosts:
-    ["@vymalo/opencode-devtools", {
-      "groups": ["math", "codec", "crypto", "datetime", "convert", "http"],
-      "http": { "allowPrivateNetwork": false, "timeoutMs": 30000 }
-    }]
+    {
+      "package": "@vymalo/opencode-devtools",
+      "options": {
+        "groups": ["math", "codec", "crypto", "datetime", "convert", "http"],
+        "http": { "allowPrivateNetwork": false, "timeoutMs": 30000 }
+      }
+    }
   ]
 }
 ```
@@ -96,6 +101,26 @@ Per-agent control is also available via OpenCode's tool allow/deny on the indivi
 | `groups` | the 5 offline groups | Which groups to register (`http` must be added explicitly). An empty/invalid list falls back to the defaults. |
 | `http.allowPrivateNetwork` | `false` | Allow loopback / private / link-local / metadata hosts (the SSRF guard). |
 | `http.timeoutMs` | `30000` | Per-request timeout. |
+| `logLevel` | `info` | Minimum severity this plugin emits (`trace`/`debug`/`info`/`warn`/`error`; `DEBUG` unlocks `trace`). Falls back to `OPENCODE_LOG_LEVEL`. A gate, not an override: the host's own level still applies. |
+
+#### How the tools register (v2)
+
+`ctx.tool.transform` receives a `ToolEditor`. For each enabled group the plugin calls
+`editor.namespace({ name: group, description })`, then `editor.add({ name, description, input,
+options: { namespace: group }, execute })` for each tool. `input` is the catalog's own JSON Schema
+(`toJsonSchema`, the emitter the MCP server also uses); v2 takes raw JSON Schema, not a zod shape.
+The host exposes a namespaced tool as `<namespace>_<name>`, so `math` + `eval` stays `math_eval` and
+every public tool name is unchanged from v1. `execute` returns `Effect<Tool.Result, Tool.Error>`: a
+text result is `{ content }`, a JSON result adds `metadata`, and a thrown handler error becomes a
+`Tool.Error` (logged as `devtools_tool_failed`).
+
+#### Migrating from v1
+
+`plugin` becomes `plugins`; the `["name", { ... }]` tuple becomes `{ "package": "name", "options": { ... } }`;
+the host `config.logLevel` channel is gone (use `options.logLevel` or `OPENCODE_LOG_LEVEL`).
+`groups`, `http` and `enabled` are unchanged. See the package
+[README](../packages/opencode-devtools/README.md#migrating-from-v1) and
+[ADR-0019](adr/0019-opencode-v2-cutover.md).
 
 ### As an MCP server
 

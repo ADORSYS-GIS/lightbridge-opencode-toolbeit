@@ -70,9 +70,6 @@ flowchart LR
 > [!TIP]
 > Every plugin here works with **any** auth scheme — static API key, OAuth2, or none — *except* oauth2 itself, which is the one doing the authenticating. Enable only what you need.
 
-> [!NOTE]
-> The workspace also carries an **experimental, private** plugin — `@vymalo/opencode-code-index` (DuckDB + tree-sitter code indexing: `code_symbol`, `code_callers`, `code_blast_radius`, …). It is **not published**, not part of the published suite above, and may be removed. See [`docs/code-index.md`](docs/code-index.md).
-
 ## Quickstart
 
 Add the plugins you want to your OpenCode config and declare a provider. The smallest possible setup — an OAuth2-protected provider that discovers its own models:
@@ -328,7 +325,6 @@ This is a [pnpm](https://pnpm.io) monorepo. Thirteen packages publish to npm und
 | [`packages/opencode-core-otel`](packages/opencode-core-otel) | `@vymalo/opencode-core-otel` | Shared OpenTelemetry engine (otel, lightbridge) |
 | [`packages/opencode-provider-sync`](packages/opencode-provider-sync) | `@vymalo/opencode-provider-sync` | Shared provider-registration + model-sync engine (oauth2 today; lightbridge next) |
 | [`apps/browser-extension`](apps/browser-extension) | _private_ | Companion Chromium/Firefox extension |
-| [`packages/opencode-code-index`](packages/opencode-code-index) | _private_ | Experimental DuckDB + tree-sitter code index |
 | [`packages/plugin-bundle`](packages/plugin-bundle) | _private_ | Rolldown single-file distribution of oauth2 |
 
 ## 🛠️ Development

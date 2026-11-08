@@ -5,11 +5,18 @@ export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 export type { ToolGroup } from "./schema.js";
 
 /**
- * Per-plugin configuration, supplied as the second argument to the plugin
- * factory by OpenCode (the `[name, options]` tuple form in `plugin`). All
- * fields are optional; see DEFAULTS in opencode.ts for the resolved values.
+ * Per-plugin configuration, supplied as the plugin's `options` in the v2
+ * `plugins` array (`{ "package": "…", "options": { … } }`) and read from
+ * `ctx.options`. All fields are optional; see DEFAULTS in options.ts for the
+ * resolved values.
  */
 export interface DevtoolsPluginOptions {
+  /**
+   * Minimum severity this plugin emits (`trace`/`debug`/`info`/`warn`/`error`;
+   * `DEBUG` unlocks `trace`). Falls back to the host's `OPENCODE_LOG_LEVEL`.
+   * A gate, not an override — the host's own level still applies.
+   */
+  logLevel?: string;
   /** Master switch. When false no tools are registered. */
   enabled?: boolean;
   /**

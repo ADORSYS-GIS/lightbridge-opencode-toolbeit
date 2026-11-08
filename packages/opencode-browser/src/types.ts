@@ -16,8 +16,8 @@ export type { ToolGroup } from "./schema.js";
 export type ExecutorMode = "auto" | "cdp" | "content";
 
 /**
- * Per-plugin configuration, supplied as the second argument to the plugin
- * factory by OpenCode (the `[name, options]` tuple form in `plugin`). All
+ * Per-plugin configuration, delivered as `ctx.options` (the `options` of the
+ * `plugins` entry). All
  * fields are optional; see DEFAULT_OPTIONS for the resolved defaults.
  */
 export interface BrowserPluginOptions {
