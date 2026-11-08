@@ -130,28 +130,6 @@ importers:
         specifier: ^5.0.1
         version: 5.1.0(@opentelemetry/api@1.9.1)(@types/node@25.9.1)(@vitest/coverage-v8@5.0.1(vitest@5.0.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
 
-  packages/opencode-code-index:
-    dependencies:
-      '@duckdb/node-api':
-        specifier: 1.5.5-r.5
-        version: 1.5.5-r.5
-      '@opencode-ai/plugin':
-        specifier: 1.18.32
-        version: 1.18.32
-      tree-sitter:
-        specifier: ^0.21.1
-        version: 0.21.1
-      tree-sitter-typescript:
-        specifier: ^0.23.2
-        version: 0.23.2(tree-sitter@0.21.1)
-    devDependencies:
-      vite:
-        specifier: ^8.3.0
-        version: 8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1)
-      vitest:
-        specifier: ^5.0.1
-        version: 5.1.0(@opentelemetry/api@1.9.1)(@types/node@25.9.1)(@vitest/coverage-v8@5.0.1(vitest@5.0.1))(vite@8.3.0(@types/node@25.9.1)(jiti@2.7.0)(yaml@2.9.1))
-
   packages/opencode-core-otel:
     dependencies:
       '@opentelemetry/api':
@@ -623,56 +601,6 @@ packages:
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [win32]
-
-  '@duckdb/node-api@1.5.5-r.5':
-    resolution: {integrity: sha512-ZMX+sel3DjSKbGuQ44Y5Tp5LwYjlJkhB5faKr+9sSMcxixDMSW+8vaTOD1uRDuN9o0udUoCY/XX9PI1haEZuZg==}
-
-  '@duckdb/node-bindings-darwin-arm64@1.5.5-r.5':
-    resolution: {integrity: sha512-WJdeLTFy4pRg60rkbp9smtlP1iIQ8ErtIJkxS+2LQtM1ZZMSByyW+3WPpNoKe7IwPtVl2fLlPw7tDmQW4Z974g==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@duckdb/node-bindings-darwin-x64@1.5.5-r.5':
-    resolution: {integrity: sha512-rN0KjX13MwVQ5V5ufykolty/tf4SaafOpGWcUA1Cegf98jPeRdsJsEE1IMXn8n3u6WvMSZEVJmHJ3ma4Hr7Vzg==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@duckdb/node-bindings-linux-arm64-musl@1.5.5-r.5':
-    resolution: {integrity: sha512-00z3mYHUBAucp3L73EoftKDdaGOaV8ENELejiT+PK7dFjTzdXxqhJwZ1LaQV1/zEhIecz+x23f6WvFhWw+7XXQ==}
-    cpu: [arm64]
-    os: [linux]
-    libc: [musl]
-
-  '@duckdb/node-bindings-linux-arm64@1.5.5-r.5':
-    resolution: {integrity: sha512-CafH2AIvXtpwDynG3KB/4uEOHRGlFoB7auCRMIwH3BKNIobsANV5LSpDJ3tfyRCFIsK6e8AT1eseWVnu2Dv3cw==}
-    cpu: [arm64]
-    os: [linux]
-    libc: [glibc]
-
-  '@duckdb/node-bindings-linux-x64-musl@1.5.5-r.5':
-    resolution: {integrity: sha512-S5qEc7F+GjXt85T2xArjjvN5oc/IjtH6zsLJsuo8N3fQolheBCefemIMdZoK2Jik8a0sBxidiS6Ld4qprMPPDw==}
-    cpu: [x64]
-    os: [linux]
-    libc: [musl]
-
-  '@duckdb/node-bindings-linux-x64@1.5.5-r.5':
-    resolution: {integrity: sha512-kCyq6BXhn6QXfwF8yVdVKriSSHP+rfVWcJ56cG8qZzlOZpxyvT5WGm6jMshxg4ditLlOsHsIN/D47RYrcjXuHQ==}
-    cpu: [x64]
-    os: [linux]
-    libc: [glibc]
-
-  '@duckdb/node-bindings-win32-arm64@1.5.5-r.5':
-    resolution: {integrity: sha512-L3Mroc23xhqOowWVElni8LgEmsm5e9DdG1y2pLka/1ug3Pl2vpQMl1Phxwz4UEMF8DOBbMgN5BBNrYwG2BFo+g==}
-    cpu: [arm64]
-    os: [win32]
-
-  '@duckdb/node-bindings-win32-x64@1.5.5-r.5':
-    resolution: {integrity: sha512-mBGFn8netT/AAhK4TOG6Fw47+Db68CxCVtQ9qfxZc1kZAjds+aYrh17Fd/u5CbTDdxILsrcyuF8q9cUcm54kQA==}
-    cpu: [x64]
-    os: [win32]
-
-  '@duckdb/node-bindings@1.5.5-r.5':
-    resolution: {integrity: sha512-sR7x91TfBunLqLbdvrcdiPCU+VGEQFPicxh1STZM402fuHW2ituPTAo2bY3IlntsvJShltrKF4R6B+JYPlAPZg==}
 
   '@effect/opentelemetry@4.1.0':
     resolution: {integrity: sha512-j9bNzQaoQvcnimBFMG0i3piEW20E8HjkXAQHTJN/XqG2e4uJ9zCv53/HCNzD7+ooFn5S4nwQy/BOXeNReMIe+A==}
@@ -2850,10 +2778,6 @@ packages:
     resolution: {integrity: sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg==}
     engines: {node: '>= 0.6'}
 
-  node-addon-api@8.8.0:
-    resolution: {integrity: sha512-c5Ko1fZJIJmzhFIkhRN76WTq+fC6tWnGy9CXA0fA+XygsWZmEwG8vmbkNqxMyoaa0Tin4djul49NzdVcJJcjeA==}
-    engines: {node: ^18 || ^20 || >= 21}
-
   node-domexception@1.0.0:
     resolution: {integrity: sha512-/jKZoMpw0F8GRwl4/eLROPA3cfcXtLApP0QzLmUT/HuPCZWyB7IY9ZrMeKw2O/nFIqPQB3PVM9aYm0F312AXDQ==}
     engines: {node: '>=10.5.0'}
@@ -2865,10 +2789,6 @@ packages:
 
   node-gyp-build-optional-packages@5.2.2:
     resolution: {integrity: sha512-s+w+rBWnpTMwSFbaE0UXsRlg7hU4FjekKU4eyAih5T8nJuNZT1nNsskXpxmeqSK9UzkBl6UgRlnKc8hz8IEqOw==}
-    hasBin: true
-
-  node-gyp-build@4.8.4:
-    resolution: {integrity: sha512-LA4ZjwlnUblHVgq0oBF3Jl/6h/Nvs5fzBLwdEF4nuxnFdsfajde4WfxtJr3CaiH+F6ewcIB/q4jQ4UzPyid+CQ==}
     hasBin: true
 
   node-gyp@12.4.0:
@@ -3316,25 +3236,6 @@ packages:
   toml@4.3.0:
     resolution: {integrity: sha512-lVb8X9BsPVuH0M4BKeS91tXAmJvCjQ5UIyAbQFaxkKGyUFK2RPkhwaFSQH8vbpl1d23eu/IBH+dwVMHWaq9A5A==}
     engines: {node: '>=20'}
-
-  tree-sitter-javascript@0.23.1:
-    resolution: {integrity: sha512-/bnhbrTD9frUYHQTiYnPcxyHORIw157ERBa6dqzaKxvR/x3PC4Yzd+D1pZIMS6zNg2v3a8BZ0oK7jHqsQo9fWA==}
-    peerDependencies:
-      tree-sitter: ^0.21.1
-    peerDependenciesMeta:
-      tree-sitter:
-        optional: true
-
-  tree-sitter-typescript@0.23.2:
-    resolution: {integrity: sha512-e04JUUKxTT53/x3Uq1zIL45DoYKVfHH4CZqwgZhPg5qYROl5nQjV+85ruFzFGZxu+QeFVbRTPDRnqL9UbU4VeA==}
-    peerDependencies:
-      tree-sitter: ^0.21.0
-    peerDependenciesMeta:
-      tree-sitter:
-        optional: true
-
-  tree-sitter@0.21.1:
-    resolution: {integrity: sha512-7dxoA6kYvtgWw80265MyqJlkRl4yawIjO7S5MigytjELkX43fV2WsAXzsNfO7sBpPPCF5Gp0+XzHk0DwLCq3xQ==}
 
   treeverse@3.0.0:
     resolution: {integrity: sha512-gcANaAnd2QDZFmHFEOF4k7uc1J/6a6z3DJMd/QwEyxLoKGiptJRwid582r7QIsFlFMIZ3SnxfS52S4hm2DHkuQ==}
@@ -3987,47 +3888,6 @@ snapshots:
 
   '@biomejs/cli-win32-x64@2.5.14':
     optional: true
-
-  '@duckdb/node-api@1.5.5-r.5':
-    dependencies:
-      '@duckdb/node-bindings': 1.5.5-r.5
-
-  '@duckdb/node-bindings-darwin-arm64@1.5.5-r.5':
-    optional: true
-
-  '@duckdb/node-bindings-darwin-x64@1.5.5-r.5':
-    optional: true
-
-  '@duckdb/node-bindings-linux-arm64-musl@1.5.5-r.5':
-    optional: true
-
-  '@duckdb/node-bindings-linux-arm64@1.5.5-r.5':
-    optional: true
-
-  '@duckdb/node-bindings-linux-x64-musl@1.5.5-r.5':
-    optional: true
-
-  '@duckdb/node-bindings-linux-x64@1.5.5-r.5':
-    optional: true
-
-  '@duckdb/node-bindings-win32-arm64@1.5.5-r.5':
-    optional: true
-
-  '@duckdb/node-bindings-win32-x64@1.5.5-r.5':
-    optional: true
-
-  '@duckdb/node-bindings@1.5.5-r.5':
-    dependencies:
-      detect-libc: 2.1.2
-    optionalDependencies:
-      '@duckdb/node-bindings-darwin-arm64': 1.5.5-r.5
-      '@duckdb/node-bindings-darwin-x64': 1.5.5-r.5
-      '@duckdb/node-bindings-linux-arm64': 1.5.5-r.5
-      '@duckdb/node-bindings-linux-arm64-musl': 1.5.5-r.5
-      '@duckdb/node-bindings-linux-x64': 1.5.5-r.5
-      '@duckdb/node-bindings-linux-x64-musl': 1.5.5-r.5
-      '@duckdb/node-bindings-win32-arm64': 1.5.5-r.5
-      '@duckdb/node-bindings-win32-x64': 1.5.5-r.5
 
   '@effect/opentelemetry@4.1.0(@opentelemetry/api-logs@0.219.0)(@opentelemetry/api@1.9.0)(@opentelemetry/resources@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-logs@0.219.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-metrics@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-node@2.8.0(@opentelemetry/api@1.9.0))(@opentelemetry/semantic-conventions@1.43.0)(effect@4.1.0)':
     dependencies:
@@ -6020,8 +5880,6 @@ snapshots:
 
   negotiator@1.0.0: {}
 
-  node-addon-api@8.8.0: {}
-
   node-domexception@1.0.0: {}
 
   node-fetch@3.3.2:
@@ -6034,8 +5892,6 @@ snapshots:
     dependencies:
       detect-libc: 2.1.2
     optional: true
-
-  node-gyp-build@4.8.4: {}
 
   node-gyp@12.4.0:
     dependencies:
@@ -6549,26 +6405,6 @@ snapshots:
   toidentifier@1.0.1: {}
 
   toml@4.3.0: {}
-
-  tree-sitter-javascript@0.23.1(tree-sitter@0.21.1):
-    dependencies:
-      node-addon-api: 8.8.0
-      node-gyp-build: 4.8.4
-    optionalDependencies:
-      tree-sitter: 0.21.1
-
-  tree-sitter-typescript@0.23.2(tree-sitter@0.21.1):
-    dependencies:
-      node-addon-api: 8.8.0
-      node-gyp-build: 4.8.4
-      tree-sitter-javascript: 0.23.1(tree-sitter@0.21.1)
-    optionalDependencies:
-      tree-sitter: 0.21.1
-
-  tree-sitter@0.21.1:
-    dependencies:
-      node-addon-api: 8.8.0
-      node-gyp-build: 4.8.4
 
   treeverse@3.0.0: {}
 

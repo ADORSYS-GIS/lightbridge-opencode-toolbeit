@@ -1,7 +1,13 @@
 # ADR-0002 — Code index store: embedded DuckDB, not a graph-DB server
 
-- **Status:** Accepted — shipped in `@vymalo/opencode-code-index` (private, **experimental**) ([#58](https://github.com/vymalo/opencode-oauth2/pull/58), 2026-06).
+- **Status:** Withdrawn (2026-11-08) — `@vymalo/opencode-code-index` was dropped at the OpenCode v2 cutover
+  ([ADR-0019](0019-opencode-v2-cutover.md)) rather than ported. The package was private, experimental and never
+  published. The Context/Decision/Consequences below are preserved as-written for history; the code they describe
+  no longer exists in this repository.
 - **Scope:** `@vymalo/opencode-code-index` — the store backing the `code_*` tools.
+
+> **Note:** the package this ADR describes (`packages/opencode-code-index`) was removed on 2026-11-08, so there is no
+> code to find. This record is kept only for the reasoning behind the embedded DuckDB store.
 
 ## Context
 
