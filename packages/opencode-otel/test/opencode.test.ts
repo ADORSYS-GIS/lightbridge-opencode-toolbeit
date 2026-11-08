@@ -15,7 +15,11 @@ function pluginInput(): PluginInput {
   } as unknown as PluginInput;
 }
 
-async function load(options: Record<string, unknown>, env: Record<string, string> = {}) {
+async function load(
+  options: Record<string, unknown>,
+  env: Record<string, string> = {},
+  deferredTimeoutMs = 5
+) {
   const logger = silentLogger();
   const spans = new InMemorySpanExporter();
   const logs = new InMemoryLogRecordExporter();
@@ -25,7 +29,7 @@ async function load(options: Record<string, unknown>, env: Record<string, string
     registerProcessHandlers: false,
     hostInfo: { hostname: "test-host", version: "0.13.0" },
     // Keep the resource's deferred attributes from holding up the first export.
-    deferredTimeoutMs: 5,
+    deferredTimeoutMs,
     exporters: { trace: () => spans, log: () => logs, metric: () => undefined }
   })(pluginInput(), options);
   return { hooks, logger, spans, logs };
@@ -409,7 +413,12 @@ describe("the full hook surface", () => {
   });
 
   it("stamps the host version and branch onto the resource once their events arrive", async () => {
-    const { hooks, logs } = await load({ endpoint: "http://localhost:4318" });
+    // The deferred branch attribute gives up after a wall-clock timeout that
+    // starts at plugin construction. The default 5ms is shorter than the awaits
+    // below under CI load, so the timeout could win and drop the attribute. This
+    // test is about the event settling it, so the timeout must not fire first
+    // (the timer is unref'd, so a long value holds nothing open).
+    const { hooks, logs } = await load({ endpoint: "http://localhost:4318" }, {}, 60_000);
     await hooks.event?.({
       event: { type: "installation.updated", properties: { version: "1.15.10" } }
     } as never);
