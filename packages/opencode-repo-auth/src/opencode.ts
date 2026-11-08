@@ -1,51 +1,22 @@
-import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
+import { Plugin } from "@opencode/plugin/effect";
+import type { AuthServerConfigInput } from "@vymalo/opencode-auth-core/lib";
+import { Effect } from "effect";
 
+import { dropStampedAuthorization, propagateCachedBearer, resolveCachedBearer } from "./bearer.js";
+import { hasOAuth2Conflict, parseRepoAuthSettings } from "./config.js";
+import { resolveOriginRemote, resolveRepoRoot } from "./git.js";
 import {
-  createJsonConsoleLogger,
+  captureHostContext,
+  createEffectLogger,
   DEFAULT_LOG_LEVEL,
-  type AuthServerConfigInput,
-  type LogFields,
-  LOG_LEVEL_PRIORITY,
   type Logger,
   type LogLevel,
-  type TokenSet
-} from "@vymalo/opencode-auth-core/lib";
-
-import { hasOAuth2Conflict, parseRepoAuthOptions } from "./config.js";
-import { resolveOriginRemote, resolveRepoRoot } from "./git.js";
+  resolveLogLevel
+} from "./logging.js";
 import { RepoAuthPlugin } from "./plugin.js";
 
-type OpenCodeConfig = Parameters<NonNullable<Hooks["config"]>>[0];
-type OpenCodeProviderMap = NonNullable<OpenCodeConfig["provider"]>;
-type OpenCodeProviderConfig = OpenCodeProviderMap[string];
-
-const PLUGIN_SERVICE_NAME = "opencode-repo-auth-plugin";
-
-/**
- * Map OpenCode's host-level `config.logLevel` (uppercase `"DEBUG" | "INFO" |
- * "WARN" | "ERROR"`) to the plugin's internal `LogLevel`. Unknown / missing
- * values fall through to `undefined` so the caller applies its own default —
- * we never throw on an OpenCode-supplied value because the host owns
- * validation of its own field. Host `DEBUG` unlocks the `trace` tier (there is
- * no separate host `TRACE` level), surfacing the `repo_auth_*` trace events.
- */
-function fromOpenCodeLogLevel(value: unknown): LogLevel | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  switch (value.toUpperCase()) {
-    case "DEBUG":
-      return "trace";
-    case "INFO":
-      return "info";
-    case "WARN":
-      return "warn";
-    case "ERROR":
-      return "error";
-    default:
-      return undefined;
-  }
-}
+/** Stable plugin id. v2 requires one and keys storage/registrations by it. */
+export const PLUGIN_ID = "vymalo.repo-auth";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -55,7 +26,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
-interface ManagedProvider {
+export interface ManagedProvider {
   projectId: string;
   auth: AuthServerConfigInput;
   /** Canonical IdP fingerprint — distinguishes IdPs for the single-IdP v1 guard. */
@@ -65,77 +36,29 @@ interface ManagedProvider {
 interface RuntimeState {
   pluginByProvider: Map<string, RepoAuthPlugin>;
   signature?: string;
+  /** Last bearer resolved (async, outside the transform) per provider. */
+  bearers: Map<string, string>;
+  /** What `propagateCachedBearer` last wrote per provider. */
+  stamped: Map<string, string>;
+  /** Signature a warmup has already been started for (loop guard). */
+  warmedSignature?: string;
+}
+
+/** What the transform reads off each `ProviderRecord` — decoupled for tests. */
+export interface ProviderView {
+  id: string;
+  settings?: Record<string, unknown>;
+  integrationID?: string;
 }
 
 export interface OpenCodePluginFactoryOptions {
+  /** Override the logger (tests). Defaults to the host's Effect logger. */
   logger?: Logger;
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
   cacheDir?: string;
-  /** Repo root to resolve git identity from (defaults to `process.cwd()`). */
+  /** Repo root to resolve git identity from (defaults to the plugin's location directory). */
   cwd?: string;
-}
-
-/**
- * Pipe plugin logs through OpenCode's `client.app.log`, JSON console as
- * fallback. Mirrors the pattern used across the @vymalo suite.
- *
- * No plugin in this suite may write to the user's TUI (ADR-0014, superseding
- * ADR-0013's narrower per-plugin scope) — even a warn/error about the
- * caller's own skipped/failed bearer stamp stays off the terminal and goes
- * only to the host log via `client.app.log` at its true level. Set
- * `VYMALO_PLUGIN_CONSOLE_LOG=1` (`consoleAll` below) to opt back into the
- * console mirror for every level.
- */
-function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
-  const fallback = createJsonConsoleLogger("debug");
-  const consoleAll = /^(1|true|yes|on)$/i.test(process.env.VYMALO_PLUGIN_CONSOLE_LOG ?? "");
-
-  const write = (
-    level: "trace" | "debug" | "info" | "warn" | "error",
-    event: string,
-    fields?: LogFields
-  ) => {
-    if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
-      return;
-    }
-
-    if (consoleAll) {
-      fallback[level](event, fields);
-    }
-
-    const hostLevel = level === "trace" ? "debug" : level;
-    void client.app
-      .log({
-        body: {
-          service: PLUGIN_SERVICE_NAME,
-          level: hostLevel,
-          message: event,
-          extra: fields
-        }
-      })
-      .catch(() => {
-        // Best-effort forwarding; console logger is the reliable fallback.
-      });
-  };
-
-  return {
-    trace(event, fields) {
-      write("trace", event, fields);
-    },
-    debug(event, fields) {
-      write("debug", event, fields);
-    },
-    info(event, fields) {
-      write("info", event, fields);
-    },
-    warn(event, fields) {
-      write("warn", event, fields);
-    },
-    error(event, fields) {
-      write("error", event, fields);
-    }
-  };
 }
 
 function authSignature(auth: AuthServerConfigInput): string {
@@ -156,96 +79,52 @@ function authSignature(auth: AuthServerConfigInput): string {
 }
 
 /**
- * Config-time stamp of the project bearer onto `provider.options.headers
- * .Authorization`, mirroring oauth2's `propagateCachedBearer`. This is the
- * config-object handshake that lets `@vymalo/opencode-models-info` (which runs
- * after repo-auth in `plugin`) fetch an OAuth2-protected `meta.modelsInfoUrl`.
- * A user-set `Authorization` always wins here; and a stale stamped value is
- * harmless because `chat.headers` overwrites it per request with a fresh
- * token. Never opens a browser / device-code prompt: on any failure (no cached
- * human token, exchange error) it logs and skips the stamp.
- */
-async function propagateCachedBearer(
-  providerConfig: OpenCodeProviderConfig,
-  providerId: string,
-  plugin: RepoAuthPlugin,
-  logger: Logger
-): Promise<void> {
-  const options = (providerConfig.options ??= {} as NonNullable<OpenCodeProviderConfig["options"]>);
-  const headers = ((options as { headers?: Record<string, string> }).headers ??= {});
-  const hasUserAuth = Object.keys(headers).some((key) => key.toLowerCase() === "authorization");
-  if (hasUserAuth) {
-    logger.debug("repo_auth_bearer_propagation_skipped_user_set", { providerId });
-    return;
-  }
-
-  let token: TokenSet;
-  try {
-    // Config-time warmup is strictly non-interactive: a first-ever login must
-    // not block boot on a browser/device-code prompt. The project token is
-    // renewed later by the first `chat.headers` request (interactive) or the
-    // user's explicit `auth login`. A missing/expired human token throws here
-    // and is caught below — `repo_auth_bearer_propagation_skipped_no_token`.
-    token = await plugin.resolveProjectToken({ interactive: false });
-  } catch (error) {
-    logger.debug("repo_auth_bearer_propagation_skipped_no_token", {
-      providerId,
-      error: error instanceof Error ? error.message : String(error)
-    });
-    return;
-  }
-
-  if (!token.accessToken) {
-    logger.debug("repo_auth_bearer_propagation_skipped_empty_token", { providerId });
-    return;
-  }
-
-  headers.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
-  logger.debug("repo_auth_bearer_propagated_to_provider_headers", { providerId });
-}
-
-/**
- * Resolve the repo's git identity once per config hook — worktree-aware, read
- * off disk, normalized (userinfo stripped). Log-only in v1: nothing is derived
- * from the remote; the module exists to make the plugin worktree-correct and
- * to leave a repo-auditable trace in the log stream.
+ * Resolve the repo's git identity once per plugin load — worktree-aware, read
+ * off disk, normalized (userinfo stripped). Log-only: nothing is derived from
+ * the remote; the module exists to make the plugin worktree-correct and to
+ * leave a repo-auditable trace in the log stream. Never rejects.
  */
 async function logGitIdentity(logger: Logger, cwd: string): Promise<void> {
-  const repoRoot = await resolveRepoRoot(cwd);
-  if (!repoRoot) {
-    logger.trace("repo_auth_remote_missing", {});
-    return;
+  try {
+    const repoRoot = await resolveRepoRoot(cwd);
+    if (!repoRoot) {
+      logger.trace("repo_auth_remote_missing", {});
+      return;
+    }
+    const remote = await resolveOriginRemote(repoRoot);
+    if (!remote) {
+      logger.trace("repo_auth_remote_missing", { repoRoot });
+      return;
+    }
+    logger.debug("repo_auth_remote_resolved", { repoRoot, remote });
+  } catch (error) {
+    logger.trace("repo_auth_remote_missing", {
+      error: error instanceof Error ? error.message : String(error)
+    });
   }
-  const remote = await resolveOriginRemote(repoRoot);
-  if (!remote) {
-    logger.trace("repo_auth_remote_missing", { repoRoot });
-    return;
-  }
-  logger.debug("repo_auth_remote_resolved", { repoRoot, remote });
 }
 
 /**
- * Walk the provider map, collect every `options.meta.repoAuth` opt-in, and
+ * Walk the provider list, collect every `settings.repoAuth` opt-in, and
  * enforce the plugin's guards. Returns the managed providers map (providerId →
- * parsed config), logging `repo_auth_*` events as it goes.
+ * parsed config), logging `repo_auth_*` events as it goes. Pure and
+ * synchronous — it runs inside `provider.transform`.
  */
-function collectManagedProviders(
-  config: OpenCodeConfig,
+export function collectManagedProviders(
+  providers: readonly ProviderView[],
   logger: Logger
 ): Map<string, ManagedProvider> {
   const managed = new Map<string, ManagedProvider>();
-  const providers = config.provider ?? {};
 
   const optedIn: Array<{ providerId: string; config: ManagedProvider }> = [];
-  for (const [providerId, providerConfig] of Object.entries(providers)) {
-    const options = asRecord(providerConfig.options);
+  for (const provider of providers) {
+    const providerId = provider.id;
+    const settings = asRecord(provider.settings);
     // A malformed opt-in on one provider must not take down the whole plugin:
-    // warn and skip, mirroring the no-op matrix. (oauth2 throws for its own
-    // config keys; here a stray/typo'd `meta.repoAuth` on any provider would
-    // otherwise reject the entire config hook for every provider.)
-    let parsed: ReturnType<typeof parseRepoAuthOptions>;
+    // warn and skip, mirroring the no-op matrix.
+    let parsed: ReturnType<typeof parseRepoAuthSettings>;
     try {
-      parsed = parseRepoAuthOptions(options);
+      parsed = parseRepoAuthSettings(settings);
     } catch (error) {
       logger.warn("repo_auth_skipped_malformed", {
         providerId,
@@ -261,7 +140,7 @@ function collectManagedProviders(
       logger.warn("repo_auth_skipped_no_project_id", { providerId });
       continue;
     }
-    if (hasOAuth2Conflict(config, options, providerId)) {
+    if (hasOAuth2Conflict({ settings, integrationID: provider.integrationID })) {
       logger.warn("repo_auth_skipped_oauth2_provider", { providerId });
       continue;
     }
@@ -305,65 +184,131 @@ function runtimeSignature(managed: Map<string, ManagedProvider>): string {
   );
 }
 
+/**
+ * Build the OpenCode v2 plugin.
+ *
+ * Two registrations:
+ *
+ *  - `provider.transform` reads each provider's `settings.repoAuth` opt-in and
+ *    rebuilds the per-provider {@link RepoAuthPlugin} runtimes when the managed
+ *    set changes. It replaces v1's `config` hook. It does no I/O and mints no
+ *    token: transform callbacks must stay synchronous and cheap.
+ *  - `session.hook("model.request")` replaces v1's `chat.headers`: it resolves
+ *    the project token and writes `Authorization` onto the mutable
+ *    `event.headers`. **Fails closed** — on any exchange error no header is set.
+ *
+ * Config-time bearer handoff (for `models-info`'s OAuth2-protected endpoint)
+ * is split in two, as in provider-sync: an async `resolveCachedBearer` runs
+ * outside the transform, then `ctx.provider.reload()` re-runs the transform,
+ * whose sync `propagateCachedBearer` stamps `Provider.Info.headers` only if a
+ * token was obtained. If a later exchange fails, `model.request` strips the
+ * stamp it wrote, so no stale bearer survives.
+ */
 export function createOpencodeRepoAuthPlugin(
   factoryOptions: OpenCodePluginFactoryOptions = {}
-): Plugin {
-  return async ({ client }) => {
-    let currentLogLevel: LogLevel = DEFAULT_LOG_LEVEL;
-    const logger = factoryOptions.logger ?? createOpenCodeLogger(client, () => currentLogLevel);
+): Plugin.Plugin {
+  return Plugin.define({
+    id: PLUGIN_ID,
+    effect: Effect.fn(function* (ctx) {
+      // v2 gives plugins no `config` object: take this plugin's own `logLevel`
+      // option first, then the host's `OPENCODE_LOG_LEVEL`.
+      const logLevel: LogLevel =
+        resolveLogLevel(ctx.options.logLevel) ??
+        resolveLogLevel(process.env.OPENCODE_LOG_LEVEL) ??
+        DEFAULT_LOG_LEVEL;
 
-    const state: RuntimeState = {
-      pluginByProvider: new Map<string, RepoAuthPlugin>(),
-      signature: undefined
-    };
+      let logger = factoryOptions.logger;
+      if (!logger) {
+        const hostContext = yield* captureHostContext;
+        logger = createEffectLogger(hostContext, () => logLevel);
+      }
+      const log = logger;
 
-    return {
-      config: async (config) => {
-        currentLogLevel = fromOpenCodeLogLevel(config.logLevel) ?? DEFAULT_LOG_LEVEL;
-        logger.trace("repo_auth_config_hook_start", {
-          logLevel: currentLogLevel,
-          hostLogLevel: typeof config.logLevel === "string" ? config.logLevel : undefined
-        });
+      const state: RuntimeState = {
+        pluginByProvider: new Map<string, RepoAuthPlugin>(),
+        signature: undefined,
+        bearers: new Map<string, string>(),
+        stamped: new Map<string, string>()
+      };
 
-        await logGitIdentity(logger, factoryOptions.cwd ?? process.cwd());
+      // Needed to run `ctx.provider.reload()` from the async warmup, which
+      // outlives the plugin's own fiber. Providing the captured host context
+      // keeps any logging it does on the host logger (ADR-0014).
+      const hostContext = yield* captureHostContext;
 
-        const managed = collectManagedProviders(config, logger);
-        logger.trace("repo_auth_config_hook_collected_providers", {
-          managedCount: managed.size,
-          providerIds: [...managed.keys()]
-        });
+      /**
+       * ASYNC half of the models-info handshake, run outside the transform:
+       * resolve each managed provider's bearer non-interactively, then reload
+       * the providers so the transform stamps whatever succeeded. A failed
+       * exchange yields no bearer, so nothing is stamped (fail closed).
+       */
+      const warmBearers = async (signature: string): Promise<void> => {
+        let changed = false;
+        for (const [providerId, plugin] of [...state.pluginByProvider.entries()]) {
+          const bearer = await resolveCachedBearer(providerId, plugin, log);
+          if (bearer && state.bearers.get(providerId) !== bearer) {
+            state.bearers.set(providerId, bearer);
+            changed = true;
+          } else if (!bearer) {
+            state.bearers.delete(providerId);
+          }
+        }
+        if (changed && state.signature === signature) {
+          await Effect.runPromise(Effect.provideContext(ctx.provider.reload(), hostContext));
+        }
+      };
+
+      log.trace("repo_auth_plugin_start", { logLevel });
+
+      const cwd = factoryOptions.cwd ?? ctx.location?.directory ?? process.cwd();
+      yield* Effect.promise(() => logGitIdentity(log, cwd));
+
+      yield* ctx.provider.transform((editor) => {
+        const managed = collectManagedProviders(
+          editor.list().map((record) => ({
+            id: record.provider.id,
+            settings: record.provider.settings as Record<string, unknown> | undefined,
+            integrationID: record.provider.integrationID
+          })),
+          log
+        );
+
         if (managed.size === 0) {
-          logger.trace("repo_auth_config_hook_no_managed_providers", {});
           state.pluginByProvider.clear();
+          state.bearers.clear();
+          state.stamped.clear();
           state.signature = undefined;
-          logger.trace("repo_auth_config_hook_finished", { managedCount: 0 });
+          state.warmedSignature = undefined;
+          log.trace("repo_auth_transform_finished", { managedCount: 0 });
           return;
         }
 
         const signature = runtimeSignature(managed);
         if (state.signature !== signature || state.pluginByProvider.size === 0) {
-          logger.trace("repo_auth_runtime_rebuild", {
+          log.trace("repo_auth_runtime_rebuild", {
             reason: state.pluginByProvider.size > 0 ? "signature_changed" : "first_build",
             providerCount: managed.size
           });
           const rebuilt = new Map<string, RepoAuthPlugin>();
           for (const [providerId, entry] of managed.entries()) {
             try {
-              const plugin = new RepoAuthPlugin(
-                { projectId: entry.projectId, auth: entry.auth },
-                {
-                  logger,
-                  fetchImpl: factoryOptions.fetchImpl,
-                  onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
-                  cacheDir: factoryOptions.cacheDir
-                }
+              rebuilt.set(
+                providerId,
+                new RepoAuthPlugin(
+                  { projectId: entry.projectId, auth: entry.auth },
+                  {
+                    logger: log,
+                    fetchImpl: factoryOptions.fetchImpl,
+                    onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
+                    cacheDir: factoryOptions.cacheDir
+                  }
+                )
               );
-              rebuilt.set(providerId, plugin);
             } catch (error) {
               // validateAuthConfig inside the constructor can still reject
               // (e.g. client_credentials without clientSecret). Fail that one
-              // provider, keep the rest — never abort the whole config hook.
-              logger.warn("repo_auth_skipped_invalid_auth", {
+              // provider, keep the rest — never abort the whole transform.
+              log.warn("repo_auth_skipped_invalid_auth", {
                 providerId,
                 error: error instanceof Error ? error.message : String(error)
               });
@@ -371,58 +316,76 @@ export function createOpencodeRepoAuthPlugin(
           }
           state.pluginByProvider = rebuilt;
           state.signature = signature;
+          state.bearers.clear();
+          state.stamped.clear();
         } else {
-          logger.trace("repo_auth_runtime_reused", { providerCount: managed.size });
+          log.trace("repo_auth_runtime_reused", { providerCount: managed.size });
         }
 
-        const providers = (config.provider ??= {});
-        await Promise.all(
-          [...state.pluginByProvider.entries()].map(([providerId, plugin]) => {
-            const providerConfig = providers[providerId];
-            if (!providerConfig) {
-              return undefined;
-            }
-            return propagateCachedBearer(providerConfig, providerId, plugin, logger);
-          })
-        );
-        logger.trace("repo_auth_config_hook_finished", {
-          managedCount: state.pluginByProvider.size
-        });
-      },
-      "chat.headers": async (input, output) => {
-        const providerId = input.model?.providerID ?? input.provider?.info?.id;
-        const plugin = providerId ? state.pluginByProvider.get(providerId) : undefined;
-        if (!providerId || !plugin) {
-          logger.trace("repo_auth_chat_headers_skipped", {
+        // SYNC half: write only bearers already resolved. Never awaits.
+        for (const providerId of state.pluginByProvider.keys()) {
+          propagateCachedBearer(
+            editor,
             providerId,
-            managed: providerId ? state.pluginByProvider.has(providerId) : false
-          });
-          return;
+            state.bearers.get(providerId),
+            log,
+            state.stamped
+          );
         }
+        log.trace("repo_auth_transform_finished", { managedCount: state.pluginByProvider.size });
 
-        // Fail closed: on any exchange failure we inject NO header — the
-        // request goes out without a bearer and the gateway 401s, matching the
-        // SPI's fail-closed semantics. The failure itself is logged at error
-        // level by `resolveProjectToken` (`repo_auth_exchange_failed`); here we
-        // must not let it escape the hook or the whole chat request would error
-        // instead of degrading to the gateway's 401.
-        try {
-          const token = await plugin.resolveProjectToken({ interactive: true });
-          output.headers.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
-          logger.trace("repo_auth_chat_headers_bearer_injected", {
-            providerId,
-            present: Boolean(token.accessToken),
-            tokenType: token.tokenType || "Bearer"
+        // Kick the async warmup once per managed-set signature; its reload
+        // re-enters this transform with the same signature and so does not
+        // warm again.
+        if (state.warmedSignature !== state.signature && state.signature) {
+          const warmSignature = state.signature;
+          state.warmedSignature = warmSignature;
+          void warmBearers(warmSignature).catch((error) => {
+            log.debug("repo_auth_bearer_warmup_failed", {
+              error: error instanceof Error ? error.message : String(error)
+            });
           });
-        } catch {
-          logger.trace("repo_auth_chat_headers_no_bearer", { providerId });
-          return;
         }
-      }
-    };
-  };
+      });
+
+      yield* ctx.session.hook("model.request", (event) =>
+        Effect.promise(async () => {
+          const providerId = event.model.providerID;
+          const plugin = state.pluginByProvider.get(providerId);
+          if (!plugin) {
+            log.trace("repo_auth_model_request_skipped", {
+              providerId,
+              managed: state.pluginByProvider.has(providerId)
+            });
+            return;
+          }
+
+          // Fail closed: on any exchange failure we inject NO header — the
+          // request goes out without a bearer and the gateway 401s, matching
+          // the SPI's fail-closed semantics. The failure itself is logged at
+          // error level by `resolveProjectToken` (`repo_auth_exchange_failed`);
+          // it must not escape the hook, or the whole model request would error
+          // instead of degrading to the gateway's 401.
+          try {
+            const token = await plugin.resolveProjectToken({ interactive: true });
+            event.headers.Authorization = `${token.tokenType || "Bearer"} ${token.accessToken}`;
+            log.trace("repo_auth_model_request_bearer_injected", {
+              providerId,
+              present: Boolean(token.accessToken),
+              tokenType: token.tokenType || "Bearer"
+            });
+          } catch {
+            // The config-time stamp must not outlive a failed exchange: strip
+            // it if (and only if) it is the exact value we wrote.
+            const dropped = dropStampedAuthorization(event.headers, state.stamped.get(providerId));
+            log.trace("repo_auth_model_request_no_bearer", { providerId, droppedStamp: dropped });
+          }
+        })
+      );
+    })
+  });
 }
 
-export const OpencodeRepoAuthPlugin: Plugin = createOpencodeRepoAuthPlugin();
+export const OpencodeRepoAuthPlugin: Plugin.Plugin = createOpencodeRepoAuthPlugin();
 
 export default OpencodeRepoAuthPlugin;

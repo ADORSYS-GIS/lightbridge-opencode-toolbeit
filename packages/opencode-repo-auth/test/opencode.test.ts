@@ -1,17 +1,23 @@
-import { mkdtemp } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
-
-import type { Hooks } from "@opencode-ai/plugin";
+import type { Plugin } from "@opencode/plugin/effect";
 import { FileCacheStore, type Logger } from "@vymalo/opencode-auth-core/lib";
+import { Effect, Logger as EffectLogger, References } from "effect";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createOpencodeRepoAuthPlugin } from "../src/opencode.js";
+import {
+  collectManagedProviders,
+  createOpencodeRepoAuthPlugin,
+  type OpenCodePluginFactoryOptions,
+  OpencodeRepoAuthPlugin,
+  PLUGIN_ID
+} from "../src/opencode.js";
 import { HUMAN_IDENTITY } from "../src/plugin.js";
 import { createSilentLogger, makeJsonResponse } from "./helpers.js";
 
-type OpenCodeConfig = Parameters<NonNullable<Hooks["config"]>>[0];
+type AnyHook = (event: Record<string, unknown>) => Effect.Effect<void>;
 
 interface RecordingLogger extends Logger {
   events: Array<{ level: string; event: string; fields?: unknown }>;
@@ -32,58 +38,139 @@ function createRecordingLogger(): RecordingLogger {
   };
 }
 
-async function instantiate(options: {
-  logger?: Logger;
-  fetchImpl?: typeof fetch;
-  cacheDir: string;
-  cwd: string;
-  /**
-   * Optional spy standing in for the host's `client.app.log` — pass one when
-   * a test needs to inspect what reached the host log (e.g. the ADR-0014
-   * no-terminal-mirror tests below, which deliberately omit `logger` so the
-   * real `createOpenCodeLogger` runs).
-   */
-  appLog?: (...args: unknown[]) => Promise<void>;
-}): Promise<NonNullable<Hooks>> {
-  const plugin = createOpencodeRepoAuthPlugin(options);
-  return plugin({ client: { app: { log: options.appLog ?? (async () => undefined) } } as never });
+interface ProviderFixture {
+  id: string;
+  settings?: Record<string, unknown>;
+  integrationID?: string;
+  headers?: Record<string, string>;
 }
 
-function makeConfig(provider: Record<string, unknown>): OpenCodeConfig {
+interface Harness {
+  hooks: Map<string, AnyHook>;
+  /** Run the registered provider transform over a fresh editor. */
+  transform: (providers: ProviderFixture[]) => void;
+  /** Number of `ctx.provider.reload()` calls so far. */
+  reloads: () => number;
+  /** Wait until the async bearer warmup has reloaded (or time out quietly). */
+  settle: (reloads?: number) => Promise<void>;
+  /** The provider fixtures the transform last ran over (mutated in place). */
+  providers: () => ProviderFixture[];
+  /** Fire `model.request` for a provider; returns the (mutated) headers. */
+  modelRequest: (
+    providerID: string,
+    headers?: Record<string, string>
+  ) => Promise<Record<string, string>>;
+}
+
+function fakeCtx(options: Record<string, unknown>, directory: string) {
+  const hooks = new Map<string, AnyHook>();
+  let transformCb: ((editor: unknown) => void) | undefined;
+  let current: ProviderFixture[] = [];
+  let reloadCount = 0;
+  const registration = Effect.succeed({ dispose: Effect.void });
+  const ctx = {
+    options,
+    location: { directory },
+    provider: {
+      transform: (cb: (editor: unknown) => void) => {
+        transformCb = cb;
+        return registration;
+      },
+      reload: () =>
+        Effect.sync(() => {
+          reloadCount += 1;
+          transformCb?.(editorOf(current));
+        })
+    },
+    session: {
+      hook: (name: string, cb: AnyHook) => {
+        hooks.set(name, cb);
+        return registration;
+      }
+    }
+  } as unknown as Plugin.Context;
   return {
-    logLevel: "INFO",
-    provider: provider as never
+    ctx,
+    hooks,
+    transformCb: () => transformCb,
+    reloads: () => reloadCount,
+    setProviders: (providers: ProviderFixture[]) => {
+      current = providers;
+    },
+    providers: () => current
   };
 }
 
-function makeRepoAuthProviderOptions(): Record<string, unknown> {
+function editorOf(providers: ProviderFixture[]) {
   return {
-    baseURL: "https://gateway.example.com/v1",
-    meta: {
-      repoAuth: {
-        projectId: "proj-123",
-        issuer: "https://idp.example.com/realms/acme",
-        clientId: "opencode-cli",
-        scopes: ["openid", "offline_access"],
-        authFlow: "device_code",
-        tokenEndpoint: "https://idp.example.com/realms/acme/protocol/openid-connect/token",
-        deviceAuthorizationEndpoint:
-          "https://idp.example.com/realms/acme/protocol/openid-connect/auth/device",
-        pkce: false
+    list: () => providers.map((provider) => ({ provider })),
+    get: (id: string) => {
+      const provider = providers.find((candidate) => candidate.id === id);
+      return provider ? { provider } : undefined;
+    },
+    update: (id: string, fn: (provider: ProviderFixture) => void) => {
+      const provider = providers.find((candidate) => candidate.id === id);
+      if (provider) {
+        fn(provider);
       }
     }
   };
 }
 
-function readGateway(config: OpenCodeConfig): {
-  options?: Record<string, unknown>;
-  headers?: Record<string, string>;
-} {
-  const provider = (config.provider as Record<string, never>).gateway as {
-    options?: Record<string, unknown>;
+function run(plugin: Plugin.Plugin, ctx: Plugin.Context) {
+  return Effect.runPromise(Effect.scoped(plugin.effect(ctx)));
+}
+
+async function start(
+  factory: OpenCodePluginFactoryOptions,
+  ctxOptions: Record<string, unknown> = {}
+): Promise<Harness> {
+  const cwd = factory.cwd ?? (await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit-")));
+  const fake = fakeCtx(ctxOptions, cwd);
+  await run(createOpencodeRepoAuthPlugin({ ...factory, cwd }), fake.ctx);
+  return {
+    hooks: fake.hooks,
+    transform: (providers) => {
+      const cb = fake.transformCb();
+      if (!cb) {
+        throw new Error("provider.transform was not registered");
+      }
+      fake.setProviders(providers);
+      cb(editorOf(providers));
+    },
+    reloads: fake.reloads,
+    providers: fake.providers,
+    settle: async (reloads = 1) => {
+      for (let i = 0; i < 100 && fake.reloads() < reloads; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    },
+    modelRequest: async (providerID, headers = {}) => {
+      const hook = fake.hooks.get("model.request");
+      if (!hook) {
+        throw new Error("model.request was not registered");
+      }
+      await Effect.runPromise(hook({ model: { providerID, id: "m" }, headers }));
+      return headers;
+    }
   };
-  const headers = (provider.options?.headers ?? {}) as Record<string, string>;
-  return { options: provider.options, headers };
+}
+
+function repoAuthSettings(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    repoAuth: {
+      projectId: "proj-123",
+      issuer: "https://idp.example.com/realms/acme",
+      clientId: "opencode-cli",
+      scopes: ["openid", "offline_access"],
+      authFlow: "device_code",
+      tokenEndpoint: "https://idp.example.com/realms/acme/protocol/openid-connect/token",
+      deviceAuthorizationEndpoint:
+        "https://idp.example.com/realms/acme/protocol/openid-connect/auth/device",
+      pkce: false,
+      ...overrides
+    }
+  };
 }
 
 function parseFormBody(init?: RequestInit): URLSearchParams {
@@ -103,209 +190,241 @@ async function seedHuman(cacheDir: string): Promise<void> {
   });
 }
 
+const tmp = (prefix: string) => mkdtemp(join(tmpdir(), prefix));
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("createOpencodeRepoAuthPlugin", () => {
-  it("stamps the project bearer at config time on an opted-in provider", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-stamp-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit-"));
-    await seedHuman(cacheDir);
-
-    const hooks = await instantiate({
-      logger: createSilentLogger(),
-      fetchImpl: async () =>
-        makeJsonResponse({ access_token: "project-bearer", token_type: "Bearer", expires_in: 300 }),
-      cacheDir,
-      cwd
-    });
-
-    const config = makeConfig({ gateway: { options: makeRepoAuthProviderOptions() } });
-    await hooks.config?.(config);
-
-    const headers = readGateway(config);
-    expect(headers.headers?.Authorization).toBe("Bearer project-bearer");
+  it("has a stable id", () => {
+    expect(PLUGIN_ID).toBe("vymalo.repo-auth");
+    expect(createOpencodeRepoAuthPlugin().id).toBe(PLUGIN_ID);
+    expect(OpencodeRepoAuthPlugin.id).toBe(PLUGIN_ID);
   });
 
-  it("never clobbers a user-set Authorization at config time", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-user-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit2-"));
+  it("registers a provider transform and a model.request hook, nothing else", async () => {
+    const harness = await start({ logger: createSilentLogger() });
+    expect([...harness.hooks.keys()]).toEqual(["model.request"]);
+  });
 
-    let called = 0;
-    const hooks = await instantiate({
+  it("injects the project bearer per request on a managed provider", async () => {
+    const cacheDir = await tmp("repo-auth-oc-chat-");
+    await seedHuman(cacheDir);
+    const harness = await start({
       logger: createSilentLogger(),
-      fetchImpl: async () => {
-        called += 1;
-        return makeJsonResponse({
-          access_token: "project-bearer",
-          token_type: "Bearer",
-          expires_in: 300
-        });
-      },
       cacheDir,
-      cwd
+      fetchImpl: async () =>
+        makeJsonResponse({ access_token: "chat-scoped", token_type: "Bearer", expires_in: 300 })
     });
+    harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
 
-    const config = makeConfig({
-      gateway: {
-        options: {
-          ...makeRepoAuthProviderOptions(),
-          headers: { authorization: "Bearer user-supplied" }
-        }
+    const headers = await harness.modelRequest("gateway");
+    expect(headers.Authorization).toBe("Bearer chat-scoped");
+  });
+
+  it("overwrites a pre-existing Authorization on a managed provider (project bearer wins)", async () => {
+    const cacheDir = await tmp("repo-auth-oc-wins-");
+    await seedHuman(cacheDir);
+    const harness = await start({
+      logger: createSilentLogger(),
+      cacheDir,
+      fetchImpl: async () =>
+        makeJsonResponse({ access_token: "chat-scoped", token_type: "Bearer", expires_in: 300 })
+    });
+    harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
+
+    const headers = await harness.modelRequest("gateway", { Authorization: "Bearer user-set" });
+    expect(headers.Authorization).toBe("Bearer chat-scoped");
+  });
+
+  it("leaves non-managed providers untouched and never calls the network", async () => {
+    const cacheDir = await tmp("repo-auth-oc-other-");
+    const harness = await start({
+      logger: createSilentLogger(),
+      cacheDir,
+      fetchImpl: async () => {
+        throw new Error("fetch must not be called for an unmanaged provider");
       }
     });
-    await hooks.config?.(config);
+    harness.transform([
+      { id: "gateway", settings: repoAuthSettings() },
+      { id: "some-other-provider" }
+    ]);
 
-    const gateway = readGateway(config);
-    expect(gateway.options?.headers).toMatchObject({ authorization: "Bearer user-supplied" });
-    const headers = (gateway.options?.headers ?? {}) as Record<string, string>;
+    const headers = await harness.modelRequest("some-other-provider");
     expect(headers.Authorization).toBeUndefined();
-    expect(called).toBe(0);
   });
 
-  it("skips a provider without projectId, emitting a warning, and injects nothing", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-nopid-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit3-"));
-    const logger = createRecordingLogger();
-
-    const hooks = await instantiate({
-      logger,
-      fetchImpl: async () => makeJsonResponse({}),
-      cacheDir,
-      cwd
-    });
-    const config = makeConfig({
-      gateway: {
-        options: {
-          baseURL: "https://gateway.example.com/v1",
-          meta: { repoAuth: { issuer: "https://idp.example.com", clientId: "c", scopes: ["s"] } }
-        }
-      }
-    });
-    await hooks.config?.(config);
-
-    expect(logger.events.some((e) => e.event === "repo_auth_skipped_no_project_id")).toBe(true);
-    expect(readGateway(config).options?.headers).toBeUndefined();
-  });
-
-  it("skips a provider also managed by oauth2, emitting a warning", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-conflict-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit4-"));
-    const logger = createRecordingLogger();
-
-    const hooks = await instantiate({
-      logger,
-      fetchImpl: async () => makeJsonResponse({}),
-      cacheDir,
-      cwd
-    });
-    const config = makeConfig({
-      gateway: {
-        options: {
-          ...makeRepoAuthProviderOptions(),
-          oauth2: { issuer: "https://other.example.com", clientId: "c", scopes: ["s"] }
-        }
-      }
-    });
-    await hooks.config?.(config);
-
-    expect(logger.events.some((e) => e.event === "repo_auth_skipped_oauth2_provider")).toBe(true);
-    expect(readGateway(config).options?.headers).toBeUndefined();
-  });
-
-  it("never triggers an interactive login at config time on a cold cache", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-cold-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit8-"));
-    const logger = createRecordingLogger();
-
-    const hooks = await instantiate({
-      logger,
-      cacheDir,
-      cwd,
-      fetchImpl: async () => {
-        throw new Error("config-time warmup must not attempt interactive auth");
-      }
-    });
-    const config = makeConfig({ gateway: { options: makeRepoAuthProviderOptions() } });
-
-    await expect(hooks.config?.(config)).resolves.toBeUndefined();
-    expect(readGateway(config).headers.Authorization).toBeUndefined();
-    expect(
-      logger.events.some((e) => e.event === "repo_auth_bearer_propagation_skipped_no_token")
-    ).toBe(true);
-  });
-
-  it("skips a malformed repoAuth option but still manages the remaining providers", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-malformed-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit9-"));
-    const logger = createRecordingLogger();
+  it("does not resolve any token inside the transform itself (sync and cheap)", async () => {
+    const cacheDir = await tmp("repo-auth-oc-sync-");
     await seedHuman(cacheDir);
+    const fetchImpl = vi.fn(async () => makeJsonResponse({}));
+    const harness = await start({ logger: createSilentLogger(), cacheDir, fetchImpl });
 
-    const hooks = await instantiate({
-      logger,
-      cacheDir,
-      cwd,
-      fetchImpl: async () =>
-        makeJsonResponse({ access_token: "ok-token", token_type: "Bearer", expires_in: 300 })
-    });
-    const config = makeConfig({
-      gateway: {
-        options: {
-          baseURL: "https://gateway.example.com/v1",
-          // Well-formed projectId but no issuer/clientId/scopes → parse throws;
-          // the provider is skipped, not the whole config hook.
-          meta: { repoAuth: { projectId: "proj-123" } }
-        }
-      },
-      healthy: { options: makeRepoAuthProviderOptions() }
-    });
-    await hooks.config?.(config);
+    harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
 
-    expect(logger.events.some((e) => e.event === "repo_auth_skipped_malformed")).toBe(true);
-
-    const provider = (config.provider as Record<string, never>).healthy as {
-      options?: Record<string, unknown>;
-    };
-    const headers = (provider.options?.headers ?? {}) as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer ok-token");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("degrades to no header when the exchange fails inside chat.headers", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-failclosed-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit7a-"));
-    const logger = createRecordingLogger();
+  it("FAILS CLOSED: an exchange error injects no header and the hook resolves", async () => {
+    const cacheDir = await tmp("repo-auth-oc-failclosed-");
     await seedHuman(cacheDir);
-
-    const hooks = await instantiate({
+    const logger = createRecordingLogger();
+    const harness = await start({
       logger,
       cacheDir,
-      cwd,
       fetchImpl: async () =>
         new Response(JSON.stringify({ error: "invalid_grant" }), { status: 404 })
     });
+    harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
 
-    const config = makeConfig({ gateway: { options: makeRepoAuthProviderOptions() } });
-    await expect(hooks.config?.(config)).resolves.toBeUndefined();
+    const headers: Record<string, string> = {};
+    await expect(harness.modelRequest("gateway", headers)).resolves.toBe(headers);
 
-    // The hook must not throw: it returns with no Authorization and the
-    // gateway (not OpenCode) surfaces the 401.
-    const output = { headers: {} as Record<string, string> };
-    await expect(
-      hooks["chat.headers"]?.({ model: { providerID: "gateway" } }, output)
-    ).resolves.toBeUndefined();
-    expect(output.headers.Authorization).toBeUndefined();
+    expect(headers.Authorization).toBeUndefined();
+    expect(Object.keys(headers)).toEqual([]);
     expect(logger.events.some((e) => e.event === "repo_auth_exchange_failed")).toBe(true);
-    expect(logger.events.some((e) => e.event === "repo_auth_chat_headers_no_bearer")).toBe(true);
+    expect(logger.events.some((e) => e.event === "repo_auth_model_request_no_bearer")).toBe(true);
+  });
+
+  it("FAILS CLOSED: a network error injects no header", async () => {
+    const cacheDir = await tmp("repo-auth-oc-failclosed-net-");
+    await seedHuman(cacheDir);
+    const harness = await start({
+      logger: createSilentLogger(),
+      cacheDir,
+      fetchImpl: async () => {
+        throw new Error("connection refused");
+      }
+    });
+    harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
+
+    const headers = await harness.modelRequest("gateway");
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it("FAILS CLOSED: a cold cache (no human token) injects no header", async () => {
+    const cacheDir = await tmp("repo-auth-oc-cold-");
+    const harness = await start({
+      logger: createSilentLogger(),
+      cacheDir,
+      fetchImpl: async () => {
+        throw new Error("no network in this test");
+      }
+    });
+    harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
+
+    const headers = await harness.modelRequest("gateway");
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it("skips a provider without projectId, emitting a warning, and injects nothing", async () => {
+    const cacheDir = await tmp("repo-auth-oc-nopid-");
+    const logger = createRecordingLogger();
+    const harness = await start({
+      logger,
+      cacheDir,
+      fetchImpl: async () => makeJsonResponse({})
+    });
+    harness.transform([
+      {
+        id: "gateway",
+        settings: { repoAuth: { issuer: "https://idp.example.com", clientId: "c", scopes: ["s"] } }
+      }
+    ]);
+
+    expect(logger.events.some((e) => e.event === "repo_auth_skipped_no_project_id")).toBe(true);
+    expect((await harness.modelRequest("gateway")).Authorization).toBeUndefined();
+  });
+
+  it("skips a provider carrying settings.oauth2, emitting a warning", async () => {
+    const cacheDir = await tmp("repo-auth-oc-conflict-");
+    const logger = createRecordingLogger();
+    const harness = await start({
+      logger,
+      cacheDir,
+      fetchImpl: async () => makeJsonResponse({})
+    });
+    harness.transform([
+      {
+        id: "gateway",
+        settings: {
+          ...repoAuthSettings(),
+          oauth2: { issuer: "https://other.example.com", clientId: "c", scopes: ["s"] }
+        }
+      }
+    ]);
+
+    expect(logger.events.some((e) => e.event === "repo_auth_skipped_oauth2_provider")).toBe(true);
+    expect((await harness.modelRequest("gateway")).Authorization).toBeUndefined();
+  });
+
+  it("skips a provider owned by an Integration (OAuth-managed), emitting a warning", async () => {
+    const cacheDir = await tmp("repo-auth-oc-integration-");
+    const logger = createRecordingLogger();
+    const harness = await start({
+      logger,
+      cacheDir,
+      fetchImpl: async () => makeJsonResponse({})
+    });
+    harness.transform([
+      { id: "gateway", settings: repoAuthSettings(), integrationID: "integration-1" }
+    ]);
+
+    expect(logger.events.some((e) => e.event === "repo_auth_skipped_oauth2_provider")).toBe(true);
+    expect((await harness.modelRequest("gateway")).Authorization).toBeUndefined();
+  });
+
+  it("skips a malformed repoAuth block but still manages the remaining providers", async () => {
+    const cacheDir = await tmp("repo-auth-oc-malformed-");
+    await seedHuman(cacheDir);
+    const logger = createRecordingLogger();
+    const harness = await start({
+      logger,
+      cacheDir,
+      fetchImpl: async () =>
+        makeJsonResponse({ access_token: "ok-token", token_type: "Bearer", expires_in: 300 })
+    });
+    harness.transform([
+      // Well-formed projectId but no issuer/clientId/scopes → parse throws; the
+      // provider is skipped, not the whole transform.
+      { id: "gateway", settings: { repoAuth: { projectId: "proj-123" } } },
+      { id: "healthy", settings: repoAuthSettings() }
+    ]);
+
+    expect(logger.events.some((e) => e.event === "repo_auth_skipped_malformed")).toBe(true);
+    expect((await harness.modelRequest("gateway")).Authorization).toBeUndefined();
+    expect((await harness.modelRequest("healthy")).Authorization).toBe("Bearer ok-token");
+  });
+
+  it("skips a provider whose auth block fails validation and injects nothing", async () => {
+    const cacheDir = await tmp("repo-auth-oc-invalid-auth-");
+    await seedHuman(cacheDir);
+    const logger = createRecordingLogger();
+    const harness = await start({
+      logger,
+      cacheDir,
+      fetchImpl: async () =>
+        makeJsonResponse({ access_token: "ok-token", token_type: "Bearer", expires_in: 300 })
+    });
+    // client_credentials needs a clientSecret → RepoAuthPlugin ctor rejects.
+    harness.transform([
+      { id: "bad", settings: repoAuthSettings({ authFlow: "client_credentials" }) }
+    ]);
+
+    expect(logger.events.some((e) => e.event === "repo_auth_skipped_invalid_auth")).toBe(true);
+    expect((await harness.modelRequest("bad")).Authorization).toBeUndefined();
   });
 
   it("keeps only the first IdP group when providers disagree (single-IdP v1 guard)", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-2idp-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit5-"));
+    const cacheDir = await tmp("repo-auth-oc-2idp-");
+    await seedHuman(cacheDir);
     const logger = createRecordingLogger();
     const captured: string[] = [];
-    await seedHuman(cacheDir);
-
-    const hooks = await instantiate({
+    const harness = await start({
       logger,
       cacheDir,
-      cwd,
       fetchImpl: async (_input, init) => {
         const body = parseFormBody(init);
         if (body.get("grant_type") === "urn:ietf:params:oauth:grant-type:token-exchange") {
@@ -314,140 +433,295 @@ describe("createOpencodeRepoAuthPlugin", () => {
         return makeJsonResponse({ access_token: "tok", token_type: "Bearer", expires_in: 300 });
       }
     });
-
-    const firstOptions = makeRepoAuthProviderOptions();
-    const secondOptions: Record<string, unknown> = {
-      ...firstOptions,
-      meta: {
-        repoAuth: {
+    harness.transform([
+      { id: "first", settings: repoAuthSettings() },
+      {
+        id: "second",
+        settings: repoAuthSettings({
           projectId: "proj-456",
-          issuer: "https://other-idp.example.com/realms/x",
-          clientId: "opencode-cli",
-          scopes: ["openid", "offline_access"],
-          authFlow: "device_code"
-        }
+          issuer: "https://other-idp.example.com/realms/x"
+        })
       }
-    };
-    const config = makeConfig({
-      first: { options: firstOptions },
-      second: { options: secondOptions }
-    });
-    await hooks.config?.(config);
+    ]);
 
     expect(logger.events.some((e) => e.event === "repo_auth_multiple_idps_unsupported")).toBe(true);
+    await harness.modelRequest("first");
+    await harness.modelRequest("second");
     expect(captured).toEqual(["proj-123"]);
   });
 
-  it("injects the project bearer per request on a managed provider (chat.headers)", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-chat-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit6-"));
+  it("reuses the runtime when the managed set is unchanged, drops it when opt-in vanishes", async () => {
+    const cacheDir = await tmp("repo-auth-oc-reuse-");
     await seedHuman(cacheDir);
-
-    const hooks = await instantiate({
-      logger: createSilentLogger(),
+    const logger = createRecordingLogger();
+    const harness = await start({
+      logger,
       cacheDir,
-      cwd,
       fetchImpl: async () =>
-        makeJsonResponse({ access_token: "chat-scoped", token_type: "Bearer", expires_in: 300 })
+        makeJsonResponse({ access_token: "tok", token_type: "Bearer", expires_in: 300 })
     });
+    const providers = [{ id: "gateway", settings: repoAuthSettings() }];
 
-    const config = makeConfig({ gateway: { options: makeRepoAuthProviderOptions() } });
-    await hooks.config?.(config);
+    harness.transform(providers);
+    harness.transform(providers);
+    expect(logger.events.filter((e) => e.event === "repo_auth_runtime_reused")).toHaveLength(1);
 
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.({ model: { providerID: "gateway" } }, output);
+    harness.transform([{ id: "gateway", settings: repoAuthSettings({ projectId: "proj-2" }) }]);
+    expect(
+      logger.events.find(
+        (e) =>
+          e.event === "repo_auth_runtime_rebuild" &&
+          (e.fields as { reason?: string }).reason === "signature_changed"
+      )
+    ).toBeDefined();
 
-    expect(output.headers.Authorization).toBe("Bearer chat-scoped");
+    harness.transform([{ id: "gateway" }]);
+    expect((await harness.modelRequest("gateway")).Authorization).toBeUndefined();
   });
 
-  it("leaves non-managed providers untouched in chat.headers", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-other-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-nogit7-"));
+  it("logs the repo's git origin once at load (log-only)", async () => {
+    const cwd = await tmp("repo-auth-oc-git-");
+    await mkdir(join(cwd, ".git"));
+    await writeFile(
+      join(cwd, ".git", "config"),
+      '[remote "origin"]\n\turl = https://example.com/acme/repo.git\n'
+    );
+    const logger = createRecordingLogger();
+    await start({ logger, cwd });
 
-    const hooks = await instantiate({
-      logger: createSilentLogger(),
+    const resolved = logger.events.find((e) => e.event === "repo_auth_remote_resolved");
+    expect(resolved?.fields).toMatchObject({ remote: expect.stringContaining("acme/repo") });
+  });
+
+  it("traces a missing git origin when cwd is not a repo", async () => {
+    const logger = createRecordingLogger();
+    await start({ logger });
+    expect(logger.events.some((e) => e.event === "repo_auth_remote_missing")).toBe(true);
+  });
+});
+
+describe("config-time bearer handoff (async resolve, sync stamp)", () => {
+  const ok = async () =>
+    makeJsonResponse({ access_token: "project-bearer", token_type: "Bearer", expires_in: 300 });
+
+  it("stamps Provider.Info.headers.Authorization after the async warmup reloads", async () => {
+    const cacheDir = await tmp("repo-auth-oc-stamp-");
+    await seedHuman(cacheDir);
+    const logger = createRecordingLogger();
+    const harness = await start({ logger, cacheDir, fetchImpl: ok });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+
+    harness.transform([provider]);
+    // Synchronously after the transform nothing is stamped.
+    expect(provider.headers).toBeUndefined();
+
+    await harness.settle();
+    expect(harness.reloads()).toBe(1);
+    expect(provider.headers?.Authorization).toBe("Bearer project-bearer");
+    expect(
+      logger.events.some((e) => e.event === "repo_auth_bearer_propagated_to_provider_headers")
+    ).toBe(true);
+  });
+
+  it("warms once per managed set: the reload does not trigger another warmup", async () => {
+    const cacheDir = await tmp("repo-auth-oc-once-");
+    await seedHuman(cacheDir);
+    const fetchImpl = vi.fn(ok);
+    const harness = await start({ logger: createSilentLogger(), cacheDir, fetchImpl });
+
+    harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
+    await harness.settle();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(harness.reloads()).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("never overwrites a user-set Authorization (case-insensitive)", async () => {
+    const cacheDir = await tmp("repo-auth-oc-userset-");
+    await seedHuman(cacheDir);
+    const logger = createRecordingLogger();
+    const harness = await start({ logger, cacheDir, fetchImpl: ok });
+    const provider: ProviderFixture = {
+      id: "gateway",
+      settings: repoAuthSettings(),
+      headers: { authorization: "Bearer user-supplied" }
+    };
+
+    harness.transform([provider]);
+    await harness.settle();
+
+    expect(provider.headers).toEqual({ authorization: "Bearer user-supplied" });
+    expect(
+      logger.events.some((e) => e.event === "repo_auth_bearer_propagation_skipped_user_set")
+    ).toBe(true);
+  });
+
+  it("stamps nothing and never reloads on a cold cache (no interactive login at load)", async () => {
+    const cacheDir = await tmp("repo-auth-oc-coldstamp-");
+    const logger = createRecordingLogger();
+    const harness = await start({
+      logger,
       cacheDir,
-      cwd,
       fetchImpl: async () => {
-        throw new Error("fetch must not be called for an unmanaged provider");
+        throw new Error("load-time warmup must not attempt interactive auth");
       }
     });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
 
-    const config = makeConfig({ gateway: { options: makeRepoAuthProviderOptions() } });
-    await hooks.config?.(config);
-    const output = { headers: {} as Record<string, string> };
-    await hooks["chat.headers"]?.({ model: { providerID: "some-other-provider" } }, output);
+    harness.transform([provider]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(output.headers.Authorization).toBeUndefined();
+    expect(provider.headers).toBeUndefined();
+    expect(harness.reloads()).toBe(0);
+    expect(
+      logger.events.some((e) => e.event === "repo_auth_bearer_propagation_skipped_no_token")
+    ).toBe(true);
+  });
+
+  it("FAILS CLOSED: a failed exchange at load stamps nothing", async () => {
+    const cacheDir = await tmp("repo-auth-oc-failstamp-");
+    await seedHuman(cacheDir);
+    const harness = await start({
+      logger: createSilentLogger(),
+      cacheDir,
+      fetchImpl: async () => new Response(JSON.stringify({ error: "denied" }), { status: 403 })
+    });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+
+    harness.transform([provider]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(provider.headers).toBeUndefined();
+    expect(harness.reloads()).toBe(0);
+  });
+
+  it("FAILS CLOSED: a later exchange failure strips the stamp it wrote, but not a user header", async () => {
+    const cacheDir = await tmp("repo-auth-oc-stripstamp-");
+    await seedHuman(cacheDir);
+    let fail = false;
+    const harness = await start({
+      logger: createSilentLogger(),
+      cacheDir,
+      // expires_in 1 is inside the skew window, so every request re-exchanges.
+      fetchImpl: async () =>
+        fail
+          ? new Response(JSON.stringify({ error: "revoked" }), { status: 403 })
+          : makeJsonResponse({
+              access_token: "project-bearer",
+              token_type: "Bearer",
+              expires_in: 1
+            })
+    });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+    harness.transform([provider]);
+    await harness.settle();
+    expect(provider.headers?.Authorization).toBe("Bearer project-bearer");
+
+    fail = true;
+    // The host merges Provider.Info.headers into the request headers.
+    const stale = await harness.modelRequest("gateway", { ...provider.headers });
+    expect(stale.Authorization).toBeUndefined();
+
+    const user = await harness.modelRequest("gateway", { Authorization: "Bearer user-set" });
+    expect(user.Authorization).toBe("Bearer user-set");
+  });
+
+  it("clears the stamp bookkeeping when the opt-in disappears", async () => {
+    const cacheDir = await tmp("repo-auth-oc-clearstamp-");
+    await seedHuman(cacheDir);
+    const harness = await start({ logger: createSilentLogger(), cacheDir, fetchImpl: ok });
+    const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
+    harness.transform([provider]);
+    await harness.settle();
+
+    const bare: ProviderFixture = { id: "gateway" };
+    harness.transform([bare]);
+    expect(bare.headers).toBeUndefined();
+  });
+});
+
+describe("collectManagedProviders", () => {
+  it("treats a settings-less provider as not opted in", () => {
+    const logger = createRecordingLogger();
+    const managed = collectManagedProviders([{ id: "plain" }], logger);
+    expect(managed.size).toBe(0);
+    expect(logger.events.some((e) => e.event === "repo_auth_provider_skipped")).toBe(true);
   });
 });
 
 describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () => {
-  // A provider opted into repoAuth without a projectId is the simplest
-  // reliable way to exercise a real `warn` record
-  // (`repo_auth_skipped_no_project_id`) purely through config validation —
-  // no network, no cache seeding. `logger` is deliberately omitted from
-  // `instantiate` so the real (non-injected) `createOpenCodeLogger` runs.
-  async function triggerNoProjectIdWarning(
-    appLog: (...args: unknown[]) => Promise<void>
-  ): Promise<void> {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-oc-adr0014-"));
-    const cwd = await mkdtemp(join(tmpdir(), "repo-auth-oc-adr0014-nogit-"));
-
-    const hooks = await instantiate({
-      cacheDir,
-      cwd,
-      appLog,
-      fetchImpl: async () => makeJsonResponse({})
-    });
-    const config = makeConfig({
-      gateway: {
-        options: {
-          baseURL: "https://gateway.example.com/v1",
-          meta: { repoAuth: { issuer: "https://idp.example.com", clientId: "c", scopes: ["s"] } }
-        }
-      }
-    });
-    await hooks.config?.(config);
+  interface Captured {
+    level: string;
+    message: unknown[];
+    annotations: Record<string, unknown>;
   }
 
-  it("never mirrors a warn record to the console fallback", async () => {
+  // No `logger` is injected: the real captureHostContext → createEffectLogger
+  // path runs, inside a fiber whose only logger records into `sink`.
+  async function runPluginUnderRecorder(sink: Captured[]) {
+    const recorder = EffectLogger.make<unknown, void>((options) => {
+      sink.push({
+        level: options.logLevel,
+        message: options.message as unknown[],
+        annotations: { ...options.fiber.getRef(References.CurrentLogAnnotations) }
+      });
+    });
+    const cwd = await tmp("repo-auth-oc-adr0014-");
+    const fake = fakeCtx({}, cwd);
+    await Effect.runPromise(
+      Effect.scoped(createOpencodeRepoAuthPlugin({ cwd }).effect(fake.ctx)).pipe(
+        Effect.provide(EffectLogger.layer([recorder], { mergeWithExisting: false })),
+        Effect.provideService(References.MinimumLogLevel, "All")
+      )
+    );
+    // `repo_auth_skipped_no_project_id` is a real `warn` reachable purely
+    // through config validation — no network, no cache seeding.
+    fake.transformCb()?.(
+      editorOf([
+        {
+          id: "gateway",
+          settings: {
+            repoAuth: { issuer: "https://idp.example.com", clientId: "c", scopes: ["s"] }
+          }
+        }
+      ])
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  it("delivers the warn record to the host Effect logger and never to the console", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const appLog = vi.fn().mockResolvedValue(undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+    delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
 
-    await triggerNoProjectIdWarning(appLog);
+    try {
+      const sink: Captured[] = [];
+      await runPluginUnderRecorder(sink);
 
-    expect(warn).not.toHaveBeenCalled();
-    expect(log).not.toHaveBeenCalled();
-    warn.mockRestore();
-    log.mockRestore();
-  });
-
-  it("still forwards the warn record to client.app.log at its true level", async () => {
-    const appLog = vi.fn().mockResolvedValue(undefined);
-
-    await triggerNoProjectIdWarning(appLog);
-
-    expect(appLog).toHaveBeenCalledWith(
-      expect.objectContaining({
-        body: expect.objectContaining({
-          service: "opencode-repo-auth-plugin",
-          level: "warn",
-          message: "repo_auth_skipped_no_project_id"
-        })
-      })
-    );
+      const record = sink.find((c) => c.message[0] === "repo_auth_skipped_no_project_id");
+      expect(record?.level).toBe("Warn");
+      expect(record?.annotations).toEqual({ providerId: "gateway" });
+      expect(warn).not.toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      if (previous !== undefined) {
+        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+      }
+    }
   });
 
   it("restores the console mirror when VYMALO_PLUGIN_CONSOLE_LOG is set", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const appLog = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(console, "log").mockImplementation(() => {});
     const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
     process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
 
     try {
-      await triggerNoProjectIdWarning(appLog);
+      await runPluginUnderRecorder([]);
       expect(warn).toHaveBeenCalled();
     } finally {
       if (previous === undefined) {
@@ -455,7 +729,46 @@ describe("ADR-0014: the plugin's own diagnostics never touch the terminal", () =
       } else {
         process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
       }
-      warn.mockRestore();
+    }
+  });
+});
+
+describe("log level resolution", () => {
+  it("honours ctx.options.logLevel over OPENCODE_LOG_LEVEL", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const previous = process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+    const previousLevel = process.env.OPENCODE_LOG_LEVEL;
+    process.env.VYMALO_PLUGIN_CONSOLE_LOG = "1";
+    process.env.OPENCODE_LOG_LEVEL = "ERROR";
+
+    try {
+      const cwd = await tmp("repo-auth-oc-level-");
+      const fake = fakeCtx({ logLevel: "WARN" }, cwd);
+      await Effect.runPromise(
+        Effect.scoped(createOpencodeRepoAuthPlugin({ cwd }).effect(fake.ctx))
+      );
+      fake.transformCb()?.(
+        editorOf([
+          {
+            id: "gateway",
+            settings: { repoAuth: { issuer: "https://i.example", clientId: "c", scopes: ["s"] } }
+          }
+        ])
+      );
+      // WARN (option) lets the warn through even though env says ERROR.
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.VYMALO_PLUGIN_CONSOLE_LOG;
+      } else {
+        process.env.VYMALO_PLUGIN_CONSOLE_LOG = previous;
+      }
+      if (previousLevel === undefined) {
+        delete process.env.OPENCODE_LOG_LEVEL;
+      } else {
+        process.env.OPENCODE_LOG_LEVEL = previousLevel;
+      }
     }
   });
 });

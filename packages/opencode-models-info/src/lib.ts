@@ -1,7 +1,8 @@
 export {
   createOpencodeModelsInfoPlugin,
   OpencodeModelsInfoPlugin,
-  type OpenCodePluginFactoryOptions
+  type OpenCodePluginFactoryOptions,
+  PLUGIN_ID
 } from "./opencode.js";
 
 export {
@@ -15,7 +16,8 @@ export {
 export {
   DEFAULT_TIMEOUT_MS,
   DEFAULT_TTL_SECONDS,
-  parseMetaOptions
+  OVERWRITABLE_FIELDS,
+  parseModelsInfoSettings
 } from "./config.js";
 
 export { fetchOpenRouterModels, type FetchOptions } from "./fetcher.js";
@@ -23,29 +25,35 @@ export { fetchOpenRouterModels, type FetchOptions } from "./fetcher.js";
 export {
   createJsonConsoleLogger,
   DEFAULT_LOG_LEVEL,
-  fromOpenCodeLogLevel,
   type LogFields,
   type Logger,
-  type LogLevel
+  type LogLevel,
+  resolveLogLevel
 } from "./logging.js";
 
 export {
+  type ApplyResult,
+  applyMetadata,
+  type EnrichableModel,
+  isAbsent,
   mapOpenRouterEntry,
-  mergeIntoModel,
+  type ModelCost,
   type ModelMetadata
 } from "./mapping.js";
 
 export {
-  type EnrichConfigInput,
+  createModelsInfoEngine,
   type EnrichDeps,
-  enrichConfig,
-  type ProviderConfigLike
+  type ListedModel,
+  type ModelEditorLike,
+  type ModelsInfoEngine,
+  type ProviderEntry
 } from "./plugin.js";
 
 export type {
   CachedModelsRecord,
   FetchModelsResult,
-  MetaProviderOptions,
+  ModelsInfoSettings,
   OpenRouterArchitecture,
   OpenRouterModality,
   OpenRouterModel,

@@ -1,7 +1,7 @@
 # `@vymalo/opencode-otel` — OpenTelemetry export
 
 Exports what actually happens in an OpenCode session — cost, tokens, tool calls, permission
-decisions, errors, lines of code — as standard OTLP **traces, metrics and logs**, to any
+decisions and errors — as standard OTLP **traces, metrics and logs**, to any
 OpenTelemetry backend. The OpenCode counterpart to
 [Claude Code's monitoring](https://code.claude.com/docs/en/monitoring-usage) and
 [Codex's `[otel]` block](https://learn.chatgpt.com/docs/config-file/config-advanced).
@@ -10,13 +10,19 @@ Design rationale, prior-art sweep and the full signal-mapping table live in
 [`plans/otel.md`](../plans/otel.md). The transport decision is
 [ADR-0009](adr/0009-otel-otlp-http-not-grpc.md).
 
+> **OpenCode v2.** This plugin targets the v2 plugin API ([ADR-0019](adr/0019-opencode-v2-cutover.md)).
+> It does not run on OpenCode v1. Its plugin id is `vymalo.otel`; the config file channel is the
+> plugin's own `options` (v2 gives plugins no `config` object); and **four v1 signals were dropped
+> because v2 has no source for them** — see [Dropped in the v2 port](#dropped-in-the-v2-port) and
+> [Migrating from v1](#migrating-from-v1).
+
 ## Quick start
 
 ```jsonc
 // opencode.json
 {
-  "plugin": [
-    ["@vymalo/opencode-otel", { "endpoint": "http://localhost:4318" }]
+  "plugins": [
+    { "package": "@vymalo/opencode-otel", "options": { "endpoint": "http://localhost:4318" } }
   ]
 }
 ```
@@ -28,7 +34,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
 ```
 
 Either is enough. **With neither, the plugin does nothing** — it initializes no providers, opens no
-sockets and registers no hooks, so installing it unconfigured costs nothing.
+sockets, subscribes to no events and registers no hooks, so installing it unconfigured costs nothing.
 
 To see it locally, point it at a Jaeger with OTLP ingest enabled:
 
@@ -38,7 +44,7 @@ docker run -d --name jaeger -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one
 
 ## Configuration
 
-Configurable **from `opencode.json` or from `OTEL_*` environment variables**, and this matters:
+Configurable **from `opencode.json` (the plugin's `options`) or from `OTEL_*` environment variables**, and this matters:
 `.well-known/opencode` distribution (see [well-known.md](well-known.md)) serves the `config` block
 but cannot set environment variables, so an env-only plugin could not be distributed that way.
 
@@ -50,7 +56,8 @@ require restating the rest.
 
 | Option | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | `OPENCODE_OTEL_ENABLED` | `true` | Master switch. `false` returns inert hooks. |
+| `enabled` | `OPENCODE_OTEL_ENABLED` | `true` | Master switch. `false` registers nothing. |
+| `logLevel` | `OPENCODE_LOG_LEVEL` (host) | `info` | The plugin's own diagnostics (not the exported telemetry). Option first, then the host env var. A gate, not an override: records go to OpenCode's logger, which applies its own level too. |
 | `endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP base URL. Signal paths (`/v1/traces`, …) are appended. |
 | `endpoints.{traces,metrics,logs}` | `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` | — | Per-signal full URL, used verbatim. |
 | `headers` | `OTEL_EXPORTER_OTLP_HEADERS` | `{}` | Sent with every OTLP request. Env form is `k=v,k2=v2`, percent-decoded. |
@@ -248,10 +255,8 @@ already this plugin's default.
 | `opencode.session.request.count` | counter | `{request}` | model, provider, agent |
 | `opencode.session.compaction.count` | counter | `{compaction}` | — |
 | `opencode.active_time.total` | counter | `s` | — |
-| `opencode.lines_of_code.count` | counter | `{line}` | `opencode.change.type` (`added` \| `removed`), `code.language` |
 | `opencode.tool.invocations` | counter | `{invocation}` | `gen_ai.tool.name`, `opencode.tool.status` (`ok` \| `error`) |
 | `opencode.permission.decision.count` | counter | `{decision}` | `gen_ai.tool.name`, `opencode.permission.decision` |
-| `opencode.command.executed.count` | counter | `{command}` | `opencode.command.name` |
 
 `opencode.permission.decision.count` also carries `opencode.permission.source` — `user` for a prompt
 someone answered, `auto` for one your config resolved without asking. Both are counted; a build that
@@ -280,10 +285,22 @@ Each record carries an `event.name` attribute and the session id as `gen_ai.conv
 | `opencode.tool_result` | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `opencode.tool.status`, `opencode.tool.duration_ms`, `opencode.tool.output.size` |
 | `opencode.tool_decision` | `opencode.permission.decision`, `opencode.permission.source`, `opencode.permission.id`, `gen_ai.tool.name` |
 | `opencode.api_error` | `error.type`, `http.response.status_code`, `opencode.error.retryable`, `opencode.retry.attempt` |
-| `opencode.file_edited` | `code.language`, `opencode.file.additions`, `opencode.file.deletions` |
 | `opencode.compaction` | — |
-| `opencode.command_executed` | `opencode.command.name`, `opencode.command.has_arguments` |
-| `opencode.todo_updated` | `opencode.todo.total`, `opencode.todo.{status}` counts |
+
+#### Dropped in the v2 port
+
+OpenCode v2's event stream has no source for these, so the plugin no longer emits them. They are
+removed, not stubbed — nothing is registered for them:
+
+| Dropped signal | v1 source | Why there is no v2 replacement |
+| --- | --- | --- |
+| `opencode.lines_of_code.count` metric, `opencode.file_edited` log | `session.diff` (per-file additions / deletions) | v2 has no `session.diff` event. `file.edited` carries no session or line counts, and `session.step.ended.files` lists paths only. |
+| `opencode.todo_updated` log | `todo.updated` | v2 has no todo event. |
+| `opencode.command.executed.count` metric, `opencode.command_executed` log | `command.executed` | The event exists in the schema package, but it is not in the set a plugin can subscribe to (`ctx.event.subscribe` rejects it at the type level). |
+| per-error `opencode.error.retryable` on terminal failures | `session.error` | v2's `session.step.failed` error carries `type`, `status` and `retryAfterMs`, but no retryable flag. A *retry* is still reported, from the `session.status` retry event. |
+
+The engine (`@vymalo/opencode-core-otel`) still implements the recorders for the dropped signals; it
+is shared with `opencode-lightbridge` and is out of this port's scope.
 
 ### Traces
 
@@ -294,8 +311,8 @@ invoke_agent opencode          ← root, one per session (session.created → se
 └── session_compaction         ← instant span
 ```
 
-A `chat` span opens at the `chat.params` hook — immediately before the provider request — and closes
-when the assistant message completes, so it covers the whole round-trip rather than only the part
+A `chat` span opens at the `context` session hook — immediately before the provider request — and closes
+when the assistant step ends (`session.step.ended` / `session.step.failed`), so it covers the whole round-trip rather than only the part
 after the response starts arriving. It represents one **assistant message**, which may internally
 span several provider round-trips; `opencode.session.request.count` counts the same unit, so the two
 always agree.
@@ -309,16 +326,19 @@ their counts:
 
 #### Trace-context propagation
 
-When traces are on, the plugin wraps each provider's `options.fetch` and injects a W3C `traceparent`
-into outgoing model requests, so an OpenCode session and its gateway-side spans form **one trace**.
-This is the same interception seam [`@vymalo/opencode-ratelimit`](ratelimit.md) uses, composed the
-same way — the existing fetch is captured at install time and delegated to, so stacking the two in
-either order works.
+When traces are on, the plugin registers a `session.hook("model.request")` hook that writes a W3C
+`traceparent` into the outgoing request's `headers`, so an OpenCode session and its gateway-side
+spans form **one trace**. v1 did this by wrapping each provider's `options.fetch`; v2's
+`Provider.Info` has no `fetch` field, and `model.request` is the host's own seam for per-request
+headers. Nothing is wrapped, so there is no composition-order concern with other plugins.
 
-One honest limitation: the propagated context is the single in-flight `chat` span. **When two or
+Two honest limitations. The propagated context is the single in-flight `chat` span: **when two or
 more chats are in flight at once the plugin injects nothing rather than guessing a parent** — a
-missing link is recoverable, a fabricated one silently corrupts the trace. An existing `traceparent`
-on the request is never overwritten.
+missing link is recoverable, a fabricated one silently corrupts the trace. And it injects only on
+`kind: "primary"` requests: title generation, compaction and `generate` run beside the primary
+request, where "the single in-flight chat" would be ambiguous (and the plugin opens `chat` spans
+only for the `context` hook, i.e. the agent loop). An existing `traceparent` on the request
+(compared case-insensitively) is never overwritten.
 
 ## Privacy
 
@@ -386,28 +406,57 @@ Set `collectVcs: false` (or `OPENCODE_OTEL_COLLECT_VCS=0`) to publish no reposit
 so the default keeps it off. Turn it on when you need per-session metric drill-down and your backend
 can afford it.
 
-## What is deliberately not collected
+## How it hooks into OpenCode v2
 
-The plugin observes 8 of the 21 plugin hooks and 16 of the 32 SDK event types. The rest are left
-alone on purpose, and it is worth knowing which, so an absence is never mistaken for a bug.
+An observer: no tools, no server, and nothing mutated except the `traceparent` header on primary
+model requests.
+
+| Registration | Feeds | Notes |
+| --- | --- | --- |
+| `ctx.event.subscribe({ types })` | session / step / permission / compaction / branch / shutdown events | A `Stream`, forked into the plugin scope; **closing the scope interrupts it** (`Effect.forkScoped`). Subscribes to the 15 types below, not the whole stream — the delta events are never delivered. |
+| `session.hook("prompt")` | `opencode.user_prompt` | Agent / model come from the bridge's last-seen state for the session (the hook carries neither). |
+| `session.hook("context")` | `chat` span + sampling parameters | Opens the span before the request goes out. |
+| `session.hook("model.request")` | trace-context propagation | Only when `propagateTraceContext`; primary requests only. |
+| `tool.hook("execute.before" / "execute.after")` | tool spans, `opencode.tool_result` | `execute.after` reports `status: "error"` too, so a failing tool is counted. |
+| `permission.hook("evaluate")` | config-resolved permission decisions | `effect: "ask"` is ignored — it waits for the user's `permission.replied`. |
+
+The subscribed events, and what each one feeds (translation lives in
+[`events.ts`](../packages/opencode-otel/src/events.ts)):
+
+| v2 event | Becomes | Note |
+| --- | --- | --- |
+| `session.created` | session span + `opencode.session_start` | `data.sessionID`, `data.parentID`, `data.location.directory` |
+| `session.idle` | `opencode.session_idle`, flush | |
+| `session.deleted` | state pruned | |
+| `session.status` | active time; retry -> `opencode.api_error` | v2 status is `idle` \| `busy` \| `retry` |
+| `session.agent.selected`, `session.model.selected` | remembered per session | Attribution for the `prompt` hook only |
+| `session.step.started` | opens the `chat` (adopting the `context` span) | Carries model, provider, agent and start time |
+| `session.step.ended` | `opencode.assistant_response`, cost, **all five token types**, duration | Replaces v1's completed `message.updated`; model / agent / start time are joined from `step.started` |
+| `session.step.failed` | the same, plus `opencode.api_error` | `error.type` and `error.status` |
+| `session.compaction.ended` | `opencode.compaction`, counter, span | |
+| `session.text.ended` | `opencode.response.length` | Length only — the text is handed over solely so the recorder can take `.length` |
+| `permission.asked`, `permission.replied` | `opencode.tool_decision` (`user`) | `data.action` is the tool name; `data.reply` is `once` \| `always` \| `reject` |
+| `vcs.branch.updated` | `vcs.repository.ref.name` resource attribute | |
+| `location.shutdown` | flush + shutdown | The nearest v2 equivalent of v1's `server.instance.disposed` |
+
+`service.version` no longer waits for an `installation.updated` event: v2 hands the plugin the host
+version up front (`ctx.app.version`), so that event is no longer subscribed.
+
+`session.tool.success` / `session.tool.failed` are **not** subscribed: `tool.hook("execute.after")`
+already reports both outcomes, and v1 only needed the part-update path because a failing tool had
+no `after` hook.
+
+## What is deliberately not collected
 
 | Source | Why not |
 | --- | --- |
-| `chat.headers`, `shell.env` | Carry credentials and environment. Reading them to emit shape would mean handling secrets for no telemetry gain. |
-| `experimental.chat.messages.transform`, `experimental.chat.system.transform` | Content — the conversation and the system prompt. |
-| `experimental.compaction.autocontinue` | Removed in OpenCode v2 with no replacement ([ADR-0019](adr/0019-opencode-v2-cutover.md)); the engine's `opencode.compaction_autocontinue` event and its `overflow` / `autocontinue_enabled` attributes are gone with it. The plain `opencode.compaction` event and counter remain. |
-| `experimental.provider.small_model` | Experimental model-routing hook (added in `@opencode-ai/plugin` 1.18.32); the chosen small model is a routing decision, not an inference call, so there is no telemetry to attach. Revisit if small-model routing becomes a telemetry need. |
-| `dispose` | Plugin teardown (added in `@opencode-ai/plugin` 1.18.32). Flushing already happens on `session.idle` + `beforeExit` / `SIGINT` / `SIGTERM`; a dispose flush would be a redundant third drain of the same buffers. Adopting it is a tracked follow-up. |
-| `tool.definition` | Tool descriptions, static and identical every run. |
-| `lsp.client.diagnostics` | The payload is `{serverID, path}` only — **no severity and no counts**. Emitting it would produce one high-volume event per diagnostics publish with nothing to aggregate. Worth revisiting if the event ever carries counts. |
-| `command.execute.before` | Redundant: `command.executed` already carries the name and arguments. |
-| `tui.*` (3 events), `pty.*` (4 events) | Terminal-UI and pseudo-terminal churn, unrelated to agent behaviour. |
-| `lsp.updated`, `server.connected`, `installation.update.available`, `session.updated` | Lifecycle noise with no measurable dimension. |
-| `file.edited` | Carries no `sessionID`, so it cannot be attributed. Line counts come from `session.diff` instead. |
-| `message.removed`, `message.part.removed` | Deletions of already-reported records; re-reporting them would double-count. |
-
-`auth` / `provider` / `tool` are registration hooks, not observation points — this plugin registers
-nothing.
+| v2 `*.delta` and `*.started` streaming events (`session.text.delta`, `session.tool.input.*`, `session.reasoning.*`, …) | High-volume, and carry content. |
+| `session.hook("http.request" / "http.response")`, `"retry"`, `"compaction"`, `"generate"`, `"title"` | Auxiliary-request plumbing. The `chat` span covers the agent loop only; a title or compaction request would open a span that no step ever closes. |
+| The `credential`, `shell`, `rpc` domains | Carry credentials and environment. Reading them to emit shape would mean handling secrets for no telemetry gain. |
+| The `prompt` / `context` / `compaction` *content* (`messages`, `system`) | Content — the conversation and the system prompt. |
+| `session.error`, `session.execution.*` | Terminal failures are already reported through `session.step.failed`. |
+| `tui.*`, `pty.*`, `shell.*`, `mcp.*`, `lsp.updated`, `*.updated` config churn | Terminal-UI and lifecycle noise with no measurable dimension. |
+| `file.edited` | Carries no `sessionID` and no line counts, so it cannot be attributed. (This is also why [lines of code was dropped](#dropped-in-the-v2-port).) |
 
 ## Recorder input contract
 
@@ -430,19 +479,21 @@ Hook payloads use the OpenCode v2 field names (`id` for the tool call id, `model
 
 `RecorderEvent` is the engine's own event vocabulary, in the `{ type, properties }` shape. OpenCode v2
 reports the same facts under different names and a `{ type, data }` shape, and several v1 events
-have no single v2 counterpart (`message.updated`, `message.part.updated`, `session.diff`,
-`todo.updated`, `command.executed`, `session.compacted`, `session.error`,
-`server.instance.disposed`). The v2 `otel` port translates (for example `session.step.ended` carries
-the cost, tokens and finish reason that `message.updated` used to), so that translation lives in
-the adapter, not the engine.
+have no single v2 counterpart (`message.updated`, `message.part.updated`, `session.compacted`,
+`server.instance.disposed`). The `otel` plugin translates (see the table in
+[How it hooks into OpenCode v2](#how-it-hooks-into-opencode-v2)), so that translation lives in the
+adapter, not the engine. The engine's `session.diff`, `todo.updated`, `command.executed`,
+`message.part.updated` and `installation.updated` inputs have no v2 source and are never fed.
 
 ## Flushing
 
-The plugin API gained a `dispose` hook in `@opencode-ai/plugin` 1.18.32, but this plugin does not
-register it (adopting it is a tracked follow-up). Buffered telemetry would otherwise be lost when a
-short CLI invocation exits. The plugin flushes on **`session.idle`**
-— the natural turn boundary — and registers `beforeExit` / `SIGINT` / `SIGTERM` handlers for hard
-exits. Metrics still export on their own interval (60s by default) for long-running sessions.
+Buffered telemetry would otherwise be lost when a short CLI invocation exits. The plugin flushes on
+**`session.idle`** — the natural turn boundary — shuts down on **`location.shutdown`** (the host's own
+shutdown signal), and registers `beforeExit` / `SIGINT` / `SIGTERM` handlers for hard exits. The
+plugin scope's close does not itself drain the exporters: those three paths already cover every exit,
+and a scope-finalizer drain would be a redundant fourth pass over the same buffers. (Closing the scope
+*does* interrupt the event subscription.) Metrics still export on their own interval (60s by
+default) for long-running sessions.
 
 What the signal handlers do depends on who else listens for the signal
 ([ADR-0018](adr/0018-exit-handlers-reraise-the-signal.md)):
@@ -465,17 +516,17 @@ window, not a failure.
 
 ## Composing with other plugins
 
-Order-independent. It reads the config object other plugins have already assembled and does not
-mutate provider definitions — the one thing it writes is the `options.fetch` wrapper for trace
-propagation, which composes with `@vymalo/opencode-ratelimit`'s wrapper in either order.
+Order-independent. It touches no provider definition and wraps nothing — the one thing it writes is a
+`traceparent` entry on a primary model request's `headers`, which no other plugin in the suite
+reads or sets.
 
 ```jsonc
 {
-  "plugin": [
+  "plugins": [
     "@vymalo/opencode-oauth2",
     "@vymalo/opencode-models-info",
     "@vymalo/opencode-ratelimit",
-    ["@vymalo/opencode-otel", { "endpoint": "http://localhost:4318" }]
+    { "package": "@vymalo/opencode-otel", "options": { "endpoint": "http://localhost:4318" } }
   ]
 }
 ```
@@ -510,15 +561,16 @@ leaves the others running.
 seconds.
 
 **Nothing at all, and no plugin logs.** Run OpenCode with `--log-level DEBUG` to unlock the `trace`
-tier (see [ADR-0008](adr/0008-trace-log-tier.md)), or set `VYMALO_PLUGIN_CONSOLE_LOG=1` to mirror
-plugin diagnostics to stdout.
+tier (see [ADR-0008](adr/0008-trace-log-tier.md)) — and set the plugin's own `logLevel` option to
+match, since both gates must be open — or set `VYMALO_PLUGIN_CONSOLE_LOG=1` to mirror plugin
+diagnostics to stdout.
 
 **No plugin diagnostics ever appear on the terminal — not even `otel_traces_init_failed` or
 `otel_token_command_failed`.** This is deliberate: no plugin in the suite writes its own logging to
 stdout/stderr by default ([ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md), which extends the
 otel-specific [ADR-0013](adr/0013-otel-no-terminal-mirror.md) to every plugin) — a failed export or an
 expired `tokenCommand` is not something that should interrupt a session mid-flow. Every record still
-reaches OpenCode's own log at its true level (`warn` stays `warn`, `error` stays `error`), so nothing
+reaches OpenCode's own log (through the host's Effect logger) at its true level (`warn` stays `warn`, `error` stays `error`), so nothing
 is lost — it just isn't printed to the screen. To see it there anyway, set
 `VYMALO_PLUGIN_CONSOLE_LOG=1`, which restores the console mirror for every level this plugin emits.
 
@@ -530,3 +582,30 @@ attribute vocabulary and span shape, so both land on the same dashboards. It dif
 **logs signal** (the developer-interaction event stream), **real USD cost**, **cache and reasoning
 tokens**, **permission decisions**, and **`opencode.json` configuration** for `.well-known`
 distribution. Run one or the other, not both — they would double-count.
+
+## Migrating from v1
+
+`0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See
+[ADR-0019](adr/0019-opencode-v2-cutover.md) for why there is no dual-support build.
+
+| v1 | v2 |
+| --- | --- |
+| `"plugin": [["@vymalo/opencode-otel", {...}]]` | `"plugins": [{ "package": "@vymalo/opencode-otel", "options": {...} }]` |
+| `event` hook (whole SDK stream) | `ctx.event.subscribe({ types })`, a `Stream` interrupted with the plugin scope |
+| `chat.message` | `session.hook("prompt")` |
+| `chat.params` | `session.hook("context")` |
+| `tool.execute.before` / `.after` | `tool.hook("execute.before" / "execute.after")` |
+| `permission.ask` | `permission.hook("evaluate")` |
+| `experimental.text.complete` | the `session.text.ended` event |
+| `provider.options.fetch` wrapper (trace propagation) | `session.hook("model.request")` writing `headers` |
+| `message.updated` (cost, tokens) | `session.step.started` + `session.step.ended` / `session.step.failed` |
+| `session.compacted` | `session.compaction.ended` |
+| `permission.updated` | `permission.asked` |
+| `server.instance.disposed` | `location.shutdown` |
+| `installation.updated` (service version) | `ctx.app.version` |
+| host `config.logLevel` | the plugin's `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
+| `client.app.log` | the host's Effect logger (ADR-0014); never the terminal |
+| `session.diff`, `todo.updated`, `command.executed` | **dropped** — no v2 source ([Dropped in the v2 port](#dropped-in-the-v2-port)) |
+
+Every other option, `OTEL_*` variable, metric, log event name and span name is unchanged, and so is
+the privacy posture: shape only, never content.

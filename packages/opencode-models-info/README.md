@@ -1,12 +1,14 @@
 # @vymalo/opencode-models-info
 
-OpenCode plugin that **enriches** model entries already contributed by other plugins (or by your `opencode.json`) with full metadata — context length, output limit, pricing, modalities, and capability flags (`tool_call`, `reasoning`, `attachment`) — by fetching from a provider-supplied **OpenRouter-shaped** endpoint.
+> **Requires OpenCode v2.** This release targets the v2 plugin API and does not run on v1. Migrating from `0.17.x`? See [Migrating from v1](#migrating-from-v1).
 
-Auth-agnostic by design: the plugin runs as an OpenCode `config` hook *after* other plugins have populated providers and headers, so it composes with `@vymalo/opencode-oauth2`, static API keys, or any other auth scheme without depending on any of them.
+OpenCode plugin that **enriches** model entries already contributed by other plugins (or by your config) with full metadata — context length, output limit, pricing, modalities, and the `tools` / `temperature` capability flags — by fetching from a provider-supplied **OpenRouter-shaped** endpoint.
+
+Auth-agnostic by design: it registers a `model.transform` that runs on the host's model set, so it composes with `@vymalo/opencode-oauth2`, static API keys, or any other auth scheme without depending on any of them.
 
 ## Why use this
 
-OpenCode supports rich per-model metadata (context window, USD/M-token cost, tool-call/reasoning/attachment flags) but you usually have to handwrite it in `opencode.json`. If your provider exposes a JSON endpoint with this info (OpenRouter, LiteLLM with the OpenRouter-compat extension, your own gateway), this plugin fetches it once, merges it onto every model, caches the result, and stays out of the way.
+OpenCode supports rich per-model metadata (context window, USD/M-token cost, capability flags) but you usually have to handwrite it. If your provider exposes a JSON endpoint with this info (OpenRouter, LiteLLM with the OpenRouter-compat extension, your own gateway), this plugin fetches it once, merges it onto every model, caches the result, and stays out of the way.
 
 ## Installation
 
@@ -14,54 +16,55 @@ OpenCode supports rich per-model metadata (context window, USD/M-token cost, too
 npm install @vymalo/opencode-models-info
 ```
 
-Add it to your `opencode.json` plugin list:
+`effect` (`^4.0.0`) is a **peer dependency** supplied by the OpenCode host — do not install a second copy.
+
+Add it to your plugin list:
 
 ```json
 {
-  "plugin": ["@vymalo/opencode-models-info"]
+  "plugins": ["@vymalo/opencode-models-info"]
 }
 ```
 
 ## Usage
 
-`meta.modelsInfoUrl` is **the HTTP(S) endpoint that returns the metadata JSON** — an absolute URL or a path resolved against `options.baseURL`. Point it at your own provider's metadata endpoint:
+`settings.modelsInfoUrl` is **the HTTP(S) endpoint that returns the metadata JSON** — an absolute URL or a path resolved against `settings.baseURL`. Point it at your own provider's metadata endpoint:
 
 ```json
 {
-  "plugin": ["@vymalo/opencode-models-info"],
-  "provider": {
+  "plugins": ["@vymalo/opencode-models-info"],
+  "providers": {
     "my-provider": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
         "baseURL": "https://api.example.com/v1",
-        "meta": {
-          "modelsInfoUrl": "https://api.example.com/v1/models",
-          "modelsInfoTtlSeconds": 86400,
-          "modelsInfoTimeoutMs": 5000
-        }
-      },
-      "models": { "my-model-large": {} }
+        "modelsInfoUrl": "https://api.example.com/v1/models",
+        "modelsInfoTtlSeconds": 86400,
+        "modelsInfoTimeoutMs": 5000
+      }
     }
   }
 }
 ```
 
-An absolute URL is clearest. A relative path is also accepted — it resolves against `baseURL` (e.g. `"models"` → `https://api.example.com/v1/models`); see [URL resolution](#url-resolution).
+An absolute URL is clearest. A relative path is also accepted — it resolves against `settings.baseURL` (e.g. `"models"` → `https://api.example.com/v1/models`); see [URL resolution](#url-resolution).
 
 > **What shape must that endpoint return?** The JSON described in [Expected response shape](#expected-response-shape-openrouter) below — commonly called the **OpenRouter shape** because OpenRouter's `/models` endpoint returns it, but the plugin has no dependency on OpenRouter and never contacts it. The compatibility bar is low: a **bare top-level array** (no `data` wrapper) is accepted, and the mapping is **partial**, so your endpoint only needs to emit the fields you want enriched (e.g. just `id` + `context_length` + `pricing`). **But note:** a vanilla OpenAI-compatible `/v1/models` returns only `id` / `object` / `owned_by` — *none* of the fields this plugin maps — so pointing `modelsInfoUrl` there fetches successfully and enriches nothing. The endpoint has to actually carry the richer data.
 
 That's it. After OpenCode starts:
 
-1. The hook picks up every provider with a `meta.modelsInfoUrl`.
-2. It `GET`s that URL, sending whatever `options.headers` the provider already has (so it composes with any auth plugin — see [Auth composition](#auth-composition)).
-3. Each model entry whose `id` matches an entry in the response gets `limit`, `cost`, `modalities`, `tool_call`, `reasoning`, `attachment`, etc. filled in — **only where they were not already set** (upstream wins).
+1. The model transform picks up every provider with a `settings.modelsInfoUrl`.
+2. It `GET`s that URL in the background, sending whatever `headers` the provider already has (so it composes with any auth plugin — see [Auth composition](#auth-composition)).
+3. When the catalog lands, the plugin asks the host to `reload()` the model set, and each model whose `id` matches an entry in the response gets `limit`, `cost`, `capabilities.*` filled in — **only where they were not already set** (upstream wins; placeholders count as unset — see [Placeholder values](#placeholder-values-count-as-unset)).
 4. The response is cached on disk for `modelsInfoTtlSeconds` (default 24h), keyed by `(providerId, url, modelsInfoHeaders)`. ETags are honored.
 5. On fetch error with a valid cache, the stale snapshot is served — the plugin never blocks OpenCode startup on a network failure.
-6. A background scheduler then keeps re-checking the endpoint on that same `modelsInfoTtlSeconds` cadence for as long as the process runs — see [Periodic refresh](#periodic-refresh).
+6. A background scheduler then keeps re-checking the endpoint on that same cadence for as long as the process runs, and a changed catalog is applied live — see [Periodic refresh](#periodic-refresh).
+
+> **First model list vs. enriched model list.** The model transform must be synchronous, so it cannot wait for the catalog. The first run applies whatever is already in memory (nothing), starts the load, and the host re-runs the transform after `reload()`. With a warm disk cache that is effectively immediate; on a cold start the first model list a session sees is un-enriched.
 
 ### URL resolution
 
-`meta.modelsInfoUrl` resolves against `options.baseURL` using standard WHATWG URL semantics:
+`modelsInfoUrl` resolves against `settings.baseURL` using standard WHATWG URL semantics:
 
 | `baseURL`                  | `modelsInfoUrl`        | Resolved URL                          |
 | -------------------------- | ---------------------- | ------------------------------------- |
@@ -69,148 +72,137 @@ That's it. After OpenCode starts:
 | `https://x.test/v1`        | `/models/info`         | `https://x.test/models/info`          |
 | `https://x.test/v1`        | `https://o.test/m`     | `https://o.test/m`                    |
 
-Two practical rules: drop the leading `/` to keep the metadata path under your inference API path; keep the leading `/` to escape to a different path under the same host.
+Two practical rules: drop the leading `/` to keep the metadata path under your inference API path; keep the leading `/` to escape to a different path under the same host. `Provider.Info` has no first-class base URL, so this plugin reads `settings.baseURL` — the key oauth2 / provider-sync stamp. With no `baseURL`, a relative `modelsInfoUrl` is used as written; use an absolute URL.
+
+### Placeholder values count as unset
+
+v2's `Model.Info` requires every field, so a plugin that discovers a model knowing only its id and name (`@vymalo/opencode-provider-sync`, behind oauth2/lightbridge) fills the rest with **sentinels meaning "unknown"**. Upstream-wins here treats those as *absent*, otherwise the models oauth2 discovers would never be enriched:
+
+| `Model.Info` field | Sentinel (treated as absent) |
+| --- | --- |
+| `limit` | `{ context: 0, output: 0 }` |
+| `cost` | `[]` |
+| `capabilities.tools` | `false` |
+| `capabilities.input` / `.output` | `[]` |
+| `capabilities.temperature` | `undefined` |
+| `name` | `""` |
+
+Anything else is a real value and is never overwritten (except via [`modelsInfoOverwrite`](#forcing-endpoint-values-to-win)). Consequence: `tools: false` reads as "unknown", so a hand-set `tools: false` is not protected from a catalog that advertises tool support. Details and rationale in [`docs/models-info.md`](../../docs/models-info.md#placeholder-sentinel-values-are-absent--read-this-if-oauth2-discovers-your-models).
 
 ### Periodic refresh
 
-`config` — the only hook this plugin uses — runs once when OpenCode boots the plugin, and only re-runs on certain config edits (not on a timer). For a short-lived CLI invocation that's the whole story; but for a long-lived process (a desktop app window, or an embedded server that stays up for days), that hook would otherwise only ever see the catalog as it looked at boot.
+Every opted-in provider also gets a background scheduler that re-fetches `modelsInfoUrl` — unconditionally (still cheap, via a conditional `ETag` request) — on the **same `modelsInfoTtlSeconds` cadence that already governs cache freshness**. There's no separate interval to configure: set `modelsInfoTtlSeconds` once and it controls both "how stale can the cache be" and "how often do we go check." Default is once a day (`86400`).
 
-To close that gap, every opted-in provider also gets a background scheduler that keeps re-fetching `modelsInfoUrl` — unconditionally (still cheap, via a conditional `ETag` request) — on the **same `meta.modelsInfoTtlSeconds` cadence that already governs cache freshness**. There's no separate interval to configure: set `modelsInfoTtlSeconds` once and it controls both "how stale can the cache be" and "how often do we go check." Default is once a day (`86400`).
-
-This warms the cache for the **next** `config` run (the next launch, the next window, or the next config-triggered rebuild) — it can't push an update into an already-open session, since a `config` hook has no way to hot-patch a running one; there's simply no live channel for that in OpenCode's plugin API today. A failed check backs off (capped at the configured interval) instead of hammering a down endpoint, and resumes the normal cadence once a check succeeds. The scheduler is stopped and restarted whenever `config` reruns (so a rebuilt config never leaks a duplicate timer), and stopped for good on `dispose`.
+Unlike v1 (where `config` ran once and a refresh could only warm the cache for the next launch), a refresh that brings a **different** catalog now calls `ctx.model.reload()`, so a long-lived process picks the change up live. A `304` or an unchanged body does not reload. A failed check backs off (capped at the configured interval) and resumes the normal cadence once a check succeeds. Schedulers stop when a provider opts out, when its url/ttl/headers change (a fresh one starts), and when the plugin shuts down.
 
 ### Options
 
-| Option                          | Default            | Notes                                                                 |
-| ------------------------------- | ------------------ | --------------------------------------------------------------------- |
-| `meta.modelsInfoUrl`            | _(required)_       | Absolute URL or path resolved against `options.baseURL` (see above). |
-| `meta.modelsInfoTtlSeconds`     | `86400` (24h)      | Cache TTL — also the background refresh interval, see [Periodic refresh](#periodic-refresh). |
-| `meta.modelsInfoTimeoutMs`      | `5000`             | Per-fetch HTTP timeout.                                               |
-| `meta.modelsInfoHeaders`        | _(none)_           | Extra request headers. Override `options.headers` on conflict. Included in the cache key, so a tenant switch busts the cache. |
-| `meta.modelsInfoOverwrite`      | _(none)_           | Array of field names (`name`, `attachment`, `reasoning`, `temperature`, `tool_call`, `cost`, `limit`, `modalities`) that the endpoint is allowed to overwrite even when already set. Opts those fields out of upstream-wins — see [Forcing endpoint values to win](#forcing-endpoint-values-to-win). Unknown names are ignored. |
-| `meta.modelsInfoHideTextOnly`   | `false`             | When `true`, makes the `modelsInfoUrl` catalog authoritative for which models are shown: drops a model from `provider.models` entirely if the catalog reports it as text-in/text-out only, **or** if the catalog doesn't mention it at all — see [Hiding text-only models](#hiding-text-only-models). |
-| `meta.modelsInfoHideInternal`   | `false`             | When `true`, drops a model from `provider.models` if the catalog reports a non-standard `internal: true` field for it. Independent of `modelsInfoHideTextOnly` — modality and internal/restricted status are unrelated signals — see [Hiding internal models](#hiding-internal-models). |
-| `meta.modelsInfoHideUnmatched`  | `false`             | When `true`, drops a model from `provider.models` if the catalog has no entry for it at all — the membership half of `modelsInfoHideTextOnly`, without its modality filtering. Either flag alone triggers the same deletion — see [Requiring a catalog entry](#requiring-a-catalog-entry). |
+Per provider, on `Provider.Info.settings`:
+
+| Setting                          | Default            | Notes                                                                 |
+| -------------------------------- | ------------------ | --------------------------------------------------------------------- |
+| `modelsInfoUrl`                  | _(required)_       | Absolute URL or path resolved against `settings.baseURL` (see above). |
+| `modelsInfoTtlSeconds`           | `86400` (24h)      | Cache TTL — also the background refresh interval, see [Periodic refresh](#periodic-refresh). |
+| `modelsInfoTimeoutMs`            | `5000`             | Per-fetch HTTP timeout.                                               |
+| `modelsInfoHeaders`              | _(none)_           | Extra request headers. Override the provider's `headers` on conflict. Included in the cache key, so a tenant switch busts the cache. |
+| `modelsInfoOverwrite`            | _(none)_           | Array of field names (`name`, `tools`, `temperature`, `cost`, `limit`, `input`, `output`) that the endpoint is allowed to overwrite even when already set. Opts those fields out of upstream-wins — see [Forcing endpoint values to win](#forcing-endpoint-values-to-win). Unknown names are ignored. |
+| `modelsInfoHideTextOnly`         | `false`            | When `true`, makes the catalog authoritative for which models are shown: removes a model if the catalog reports it as text-in/text-out only, **or** if the catalog doesn't mention it at all — see [Hiding text-only models](#hiding-text-only-models). |
+| `modelsInfoHideInternal`         | `false`            | When `true`, removes a model if the catalog reports a non-standard `internal: true` field for it. Independent of `modelsInfoHideTextOnly` — see [Hiding internal models](#hiding-internal-models). |
+| `modelsInfoHideUnmatched`        | `false`            | When `true`, removes a model if the catalog has no entry for it at all — the membership half of `modelsInfoHideTextOnly`, without its modality filtering — see [Requiring a catalog entry](#requiring-a-catalog-entry). |
+
+Plugin-level options (the plugin's entry in `plugins`):
+
+| Option     | Default | Notes |
+| ---------- | ------- | ----- |
+| `logLevel` | `info`  | `trace`/`debug`/`info`/`warn`/`error` (`DEBUG` unlocks `trace`). Falls back to `OPENCODE_LOG_LEVEL`. The host's own minimum level still applies on top. |
 
 ### Auth composition
 
-The plugin sends the union of `options.headers` and `meta.modelsInfoHeaders` (meta wins on conflict). This makes three common setups work without configuration:
+The plugin sends the union of the provider's `headers` and `settings.modelsInfoHeaders` (`modelsInfoHeaders` wins on conflict). This makes three common setups work without configuration:
 
 1. **Public metadata endpoint** (e.g. OpenRouter's `/models`) — no auth needed.
-2. **Static API key** — drop a `Bearer` into `options.headers` once, both inference and metadata use it.
-3. **OAuth2 via [`@vymalo/opencode-oauth2`](../opencode-oauth2/README.md) ≥ 0.4.0** — that plugin stamps the cached bearer into `options.headers.Authorization` at config time so the metadata fetch inherits it automatically. The chat-time path still uses freshly-refreshed tokens.
+2. **Static API key** — put a `Bearer` in the provider's `headers` once; both inference and metadata use it.
+3. **OAuth2 via [`@vymalo/opencode-oauth2`](../opencode-oauth2/README.md)** — that plugin stamps the cached bearer into `Provider.Info.headers.Authorization` inside its `provider.transform`; this plugin reads it from the provider record and the metadata fetch inherits it. The chat-time path still uses freshly-refreshed tokens.
 
-If you need a different token for the metadata endpoint than for inference (e.g. a service-account bearer), set it explicitly under `meta.modelsInfoHeaders.Authorization` — it'll override whatever the provider has set.
+If you need a different token for the metadata endpoint than for inference (e.g. a service-account bearer), set it explicitly under `settings.modelsInfoHeaders.Authorization` — it'll override whatever the provider has set.
+
+Because the bearer lives in a provider-domain value and this plugin reads it from the model domain, it looks in two places: the model editor's provider record, then the headers its own read-only `provider.transform` observed. List oauth2 **before** this plugin. If a fetch fails with no cache (typically HTTP 401), it is retried once a different provider header set appears.
+
+> **Symptom of a missing credential:** the `models_info_fetch_failed_no_cache` warning with `error: "HTTP 401"`.
 
 #### Example: with `@vymalo/opencode-oauth2`
 
-List the oauth2 plugin **first** so its `config` hook runs before this one — that's what puts the bearer on `options.headers` in time for the metadata fetch:
-
 ```jsonc
 {
-  "plugin": ["@vymalo/opencode-oauth2", "@vymalo/opencode-models-info"],
-  "provider": {
+  "plugins": ["@vymalo/opencode-oauth2", "@vymalo/opencode-models-info"],
+  "providers": {
     "my-provider": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
         "baseURL": "https://api.example.com/v1",
-        "oauth2": {
-          "issuer": "https://auth.example.com",
-          "clientId": "opencode-client",
-          "scopes": ["openid", "profile", "offline_access"]
-        },
-        "meta": { "modelsInfoUrl": "https://api.example.com/v1/models" }
+        "modelsInfoUrl": "https://api.example.com/v1/models"
       }
     }
   }
 }
 ```
 
-oauth2 authenticates the provider and discovers its models; this plugin then fetches `modelsInfoUrl` using the token oauth2 stamped onto the provider headers, and enriches those discovered models. No `models` block and no `Authorization` header to manage — both are handled for you.
+oauth2 authenticates the provider and discovers its models; this plugin then fetches `modelsInfoUrl` using the token oauth2 stamped onto the provider headers, and enriches those discovered models. No `Authorization` header to manage — it's handled for you.
 
-> **The displayed name.** oauth2's discovery stamps a **normalized** `name` onto each model (e.g. `kimi-k2.6` → `Kimi K2.6`). Because the merge is upstream-wins, that pre-set name blocks the endpoint's own `name` from landing — so the UI shows the normalized label, not the one your metadata endpoint returns. Add `"modelsInfoOverwrite": ["name"]` (next section) to let the endpoint name win.
+> **The displayed name.** oauth2's discovery stamps a **normalized** `name` onto each model (e.g. `kimi-k2.6` → `Kimi K2.6`). Because the merge is upstream-wins, that pre-set name blocks the endpoint's own `name` from landing. Add `"modelsInfoOverwrite": ["name"]` (next section) to let the endpoint name win.
 
 ### Forcing endpoint values to win
 
-The merge is **upstream-wins** by default: a field already present on a model entry is never overwritten, so a handwritten `opencode.json` always takes precedence. But an upstream value isn't always handwritten — another plugin may auto-stamp one. The clearest case is `@vymalo/opencode-oauth2`, which writes a normalized `name` onto every discovered model; to upstream-wins that's indistinguishable from a deliberate user value, so the endpoint's `name` can never replace it.
+The merge is **upstream-wins** by default: a field already holding a real value is never overwritten, so hand-written config always takes precedence. But an upstream value isn't always hand-written — another plugin may auto-stamp one. The clearest case is oauth2's normalized `name`.
 
-`meta.modelsInfoOverwrite` opts specific fields *out* of upstream-wins:
+`settings.modelsInfoOverwrite` opts specific fields *out* of upstream-wins:
 
 ```jsonc
 {
-  "options": {
-    "meta": {
-      "modelsInfoUrl": "models/info",
-      "modelsInfoOverwrite": ["name"]   // endpoint name beats oauth2's normalized one
-    }
+  "settings": {
+    "modelsInfoUrl": "models/info",
+    "modelsInfoOverwrite": ["name"]   // endpoint name beats oauth2's normalized one
   }
 }
 ```
 
-Listed fields still only change when the endpoint actually provides a value (a missing field never blanks an existing one), and unlisted fields keep the default upstream-wins behavior. Valid names are the mapped fields: `name`, `attachment`, `reasoning`, `temperature`, `tool_call`, `cost`, `limit`, `modalities`.
+Listed fields still only change when the endpoint actually provides a value (a missing field never blanks an existing one), and unlisted fields keep the default behavior. Valid names are the mapped fields: `name`, `tools`, `temperature`, `cost`, `limit`, `input`, `output`.
 
-> **Forcing a capability flag *off*.** The boolean flags (`tool_call`, `reasoning`, `temperature`, `attachment`) are normally emitted *true-only*. Listing one in `modelsInfoOverwrite` also lets the endpoint assert `false` (to clear a stale `true`) — but only when the endpoint actually reports the underlying data (`supported_parameters`, or `architecture.input_modalities` for `attachment`). If that data is absent the plugin can't tell true from false, so it leaves the field alone rather than inventing a `false`.
+> **Forcing a capability flag *off*.** `tools` and `temperature` are normally emitted *true-only*. Listing one in `modelsInfoOverwrite` also lets the endpoint assert `false` (to clear a stale `true`) — but only when the endpoint actually reports `supported_parameters`. If that data is absent the plugin can't tell true from false, so it leaves the field alone rather than inventing a `false`.
 
 ### Hiding text-only models
 
-Some catalogs mix chat-only models in with multimodal ones, and you may only want to offer the multimodal set (vision, audio, etc.) in OpenCode's model picker. Set `meta.modelsInfoHideTextOnly: true` to make the **`modelsInfoUrl` catalog authoritative for which models exist**, not just their metadata:
+Some catalogs mix chat-only models in with multimodal ones, and you may only want to offer the multimodal set (vision, audio, etc.) in OpenCode's model picker. Set `modelsInfoHideTextOnly: true` to make the **`modelsInfoUrl` catalog authoritative for which models exist**, not just their metadata:
 
 ```jsonc
-{
-  "options": {
-    "meta": {
-      "modelsInfoUrl": "models/info",
-      "modelsInfoHideTextOnly": true
-    }
-  }
-}
+{ "settings": { "modelsInfoUrl": "models/info", "modelsInfoHideTextOnly": true } }
 ```
 
-With the flag on, a model's entry is **deleted** from `provider.models` outright in either of two cases:
+With the flag on, a model is **removed** from the provider in either of two cases:
 
 1. **The catalog reports it as text-only** — `architecture.input_modalities` / `.output_modalities` are both present and resolve to exactly `["text"]`.
-2. **The catalog doesn't mention it at all** — no entry in the `modelsInfoUrl` response matches the model's `id` (or declared `id`). This is what makes the catalog take total precedence over whatever populated `provider.models` first (a static `opencode.json`, or `@vymalo/opencode-oauth2`'s own `/v1/models` discovery) — anything the richer catalog doesn't vouch for is dropped, not just left un-enriched.
+2. **The catalog doesn't mention it at all** — no entry in the response matches the model's `id` (or upstream `modelID`). This makes the catalog take total precedence over whatever populated the provider's models first.
 
-This is a hard delete, not a flag — a hidden model can't be selected at all, the same as if it had never been listed in `models` to begin with. It never *adds* a model the catalog knows about but discovery/config didn't already list — only membership already present in `provider.models` can be pruned. Case 1 only fires when the endpoint's modality data is actually present; a model the plugin can't classify (missing `architecture`) but that *is* matched in the catalog is left alone rather than hidden on a guess. Case 2 fires purely on absence from the catalog, independent of modality data. Both cases log at debug (`models_info_model_hidden_text_only`, `models_info_model_hidden_unmatched`) and are reflected in the `hiddenCount` on the summary `models_info_enriched` event.
-
-> **Composes with `modelsInfoOverwrite`.** Turning on `modelsInfoHideTextOnly` doesn't change how surviving models are merged — upstream-wins (or your `modelsInfoOverwrite` list) still governs individual fields. It only changes which model entries survive to be merged at all.
+A removed model can't be selected, the same as if it had never been listed. It never *adds* a model the catalog knows about but discovery/config didn't already list. Case 1 only fires when the endpoint's modality data is actually present; a matched model with no `architecture` is left alone rather than hidden on a guess. Both cases log at debug (`models_info_model_hidden_text_only`, `models_info_model_hidden_unmatched`).
 
 ### Requiring a catalog entry
 
-Case 2 above — dropping a model the catalog doesn't mention at all — is useful on its own, without the modality filtering that comes bundled into `modelsInfoHideTextOnly`. Set `meta.modelsInfoHideUnmatched: true` to get just that:
+Case 2 above is useful on its own, without the modality filtering. Set `modelsInfoHideUnmatched: true` to get just that:
 
 ```jsonc
-{
-  "options": {
-    "meta": {
-      "modelsInfoUrl": "models/info",
-      "modelsInfoHideUnmatched": true
-    }
-  }
-}
+{ "settings": { "modelsInfoUrl": "models/info", "modelsInfoHideUnmatched": true } }
 ```
-
-This exists because a real adopter needed catalog-authoritative *membership* — a client's `provider.models` can carry ids the catalog has since dropped (renamed, removed, access-scoped, or just stale local state a client picked up a while ago) — but `modelsInfoHideTextOnly`'s modality filtering was hiding legitimate text-only external models right along with the stale ones.
 
 - A model with no catalog entry is hidden, regardless of modality.
 - A matched text-only model is left alone by this flag on its own (it's still subject to `modelsInfoHideTextOnly`'s modality check if that flag is *also* set).
-- `modelsInfoHideTextOnly` and `modelsInfoHideUnmatched` reach the same deletion for an unmatched model — either alone is enough, setting both is redundant, not additive.
-
-Don't reach for `modelsInfoHideTextOnly` just to get this behavior if you don't also want modality filtering — that's exactly the trap `modelsInfoHideInternal` was built to avoid for the internal/access-scope axis (see below). Logs at debug (`models_info_model_hidden_unmatched`, shared with `modelsInfoHideTextOnly`'s own unmatched-hiding).
+- `modelsInfoHideTextOnly` and `modelsInfoHideUnmatched` reach the same removal for an unmatched model — either alone is enough, setting both is redundant, not additive.
 
 ### Hiding internal models
 
-If your catalog serves both externally-usable and internal-only/restricted models — models that exist on the backend but shouldn't be selectable in OpenCode — flag them explicitly and set `meta.modelsInfoHideInternal: true`:
+If your catalog serves both externally-usable and internal-only models, flag them explicitly and set `modelsInfoHideInternal: true`:
 
 ```jsonc
-{
-  "options": {
-    "meta": {
-      "modelsInfoUrl": "models/info",
-      "modelsInfoHideInternal": true
-    }
-  }
-}
+{ "settings": { "modelsInfoUrl": "models/info", "modelsInfoHideInternal": true } }
 ```
 
 Your catalog entry adds a non-standard `internal: true` field:
@@ -219,13 +211,13 @@ Your catalog entry adds a non-standard `internal: true` field:
 { "id": "internal-only-model", "internal": true, "architecture": { "input_modalities": ["text", "image"], "output_modalities": ["text"] } }
 ```
 
-**Don't reach for `modelsInfoHideTextOnly` to hide internal models** — it was tempting because a catalog's internal models are *sometimes* also text-only, but that's a coincidence of your catalog, not a rule: it hides a matched model based on **modality**, so a legitimate text-only *external* model gets hidden right along with your internal ones, and a multimodal internal model sails through unhidden. `modelsInfoHideInternal` reacts only to the `internal` field — set it independently:
+**Don't reach for `modelsInfoHideTextOnly` to hide internal models** — it hides on **modality**, so a legitimate text-only *external* model gets hidden right along with your internal ones, and a multimodal internal model sails through. `modelsInfoHideInternal` reacts only to the `internal` field:
 
-- `internal: true` + `modelsInfoHideInternal: true` → hidden, regardless of modality.
-- `internal` absent or `false` → never hidden by this flag, regardless of modality.
-- Unknown (`internal` field absent from the catalog entry) is left alone, not treated as `false` — same "known before we assert" rule as everywhere else in this plugin.
+- `internal: true` + flag → hidden, regardless of modality.
+- `internal` absent or `false` → never hidden by this flag.
+- Unknown (`internal` absent) is left alone, not treated as `false`.
 
-All three flags compose freely; set whichever your catalog's semantics call for. Note that `modelsInfoHideInternal` does **not** extend case 2 above (dropping a model your catalog has no entry for at all) — that's governed by `modelsInfoHideTextOnly` or `modelsInfoHideUnmatched` (see above), since an unmatched model's status is unknown, not "internal." Logs at debug (`models_info_model_hidden_internal`).
+All three flags compose freely. `modelsInfoHideInternal` does **not** extend the unmatched path — that is governed by `modelsInfoHideTextOnly` or `modelsInfoHideUnmatched`. Logs at debug (`models_info_model_hidden_internal`).
 
 ### Expected response shape (OpenRouter)
 
@@ -249,17 +241,17 @@ A bare top-level array (no `data` wrapper) is also accepted.
 
 ### Field mapping
 
-| OpenRouter                                              | OpenCode                  |
-| ------------------------------------------------------- | ------------------------- |
-| `context_length` + `top_provider.max_completion_tokens` | `limit.context` / `limit.output` |
-| `pricing.prompt` / `.completion` (USD/token)            | `cost.input` / `cost.output` (USD per 1M tokens — converted) |
-| `pricing.input_cache_read` / `.input_cache_write`       | `cost.cache_read` / `cost.cache_write` |
-| `architecture.input_modalities` / `.output_modalities`  | `modalities.input` / `modalities.output` (filtered to OpenCode's enum) |
-| `supported_parameters: ["tools" or "tool_choice"]`      | `tool_call: true`         |
-| `supported_parameters: ["reasoning" / "thinking" / …]`  | `reasoning: true`         |
-| `supported_parameters: ["temperature"]`                 | `temperature: true`       |
-| Non-text input modality present                         | `attachment: true`        |
-| `name`                                                  | `name` (if absent)        |
+| OpenRouter                                              | OpenCode `Model.Info`                                       |
+| ------------------------------------------------------- | ----------------------------------------------------------- |
+| `context_length` + `top_provider.max_completion_tokens` | `limit.context` / `limit.output`                            |
+| `pricing.prompt` / `.completion` (USD/token)            | `cost[0].input` / `cost[0].output` (USD per 1M tokens — converted) |
+| `pricing.input_cache_read` / `.input_cache_write`       | `cost[0].cache.read` / `cost[0].cache.write` (`0` when absent — required in v2) |
+| `architecture.input_modalities` / `.output_modalities`  | `capabilities.input` / `capabilities.output` (filtered to `text \| audio \| image \| video \| pdf`; both sides required) |
+| `supported_parameters: ["tools" or "tool_choice"]`      | `capabilities.tools: true`                                  |
+| `supported_parameters: ["temperature"]`                 | `capabilities.temperature: true`                            |
+| `name`                                                  | `name` (if absent)                                          |
+
+v1's `reasoning` and `attachment` are **no longer mapped**: `Model.Info` has no field for either. A non-text `capabilities.input` is what signals attachment support in v2.
 
 ## Cache location
 
@@ -269,7 +261,32 @@ A bare top-level array (no `data` wrapper) is also accepted.
 | Linux   | `${XDG_CACHE_HOME:-~/.cache}/opencode-models-info/`                  |
 | Windows | `%LOCALAPPDATA%\opencode-models-info\`                               |
 
-Files are named by `sha256(providerId::url)`, `0o600`, atomic-rename-on-write.
+Files are named by `sha256(providerId::url::modelsInfoHeaders)`, `0o600`, atomic-rename-on-write. The layout is unchanged from v1, so an existing cache is reused.
+
+## Migrating from v1
+
+`0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See [ADR-0019](../../docs/adr/0019-opencode-v2-cutover.md) for why there is no dual-support build.
+
+| v1 | v2 |
+| --- | --- |
+| `"plugin": [...]` | `"plugins": [...]` |
+| `"provider": { ... }` | `"providers": { ... }` |
+| `"npm": "@ai-sdk/openai-compatible"` | `"package": "aisdk:@ai-sdk/openai-compatible"` |
+| `options.baseURL` | `settings.baseURL` |
+| `options.meta.modelsInfoUrl` (and `…TtlSeconds`, `…TimeoutMs`, `…Headers`, `…Overwrite`, `…HideTextOnly`, `…HideInternal`, `…HideUnmatched`) | the same keys, flat on `settings` |
+| `options.headers` (read for the fetch) | `Provider.Info.headers` |
+| `pluginConfig.models-info.logLevel` | the plugin's own `options.logLevel` |
+| host `config.logLevel` drove the log level | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
+| `config` hook awaited the fetch before models were seen | `model.transform` + `ctx.model.reload()`; first model list may be un-enriched |
+| refresh only warmed the cache for the next launch | a changed catalog reloads live |
+| `modelsInfoOverwrite`: `tool_call`, `modalities` | `tools`; `input` and `output` (separately) |
+| `modelsInfoOverwrite`: `reasoning`, `attachment` | _removed_ — `Model.Info` has no such field |
+| mapped `reasoning`, `attachment` | _removed_ (non-text `capabilities.input` implies attachments) |
+| mapped `cost` object `{ input, output, cache_read?, cache_write? }` | `cost[0]` = `{ input, output, cache: { read, write } }` (cache `0` when absent) |
+| mapped `modalities: { input, output }`, `tool_call` | `capabilities.input`, `capabilities.output`, `capabilities.tools` |
+| "already set" = `field !== undefined` | placeholder-aware: sentinel values count as unset ([table](#placeholder-values-count-as-unset)) |
+
+Every `models_info_*` log event name is unchanged. Records now go to the host's Effect logger (ADR-0014 still holds: nothing is written to the terminal), and are filtered a second time by the host's `MinimumLogLevel`.
 
 ## Testing
 
@@ -294,10 +311,15 @@ The integration suite exercises real network round-trips, ETag handling (`304 No
 
 ## Library API
 
-For embedding the enrichment logic outside an OpenCode hook (e.g. tests or custom tooling), import from the `/lib` subpath:
+For embedding the enrichment logic outside the plugin (e.g. tests or custom tooling), import from the `/lib` subpath:
 
 ```ts
-import { enrichConfig, FileCacheStore, createJsonConsoleLogger } from "@vymalo/opencode-models-info/lib";
+import {
+  applyMetadata,
+  createModelsInfoEngine,
+  FileCacheStore,
+  mapOpenRouterEntry
+} from "@vymalo/opencode-models-info/lib";
 ```
 
 ## License

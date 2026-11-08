@@ -1,114 +1,112 @@
-import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
+import { Plugin } from "@opencode/plugin/effect";
+import { Effect } from "effect";
 
 import { type CacheStore, FileCacheStore } from "./cache.js";
 import {
-  createJsonConsoleLogger,
+  captureHostContext,
+  createEffectLogger,
   DEFAULT_LOG_LEVEL,
-  fromOpenCodeLogLevel,
-  type LogFields,
-  LOG_LEVEL_PRIORITY,
   type Logger,
-  type LogLevel
+  type LogLevel,
+  resolveLogLevel
 } from "./logging.js";
-import { type EnrichConfigInput, enrichConfig, startCacheRefreshSchedulers } from "./plugin.js";
-import type { SchedulerHandle } from "./scheduler.js";
+import { createModelsInfoEngine, type ModelsInfoEngine, type ProviderEntry } from "./plugin.js";
+import type { startScheduler } from "./scheduler.js";
 
-const PLUGIN_SERVICE_NAME = "opencode-models-info-plugin";
-
-type OpenCodeConfig = Parameters<NonNullable<Hooks["config"]>>[0];
+/** Stable plugin id. v2 requires one and keys storage/registrations by it. */
+export const PLUGIN_ID = "vymalo.models-info";
 
 export interface OpenCodePluginFactoryOptions {
+  /** Override the logger (tests). Defaults to the host's Effect logger. */
   logger?: Logger;
   fetchImpl?: typeof fetch;
   cache?: CacheStore;
   cacheDir?: string;
+  /** Defaults to `Date.now`. */
+  now?: () => number;
+  /** Override the periodic-refresh scheduler (tests). */
+  scheduler?: typeof startScheduler;
+  /** Observe the engine the plugin built (tests). */
+  onEngine?: (engine: ModelsInfoEngine) => void;
+}
+
+/** A provider record, reduced to the fields the engine reads. */
+function toEntry(record: {
+  readonly provider: { id: string; settings?: unknown; headers?: unknown };
+}): ProviderEntry {
+  const { provider } = record;
+  return {
+    id: provider.id,
+    settings: provider.settings as Record<string, unknown> | undefined,
+    headers: provider.headers as Record<string, string> | undefined
+  };
 }
 
 /**
- * Pipe plugin logs through OpenCode's `client.app.log` so they show up in the
- * host's structured log stream, with the JSON console as a reliable fallback.
- * Mirrors the pattern used by `@vymalo/opencode-oauth2`.
+ * Build the OpenCode v2 plugin.
+ *
+ * Enrichment is registered with the **model domain**:
+ * `ctx.model.transform(editor => …)`. Transform callbacks must be synchronous
+ * and cheap, but the catalog fetch is async — so the transform never awaits. It
+ * applies whichever catalogs are already in memory, and for an opted-in
+ * provider with none it starts the load in the background; when that load
+ * lands and the catalog actually changed, the plugin calls `ctx.model.reload()`
+ * and the transform runs again with the data in hand. (v1's `config` hook could
+ * simply `await` the fetch; that is the structural change.)
+ *
+ * The opt-in set can only be read from inside a transform
+ * (`ModelEditor.provider` — `Provider.Info.settings.modelsInfoUrl`), so the
+ * first fetch is initiated by the first transform run rather than before it.
+ *
+ * A second, read-only `ctx.provider.transform` records provider headers. It is
+ * the fallback for the one unverified part of the cross-plugin Authorization
+ * handoff: whether `ModelEditor.provider` reflects provider-domain transform
+ * output (the bearer `oauth2` stamps on `Provider.Info.headers`).
  */
-function createOpenCodeLogger(client: PluginInput["client"], getMinLevel: () => LogLevel): Logger {
-  const fallback = createJsonConsoleLogger("debug");
-  // OpenCode already captures plugin logs via client.app.log (and filters them
-  // by its own log level). No plugin in this suite may write to the user's
-  // TUI (ADR-0014, superseding ADR-0013's narrower per-plugin scope) — even a
-  // warn/error about a failed catalog fetch stays off the terminal and goes
-  // only to the host log, so only mirror to the JSON console when explicitly
-  // requested; set VYMALO_PLUGIN_CONSOLE_LOG=1 to restore full console output.
-  const consoleAll = /^(1|true|yes|on)$/i.test(process.env.VYMALO_PLUGIN_CONSOLE_LOG ?? "");
-
-  const write = (level: LogLevel, event: string, fields?: LogFields) => {
-    if (LOG_LEVEL_PRIORITY[level] < LOG_LEVEL_PRIORITY[getMinLevel()]) {
-      return;
-    }
-    if (consoleAll) {
-      fallback[level](event, fields);
-    }
-    // OpenCode's log API has no `trace` tier — fold it into the host's most
-    // verbose level (`debug`) for the wire payload; our own `getMinLevel()`
-    // gate above is what actually unlocks trace events.
-    const hostLevel = level === "trace" ? "debug" : level;
-    void client.app
-      .log({
-        body: {
-          service: PLUGIN_SERVICE_NAME,
-          level: hostLevel,
-          message: event,
-          extra: fields
-        }
-      })
-      .catch(() => {
-        /* best-effort */
-      });
-  };
-
-  return {
-    trace: (event, fields) => write("trace", event, fields),
-    debug: (event, fields) => write("debug", event, fields),
-    info: (event, fields) => write("info", event, fields),
-    warn: (event, fields) => write("warn", event, fields),
-    error: (event, fields) => write("error", event, fields)
-  };
-}
-
 export function createOpencodeModelsInfoPlugin(
   factoryOptions: OpenCodePluginFactoryOptions = {}
-): Plugin {
-  return async ({ client }) => {
-    let currentLogLevel: LogLevel = DEFAULT_LOG_LEVEL;
-    const logger = factoryOptions.logger ?? createOpenCodeLogger(client, () => currentLogLevel);
-    const cache = factoryOptions.cache ?? new FileCacheStore(factoryOptions.cacheDir);
-    let schedulers: SchedulerHandle[] = [];
+): Plugin.Plugin {
+  return Plugin.define({
+    id: PLUGIN_ID,
+    effect: Effect.fn(function* (ctx) {
+      // v2 gives plugins no `config` object, so the v1 `config.logLevel`
+      // channel is gone: take this plugin's own `logLevel` option first, then
+      // the host's `OPENCODE_LOG_LEVEL`.
+      const logLevel: LogLevel =
+        resolveLogLevel(ctx.options.logLevel) ??
+        resolveLogLevel(process.env.OPENCODE_LOG_LEVEL) ??
+        DEFAULT_LOG_LEVEL;
 
-    const stopSchedulers = (): void => {
-      for (const handle of schedulers) {
-        handle.stop();
-      }
-      schedulers = [];
-    };
+      // Captured inside the plugin's own fiber so records (and the reload
+      // below) run on the host's runtime, not a bare `Effect.runFork` — which
+      // would log to the terminal (ADR-0014).
+      const hostContext = yield* captureHostContext;
+      const logger = factoryOptions.logger ?? createEffectLogger(hostContext, () => logLevel);
 
-    return {
-      config: async (config: OpenCodeConfig) => {
-        currentLogLevel = fromOpenCodeLogLevel(config.logLevel) ?? DEFAULT_LOG_LEVEL;
-        const deps = { cache, logger, fetchImpl: factoryOptions.fetchImpl };
-        await enrichConfig(config as EnrichConfigInput, deps);
+      const engine = createModelsInfoEngine({
+        cache: factoryOptions.cache ?? new FileCacheStore(factoryOptions.cacheDir),
+        logger,
+        fetchImpl: factoryOptions.fetchImpl,
+        now: factoryOptions.now,
+        scheduler: factoryOptions.scheduler,
+        onChange: () => {
+          Effect.runFork(Effect.provideContext(ctx.model.reload(), hostContext));
+        }
+      });
+      factoryOptions.onEngine?.(engine);
+      yield* Effect.addFinalizer(() => Effect.sync(() => engine.dispose()));
 
-        // OpenCode re-runs `config` on certain config edits — stop the
-        // schedulers from any prior run before starting fresh ones so a
-        // rebuilt config never leaks a duplicate background timer per
-        // provider.
-        stopSchedulers();
-        schedulers = startCacheRefreshSchedulers(config as EnrichConfigInput, deps);
-      },
-      dispose: async () => {
-        stopSchedulers();
-      }
-    };
-  };
+      yield* ctx.provider.transform((editor) => {
+        engine.observeProviders(editor.list().map(toEntry));
+      });
+
+      yield* ctx.model.transform((editor) => {
+        engine.transform(editor);
+      });
+    })
+  });
 }
 
-export const OpencodeModelsInfoPlugin: Plugin = createOpencodeModelsInfoPlugin();
+export const OpencodeModelsInfoPlugin: Plugin.Plugin = createOpencodeModelsInfoPlugin();
 
 export default OpencodeModelsInfoPlugin;
