@@ -299,8 +299,9 @@ removed, not stubbed — nothing is registered for them:
 | `opencode.command.executed.count` metric, `opencode.command_executed` log | `command.executed` | The event exists in the schema package, but it is not in the set a plugin can subscribe to (`ctx.event.subscribe` rejects it at the type level). |
 | per-error `opencode.error.retryable` on terminal failures | `session.error` | v2's `session.step.failed` error carries `type`, `status` and `retryAfterMs`, but no retryable flag. A *retry* is still reported, from the `session.status` retry event. |
 
-The engine (`@vymalo/opencode-core-otel`) still implements the recorders for the dropped signals; it
-is shared with `opencode-lightbridge` and is out of this port's scope.
+The engine (`@vymalo/opencode-core-otel`) no longer carries the recorders, instruments or input
+types for `session.diff`, `todo.updated` or `command.executed` either: they were deleted outright
+once nothing could feed them, as was the `detectLanguage` helper that only the diff recorder used.
 
 ### Traces
 
@@ -482,8 +483,9 @@ reports the same facts under different names and a `{ type, data }` shape, and s
 have no single v2 counterpart (`message.updated`, `message.part.updated`, `session.compacted`,
 `server.instance.disposed`). The `otel` plugin translates (see the table in
 [How it hooks into OpenCode v2](#how-it-hooks-into-opencode-v2)), so that translation lives in the
-adapter, not the engine. The engine's `session.diff`, `todo.updated`, `command.executed`,
-`message.part.updated` and `installation.updated` inputs have no v2 source and are never fed.
+adapter, not the engine. The engine's `message.part.updated` and `installation.updated` inputs have no v2 source and are
+never fed. (`session.diff`, `todo.updated` and `command.executed` are not part of the vocabulary
+at all any more.)
 
 ## Flushing
 
