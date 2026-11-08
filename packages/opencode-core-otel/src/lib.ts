@@ -15,7 +15,7 @@ export {
   type TelemetryProviders
 } from "./providers.js";
 
-export { createInstruments, detectLanguage, type Instruments } from "./instruments.js";
+export { createInstruments, type Instruments } from "./instruments.js";
 
 export { type RecorderDeps, TelemetryRecorder } from "./recorder.js";
 
@@ -77,7 +77,6 @@ export type {
   ChatMessageOutput,
   ChatParamsInput,
   ChatParamsOutput,
-  FileDiff,
   MessageInfo,
   PartInfo,
   PermissionAskInput,
@@ -88,7 +87,6 @@ export type {
   SessionErrorInfo,
   SessionInfo,
   SessionStatusInfo,
-  TodoInfo,
   TokenCounts,
   ToolAfterInput,
   ToolBeforeInput,
