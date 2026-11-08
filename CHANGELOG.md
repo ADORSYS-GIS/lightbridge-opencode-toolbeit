@@ -4,7 +4,92 @@ All notable changes to the **OpenCode Toolbelt** — the `@vymalo/*` plugin suit
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
+All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
+
+## [0.18.0] — 2026-11-08
+
+The release that starts the **OpenCode v2 cutover**: `@vymalo/opencode-ratelimit` is the first
+package on the v2 plugin API and the reference port for the remaining ten, with the suite-wide
+decision recorded in [ADR-0019](docs/adr/0019-opencode-v2-cutover.md). Alongside it: the Firefox
+extension fix from #63, a SIGTERM fix that makes telemetry-equipped hosts killable again, and a
+bounded browser-bridge handshake.
+
+⚠️ **Breaking for `@vymalo/opencode-ratelimit` on OpenCode 1.x.** The v1 `provider.options.fetch`
+wrapper is gone; the package now targets `@opencode/plugin@2` (v2) exclusively, with `effect` as a
+peer dependency. v1 plugin implementations do not run in OpenCode v2. The other ten plugin packages
+remain on the v1 API in this release and are ported in follow-up PRs per
+[`plans/opencode-v2.md`](plans/opencode-v2.md).
+
+### Added
+
+- **ratelimit:** Ported to the OpenCode v2 plugin API as the suite's reference implementation
+  ([ADR-0019](docs/adr/0019-opencode-v2-cutover.md)): `provider.transform` reads the per-provider
+  opt-in, `session.hook("http.request")` is the pre-request gate, `session.hook("http.response")`
+  reads the `x-ratelimit-*` headers, and `session.hook("retry")` decides a `429` — returning a delay
+  the **host** sleeps, so the plugin no longer owns the retry loop. Logging moves to the host's
+  Effect logger (`captureHostContext` + `createEffectLogger`), while the engine stays plain TS and
+  never imports the plugin API. Adds [`plans/opencode-v2.md`](plans/opencode-v2.md) with the
+  per-package v1→v2 hook mapping and the PR order. ([#128](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/128))
+- **core-otel:** New shared `registerExitHandlers` (exported via `./lib`), replacing the private
+  copies in `opencode-otel` and `opencode-lightbridge`. On SIGINT/SIGTERM it flushes with a 2 s
+  bound and, when nothing else listens, removes its listeners and **re-raises the signal** so the
+  process exits with the normal status; when the host listens it only flushes and never kills.
+  ([ADR-0018](docs/adr/0018-exit-handlers-reraise-the-signal.md), [#123](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/123))
+- **browser:** `AgentClientOptions.connectTimeoutMs` (default 5000 ms) bounds the bridge handshake;
+  a peer that accepts the WebSocket upgrade but never sends `ready` now rejects with
+  `AgentClientError("bridge connect timed out", "connect_failed")` and closes the socket, so plugin
+  load falls through to re-election instead of hanging. ([#126](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/126))
+
+### Changed
+
+- **all packages:** Dependency refresh from issue #86: Biome 2.5.14, `@opencode-ai/plugin` 1.18.32
+  (still the v1 surface for every package except ratelimit), Vite 8.3, Rolldown 1.2, the OTel family
+  in lockstep at 2.11/0.222, browser-extension React 19.3 / WXT 0.21.4 / `@types/chrome` 0.3.0, and
+  the test-only AI SDK pair to `ai@7` / `@ai-sdk/openai@4`. ([#117](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/117), [#118](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/118))
+- **all packages:** Dev toolchain majors: TypeScript 7 (native compiler), vitest 5, and
+  `@types/node` 22 (matching `engines >=22` and the node 22/24 CI matrix). ([#119](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/119))
+- **ratelimit — BREAKING:** v1's `provider.options.fetch` wrapper is replaced by the native v2 HTTP
+  seams; `Provider.Info` has no `options`/`fetch` field, and the plugin no longer owns the retry
+  loop. The `tiers` and `scope: "model" | "provider"` policies are unchanged. ([#128](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/128))
+
+### Removed
+
+- **code-index (private, experimental):** `@vymalo/opencode-code-index` was removed rather than
+  ported to the v2 plugin API (ADR-0019); it was never published. ADR-0002/0003/0004 are kept and
+  marked Withdrawn. ([#132](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/132))
+
+### Fixed
+
+- **browser-extension:** Firefox's `chrome.*` namespace is callback-only, so awaiting it resolved to
+  `undefined` and `browser_open` crashed on `created.id`. Every awaited or promise-chained extension
+  API call now goes through `browser` from `wxt/browser` — tabs, windows, scripting, cookies, the
+  action badge, runtime messaging, and the side-panel/sidebar APIs — while event listeners,
+  synchronous calls, feature detection, callback-style CDP calls, and serialized page functions stay
+  on `chrome.*`. Adds Firefox-shaped regression tests and a source guard that rejects awaited
+  bindings, `return chrome.*` from async functions, `Promise.all([...])`, and chained
+  `.then()`/`.catch()`/`.finally()` calls, with a string-aware comment stripper. The remaining
+  converted call sites (cookies, `windows.update`, `action.setBadge*`, side panel/sidebar) are
+  covered by Firefox-shaped tests in [#130](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/130). ([#63](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/63), [#124](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/124))
+- **browser-extension:** `waitForComplete()` is annotated with WXT's `Browser.tabs.Tab`, fixing the
+  TS2322 semantic conflict between #124 and the `@types/chrome` 0.3.0 bump (`lastAccessed` became
+  required). Type-only, no runtime change. ([#129](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/129))
+- **browser-extension:** The popup's "Dashboard" button uses `browser.runtime.openOptionsPage()`,
+  the Firefox side-panel fallback uses `browser.runtime.getURL()`, and `hasTabGroups()` restores its
+  `typeof chrome !== "undefined"` guard. ([#124](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/124))
+- **core-otel, lightbridge, otel:** Telemetry-equipped processes no longer swallow SIGINT/SIGTERM.
+  The old handlers flushed and returned, replacing the runtime's default terminate action; the
+  shared handler re-raises after the bounded flush when no other listener is registered. Fixes
+  `opencode serve` needing SIGKILL. ([#122](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/122), [#123](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/123))
+- **browser:** `AgentClient.connect()` no longer hangs plugin load against a silent broker (see
+  Added). ([#125](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/125), [#126](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/126))
+
+### Documentation
+
+- **ADRs:** [ADR-0018](docs/adr/0018-exit-handlers-reraise-the-signal.md) (exit handlers re-raise
+  the signal) and [ADR-0019](docs/adr/0019-opencode-v2-cutover.md) (v2-only cutover, Effect
+  surface, `effect` peer dependency), plus [`plans/opencode-v2.md`](plans/opencode-v2.md). The OTEL,
+  lightbridge, architecture, troubleshooting, browser, and ratelimit docs and the mirrored
+  `AGENTS.md`/`CLAUDE.md` are updated to match.
 
 ## [0.17.1] — 2026-09-18
 
