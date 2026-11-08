@@ -103,11 +103,11 @@ data:
   opencode.json: |
     {
       "$schema": "https://opencode.ai/config.json",
-      "plugin": ["@vymalo/opencode-oauth2"],
-      "provider": {
+      "plugins": [{ "package": "@vymalo/opencode-oauth2" }],
+      "providers": {
         "miaou": {
           "name": "Miaou",
-          "options": {
+          "settings": {
             "baseURL": "https://api.example.com/v1",
             "oauth2": {
               "issuer": "https://auth.example.com/realms/prod",
@@ -270,11 +270,11 @@ data:
   opencode.json: |
     {
       "$schema": "https://opencode.ai/config.json",
-      "plugin": ["@vymalo/opencode-oauth2"],
-      "provider": {
+      "plugins": [{ "package": "@vymalo/opencode-oauth2" }],
+      "providers": {
         "miaou-prod": {
           "name": "Miaou (prod)",
-          "options": {
+          "settings": {
             "baseURL": "https://api-prod.example.com/v1",
             "oauth2": {
               "issuer": "https://auth-prod.example.com/realms/main",
@@ -290,7 +290,7 @@ data:
         },
         "miaou-staging": {
           "name": "Miaou (staging)",
-          "options": {
+          "settings": {
             "baseURL": "https://api-staging.example.com/v1",
             "oauth2": {
               "issuer": "https://auth-staging.example.com/realms/main",

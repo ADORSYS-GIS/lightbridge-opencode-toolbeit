@@ -29,7 +29,7 @@ flowchart LR
   subgraph LB["@vymalo/opencode-lightbridge"]
     TR["one TokenRuntime · one cache dir<br/>ensure() → exchangeTo(project_id)"]
   end
-  TR -->|"chat.headers (per request)"| GW["LLM gateway"]
+  TR -->|"model.request hook (per request)"| GW["LLM gateway"]
   TR -->|"TokenSource.headers() (per export)"| COL["OTEL collector"]
   GW & COL -.->|"both validate the same issuer + aud=lightbridge-api-key"| AZ["lightbridge-authz JWKS"]
 ```

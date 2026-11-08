@@ -2,7 +2,7 @@
 
 Symptom-keyed. Each entry covers what's happening internally, where to look in logs, and a diagnostic you can run.
 
-The plugin emits structured JSON logs through `client.app.log()` when running under OpenCode — not to the terminal by default ([ADR-0014](./adr/0014-suite-wide-no-terminal-mirror.md); set `VYMALO_PLUGIN_CONSOLE_LOG=1` to also mirror to stderr for local debugging). Anywhere this guide says "look for `<event>` in the logs", that's an event name in the `event` field of those entries — see [architecture.md → Logging](./architecture.md#logging) for the full table.
+The plugin writes structured log records through the host's Effect logger into OpenCode's own log when running under OpenCode (`client.app.log` no longer exists on v2) — not to the terminal by default ([ADR-0014](./adr/0014-suite-wide-no-terminal-mirror.md); set `VYMALO_PLUGIN_CONSOLE_LOG=1` to also mirror to stderr for local debugging). Anywhere this guide says "look for `<event>` in the logs", that's an event name in the `event` field of those entries — see [architecture.md → Logging](./architecture.md#logging) for the full table.
 
 > This page covers `@vymalo/opencode-oauth2`, plus a handful of `@vymalo/opencode-otel` symptoms
 > below that are cross-cutting enough to belong here. For the companion plugins, see the
@@ -12,7 +12,7 @@ The plugin emits structured JSON logs through `client.app.log()` when running un
 
 ## `/models` doesn't list my provider after install
 
-**What's happening.** The plugin loaded fine, but warmup at config-hook time ran non-interactively (CI, no TTY, or `interactive: false`) and the cache was empty. `ensureToken` threw `interactive authentication required`; `syncServer` caught it, logged `sync_startup_failed`, and preserved the empty cache. The provider stays registered in OpenCode's config but with no models attached, so the model list is empty.
+**What's happening.** The plugin loaded fine, but the background warmup ran non-interactively (CI, no TTY, or `interactive: false`) and the cache was empty. `ensureToken` threw `interactive authentication required`; `syncServer` caught it, logged `sync_startup_failed`, and preserved the empty cache. The provider stays registered but with no models attached, so the model list is empty.
 
 **Look for.**
 
@@ -20,7 +20,7 @@ The plugin emits structured JSON logs through `client.app.log()` when running un
 - `sync_startup_failed` with `error: "interactive authentication required for server ..."` — confirms warmup gave up non-interactively.
 - Absence of `sync_success` and `model_discovery_*`.
 
-**Fix.** Trigger auth via an actual `opencode run` (the chat path calls `ensureToken` with `interactive: true` by default), or override warmup interactivity at start time. There's no `pluginConfig` knob for this — if you're embedding the runtime yourself, pass `interactive: true` to `start()`. From the OpenCode-hosted path, you can't override; just run a one-shot to bootstrap.
+**Fix.** Trigger auth via an actual `opencode run` (the chat path calls `ensureToken` with `interactive: true` by default), or override warmup interactivity at start time. There's no plugin `options` knob for this — if you're embedding the runtime yourself, pass `interactive: true` to `start()`. From the OpenCode-hosted path, you can't override; just run a one-shot to bootstrap.
 
 ```sh
 # Bootstrap auth interactively — completes the PKCE browser dance once,
@@ -65,7 +65,7 @@ If you're hitting the *opposite* problem — a non-compliant IdP that rejects th
 
 **What's happening.** Setting `responseApi: true` swaps the provider's package from `@ai-sdk/openai-compatible` to the native `@ai-sdk/openai`, so OpenCode routes inference through the **Responses API** (`/v1/responses`) instead of Chat Completions (`/v1/chat/completions`). Two things change with that swap:
 
-- The native provider **throws `OpenAI API key is missing` at construction** if no `apiKey` is set. The plugin handles this for you by stamping an inert placeholder key (`oauth2-managed-bearer`) when you haven't supplied one; the real OAuth bearer is still injected per request by `chat.headers`, so the placeholder is never actually sent. You should not see this error from the plugin's own providers — if you do, you likely hand-rolled an `@ai-sdk/openai` provider in `opencode.json` without an `apiKey` and without this plugin managing it.
+- The native provider **throws `OpenAI API key is missing` at construction** if no `apiKey` is set. The plugin handles this for you by stamping an inert placeholder key (`oauth2-managed-bearer`) when you haven't supplied one; the real OAuth bearer is still injected per request by the `model.request` hook, so the placeholder is never actually sent. You should not see this error from the plugin's own providers — if you do, you likely hand-rolled an `@ai-sdk/openai` provider in `opencode.json` without an `apiKey` and without this plugin managing it.
 - The native provider speaks the **OpenAI Responses wire format**, which is *not* the same as Chat Completions. The route must exist **and the chosen model must be served on it** — gateways often expose `/v1/responses` for only a subset of models. A model that 404s on `/v1/responses` (while working on `/v1/chat/completions`) is a model-routing gap, not a missing route.
 
 **Look for.**
@@ -124,7 +124,7 @@ Compare:
 
 ## `models_info_fetch_failed_no_cache` (HTTP 401) — metadata not enriched
 
-**What's happening.** `@vymalo/opencode-models-info` tried to fetch `meta.modelsInfoUrl`, the endpoint returned 401, and there was no previously-cached catalog to fall back to — so model metadata (context window, cost, modalities) is left un-enriched. The metadata endpoint is auth-protected and no `Authorization` header reached it.
+**What's happening.** `@vymalo/opencode-models-info` tried to fetch `settings.modelsInfoUrl`, the endpoint returned 401, and there was no previously-cached catalog to fall back to — so model metadata (context window, cost, modalities) is left un-enriched. The metadata endpoint is auth-protected and no `Authorization` header reached it.
 
 **Look for.**
 
@@ -133,12 +133,12 @@ Compare:
 
 **Fix.**
 
-1. **List `@vymalo/opencode-oauth2` before `@vymalo/opencode-models-info`** in your `plugin` array. oauth2's `config` hook stamps the bearer onto `options.headers` and must run first. The bearer is now produced by a refresh-backed ensure, so a freshly-minted (even short-lived) token is propagated rather than skipped.
+1. **List `@vymalo/opencode-oauth2` before `@vymalo/opencode-models-info`** in your `plugins` array. oauth2's provider transform stamps the bearer onto the provider's `headers` (`Provider.Info.headers.Authorization`) and must have run first. The bearer is now produced by a refresh-backed ensure, so a freshly-minted (even short-lived) token is propagated rather than skipped.
 2. **On a one-off first-login 401, just re-run the command.** The token is on disk after the first login, so the next run stamps it before models-info's hook runs.
-3. **Different credential for metadata?** Set `meta.modelsInfoHeaders.Authorization` — it overrides the inherited provider header.
+3. **Different credential for metadata?** Set `settings.modelsInfoHeaders.Authorization` — it overrides the inherited provider header.
 4. **Endpoint not actually OpenRouter-shaped?** A vanilla `/v1/models` returns no mappable fields; point `modelsInfoUrl` at the richer metadata route. See [models-info.md → URL resolution](./models-info.md#url-resolution).
 
-The cache TTL is already 24h by default (`meta.modelsInfoTtlSeconds`); once the fetch 200s once, reboots stay offline for the day. There's no way to pre-seed a placeholder cache for an endpoint that has never succeeded — see [models-info.md → "There's no cache yet"](./models-info.md#theres-no-cache-yet--can-i-get-a-1-day-ttl-entry).
+The cache TTL is already 24h by default (`settings.modelsInfoTtlSeconds`); once the fetch 200s once, reboots stay offline for the day. There's no way to pre-seed a placeholder cache for an endpoint that has never succeeded — see [models-info.md → "There's no cache yet"](./models-info.md#theres-no-cache-yet--can-i-get-a-1-day-ttl-entry).
 
 ## Cost / limits don't appear in the OpenCode UI despite `models_info_enriched`
 
@@ -189,7 +189,7 @@ See [models-info.md → Overriding upstream-wins](./models-info.md#overriding-up
 
 **What's happening.** A model your `models/info` endpoint reports with `architecture.input_modalities: ["text", "image"]` shows no image/attachment support in OpenCode. The mapper *does* derive both `modalities.input` **and** `attachment: true` from that field ([`mapping.ts`](../packages/opencode-models-info/src/mapping.ts)), and — unlike `name` — oauth2 does **not** pre-stamp `modalities`/`attachment`, so upstream-wins doesn't block them. So if image input is missing, the enrichment isn't reaching the entry with current data. In order of likelihood:
 
-1. **Stale cache.** The catalog is cached for `meta.modelsInfoTtlSeconds` (default 24h). If `image` was added to the endpoint within that window, the on-disk copy predates it. Clear it and relaunch: `rm -rf ~/Library/Caches/opencode-models-info/` (macOS; see [Caching](./models-info.md#caching-and-failure-modes) for Linux/Windows paths).
+1. **Stale cache.** The catalog is cached for `settings.modelsInfoTtlSeconds` (default 24h). If `image` was added to the endpoint within that window, the on-disk copy predates it. Clear it and relaunch: `rm -rf ~/Library/Caches/opencode-models-info/` (macOS; see [Caching](./models-info.md#caching-and-failure-modes) for Linux/Windows paths).
 2. **The fetch is failing.** Look for `models_info_fetch_failed_no_cache` / `..._using_stale` — usually a 401 on an auth-protected metadata endpoint (see [the 401 section](#models_info_fetch_failed_no_cache-http-401--metadata-not-enriched)).
 3. **id mismatch** between the discovered model (`/v1/models`, which becomes the config key) and the `models/info` entry — only matching ids get enriched.
 
@@ -383,12 +383,12 @@ The shipped `pnpm-workspace.yaml` allows these two by default (they're dependenc
 
 ## Plugin appears to do nothing (`@vymalo/opencode-otel`)
 
-**What's happening.** No spans, metrics or logs ever show up, and there's no export failure either — because no export was ever attempted. The plugin treats "installed but unconfigured" as a deliberate no-op: with no endpoint and no explicit exporter it initializes no providers, opens no sockets, and registers no hooks beyond the bare `config` hook needed to keep reading the host's log level.
+**What's happening.** No spans, metrics or logs ever show up, and there's no export failure either — because no export was ever attempted. The plugin treats "installed but unconfigured" as a deliberate no-op: with no endpoint and no explicit exporter it initializes no providers, opens no sockets, and returns from setup before registering any subscription or hook (it only logs `otel_plugin_inactive`).
 
 **Look for.**
 
 - `otel_plugin_inactive` at startup, with a `reason` field that tells you which of the two causes applies: `no_exporter_configured` (no `endpoint`/`OTEL_EXPORTER_OTLP_ENDPOINT` and no explicit `exporters`/`OTEL_*_EXPORTER` was found) versus `disabled` (`enabled: false` / `OPENCODE_OTEL_ENABLED=false` was set explicitly, overriding everything else).
-- Its absence, together with `otel_plugin_enabled`, confirms the plugin *did* activate — if you see neither event at all, the plugin isn't loading; check the `plugin` array the same way the [generic oauth2 check](#generic-see-exactly-what-the-plugin-is-doing) below does, substituting `@vymalo/opencode-otel`.
+- Its absence, together with `otel_plugin_enabled`, confirms the plugin *did* activate — if you see neither event at all, the plugin isn't loading; check the `plugins` array the same way the [generic oauth2 check](#generic-see-exactly-what-the-plugin-is-doing) below does, substituting `@vymalo/opencode-otel`.
 
 **Fix.** Set `endpoint` in the plugin options or `OTEL_EXPORTER_OTLP_ENDPOINT` in the environment — either is sufficient on its own (see [otel.md → Quick start](./otel.md#quick-start)). Remember configuration is read once at plugin load: an environment variable exported after OpenCode has already started won't be picked up until the next launch.
 
@@ -414,7 +414,7 @@ The shipped `pnpm-workspace.yaml` allows these two by default (they're dependenc
 
 ## One signal missing while others work (`@vymalo/opencode-otel`)
 
-**What's happening.** Traces, metrics and logs are three independent providers built in the same `config` hook pass — a failure constructing one is caught and logged without stopping the others, on the principle that partial telemetry beats an exception escaping into the host's plugin loader.
+**What's happening.** Traces, metrics and logs are three independent providers built in the same plugin-setup pass — a failure constructing one is caught and logged without stopping the others, on the principle that partial telemetry beats an exception escaping into the host's plugin loader.
 
 **Look for.** `otel_traces_init_failed`, `otel_metrics_init_failed`, or `otel_logs_init_failed`, each carrying an `error` message. Whichever signal's provider is missing from the log — `otel_plugin_enabled`'s `exporters` field still lists it as configured, but no spans/metrics/logs for that signal ever appear — is the one whose `_init_failed` event to search for.
 
@@ -438,4 +438,4 @@ npm ls -g | grep opencode-oauth2
 cat $OPENCODE_CONFIG_DIR/opencode.json | jq '.plugin'
 ```
 
-The `plugin` array must include `"@vymalo/opencode-oauth2"` (or a local path that re-exports it — see [local-development.md](./local-development.md#plugin-reexport-trick)).
+The `plugins` array must include `"@vymalo/opencode-oauth2"` (or a local plugin directory that re-exports it — see [local-development.md](./local-development.md#plugin-reexport-trick)).

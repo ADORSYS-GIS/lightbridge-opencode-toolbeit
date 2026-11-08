@@ -4,7 +4,13 @@ All notable changes to the **OpenCode Toolbelt** — the `@vymalo/*` plugin suit
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
+All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
+
+## [Unreleased]
+
+### Documentation
+
+- **all packages:** Brought the root documentation in line with the completed OpenCode v2 cutover ([ADR-0019](docs/adr/0019-opencode-v2-cutover.md), source of truth [#128](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/128)). `CLAUDE.md` / `AGENTS.md` drop the mid-migration banner, correct the package count to sixteen (three private), remove every `code-index` reference, describe each plugin by the v2 domain transforms and hooks it really registers, re-derive the models-info `Authorization` handoff on `Provider.Info.headers`, document that `oauth2` must be listed before `models-info` and `lightbridge`, and record the `effect` peer-dependency invariant and the Effect-logger convention. The remaining v1-shaped guides and config examples (`README.md`, `GETTING_STARTED.md`, `docs/architecture.md`, `docs/troubleshooting.md`, `docs/local-development.md`, `docs/github-actions.md`, `docs/kubernetes.md`, `docs/security.md`, `docs/well-known.md`, `docs/lightbridge.md`, `docs/repo-auth.md`) move to the v2 config shape (`plugins`, `providers`, `settings`). `plans/opencode-v2.md` is marked done, and `docs/adr/0019-opencode-v2-cutover.md` no longer points at the removed `code-index` package. The preamble above now says sixteen packages and drops the `code-index` tag.
 
 ## [0.17.1] — 2026-09-18
 

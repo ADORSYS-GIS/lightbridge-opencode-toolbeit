@@ -77,11 +77,11 @@ Add the plugins you want to your OpenCode config and declare a provider. The sma
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@vymalo/opencode-oauth2"],
-  "provider": {
+  "plugins": [{ "package": "@vymalo/opencode-oauth2" }],
+  "providers": {
     "example-ai": {
       "name": "Example AI",
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.example.com",
@@ -95,7 +95,7 @@ Add the plugins you want to your OpenCode config and declare a provider. The sma
 }
 ```
 
-On boot, oauth2 runs the auth flow, caches the token, discovers your models, and OpenCode treats `example-ai` like any other provider. For the full configuration reference (every flow, every field, the alternative `pluginConfig.oauth2ModelSync.servers` layout), see [`packages/opencode-oauth2/README.md`](packages/opencode-oauth2/README.md).
+On boot, oauth2 runs the auth flow, caches the token, discovers your models, and OpenCode treats `example-ai` like any other provider. For the full configuration reference (every flow, every field, the alternative plugin-level `options.servers` layout), see [`packages/opencode-oauth2/README.md`](packages/opencode-oauth2/README.md).
 
 > [!NOTE]
 > The slickest way to ship this to a team is **not** an `opencode.json` at all — a server publishes a `.well-known/opencode` document and `opencode auth login <url>` adopts the provider + plugin setup automatically. See [`docs/well-known.md`](docs/well-known.md).
@@ -117,7 +117,7 @@ Most OpenCode providers assume a static bearer key. That works for hosted SaaS, 
 - **Dynamic model discovery** from `/v1/models` — no hand-maintained model lists
 - **Display-name normalization** so `glm-5` shows up as `GLM 5`
 - **Persistent token cache** with automatic refresh, atomic writes, `0o600`
-- **`chat.headers` hook** injects a fresh bearer per request
+- **`model.request` session hook** injects a fresh bearer per request
 - **Strict refresh-token policy** — a user-flow session is either fully renewable or it doesn't get cached (machine flows re-acquire on every expiry)
 
 **Federated identity (CI / Kubernetes):** use `jwt_bearer` or `token_exchange` with the platform's own short-lived OIDC token as the subject — nothing long-lived is ever cached. End-to-end recipes in [`docs/github-actions.md`](docs/github-actions.md) and [`docs/kubernetes.md`](docs/kubernetes.md); the shipped reusable workflow at [`.github/workflows/opencode-run.yml`](.github/workflows/opencode-run.yml) covers the common `opencode run` case.
@@ -128,13 +128,13 @@ A plain OpenAI-compatible `/v1/models` returns almost nothing useful (`id`, `obj
 
 ```jsonc
 {
-  "plugin": ["@vymalo/opencode-models-info"],
-  "provider": {
+  "plugins": ["@vymalo/opencode-models-info"],
+  "providers": {
     "my-provider": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
         "baseURL": "https://api.example.com/v1",
-        "meta": { "modelsInfoUrl": "https://api.example.com/v1/models" }
+        "modelsInfoUrl": "https://api.example.com/v1/models"
       },
       "models": { "my-model-large": {} }
     }
@@ -142,7 +142,7 @@ A plain OpenAI-compatible `/v1/models` returns almost nothing useful (`id`, `obj
 }
 ```
 
-It runs as a `config` hook **after** other plugins and the merge is **upstream-wins** — a field you (or another plugin) already set is never clobbered, so it's safe to enable globally. Full reference: [`packages/opencode-models-info/README.md`](packages/opencode-models-info/README.md); composition + caching details in [`docs/models-info.md`](docs/models-info.md).
+It enriches models through `ctx.model.transform` and the merge is **upstream-wins** — a field you (or another plugin) already set is never clobbered, so it's safe to enable globally. Full reference: [`packages/opencode-models-info/README.md`](packages/opencode-models-info/README.md); composition + caching details in [`docs/models-info.md`](docs/models-info.md).
 
 ## 🚦 ratelimit — cooperate with your gateway instead of fighting it
 
@@ -150,20 +150,20 @@ It runs as a `config` hook **after** other plugins and the merge is **upstream-w
 
 ```jsonc
 {
-  "plugin": ["@vymalo/opencode-ratelimit"],
-  "provider": {
+  "plugins": ["@vymalo/opencode-ratelimit"],
+  "providers": {
     "my-provider": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
         "baseURL": "https://api.example.com/v1",
-        "meta": { "rateLimit": { "maxWaitMs": 0, "maxRetries": 5 } }
+        "rateLimit": { "maxWaitMs": 0, "maxRetries": 5 }
       }
     }
   }
 }
 ```
 
-OpenCode has no post-response hook, so the only way to observe response status/headers is to wrap the provider's `fetch` — which is exactly what this plugin does. It supports `tiers` (wait through a 60s burst reset, but error fast on a multi-day budget reset) and `scope: "model"` (per-model cooldown buckets). Full reference: [`packages/opencode-ratelimit/README.md`](packages/opencode-ratelimit/README.md); the throttle/backoff state machine in [`docs/ratelimit.md`](docs/ratelimit.md).
+It plugs into OpenCode's native HTTP seams — `session.hook("http.request")` gates each call, `session.hook("http.response")` reads the headers, and `session.hook("retry")` decides a `429` (the host sleeps the delay) — so it no longer wraps the provider's `fetch`. It supports `tiers` (wait through a 60s burst reset, but error fast on a multi-day budget reset) and `scope: "model"` (per-model cooldown buckets). Full reference: [`packages/opencode-ratelimit/README.md`](packages/opencode-ratelimit/README.md); the throttle/backoff state machine in [`docs/ratelimit.md`](docs/ratelimit.md).
 
 ## 🖐️ browser — give the model hands
 
@@ -171,8 +171,8 @@ OpenCode has no post-response hook, so the only way to observe response status/h
 
 ```jsonc
 {
-  "plugin": [
-    ["@vymalo/opencode-browser", { "port": 4517 }]
+  "plugins": [
+    { "package": "@vymalo/opencode-browser", "options": { "port": 4517 } }
   ]
 }
 ```
@@ -194,10 +194,10 @@ Targeting is via stable `browser_snapshot` refs or CSS selectors / coordinates. 
 
 ```jsonc
 {
-  "plugin": [
+  "plugins": [
     "@vymalo/opencode-devtools",
     // or enable the http group (network egress, off by default):
-    ["@vymalo/opencode-devtools", { "groups": ["math", "codec", "crypto", "datetime", "convert", "http"] }]
+    { "package": "@vymalo/opencode-devtools", "options": { "groups": ["math", "codec", "crypto", "datetime", "convert", "http"] } }
   ]
 }
 ```
@@ -216,12 +216,12 @@ Targeting is via stable `browser_snapshot` refs or CSS selectors / coordinates. 
 
 ```jsonc
 {
-  "plugin": ["@vymalo/opencode-repo-auth"],
-  "provider": {
+  "plugins": ["@vymalo/opencode-repo-auth"],
+  "providers": {
     "gateway": {
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
-        "meta": { "repoAuth": { "projectId": "proj-123", "issuer": "https://auth.example.com", "clientId": "opencode-cli", "scopes": ["openid", "offline_access"] } }
+        "repoAuth": { "projectId": "proj-123", "issuer": "https://auth.example.com", "clientId": "opencode-cli", "scopes": ["openid", "offline_access"] }
       }
     }
   }
@@ -236,12 +236,15 @@ Never run it on the same provider as `oauth2` (both set `Authorization`). Full r
 
 ```jsonc
 {
-  "plugin": [
-    ["@vymalo/opencode-lightbridge", {
-      "auth": { "issuer": "https://authz.example.com/realms/lightbridge", "clientId": "opencode-cli", "scopes": ["openid", "offline_access"], "authFlow": "device_code" },
-      "gateway": { "providers": ["gateway"] },
-      "otel": { "endpoint": "http://localhost:4318" }
-    }]
+  "plugins": [
+    {
+      "package": "@vymalo/opencode-lightbridge",
+      "options": {
+        "auth": { "issuer": "https://authz.example.com/realms/lightbridge", "clientId": "opencode-cli", "scopes": ["openid", "offline_access"], "authFlow": "device_code" },
+        "gateway": { "providers": ["gateway"] },
+        "otel": { "endpoint": "http://localhost:4318" }
+      }
+    }
   ]
 }
 ```
@@ -252,36 +255,34 @@ Never run it on the same provider as `oauth2` (both set `Authorization`). Full r
 
 ## 🧱 Stacking the belt
 
-The plugins are decoupled at the import level but meet at the shared config object, so you can snap several onto one provider. Order matters for the `config` hooks — list them **oauth2 → models-info → ratelimit** so the bearer is in place before models-info fetches metadata with it:
+The plugins are decoupled at the import level, so you can snap several onto one provider. Order matters in one place — list `@vymalo/opencode-oauth2` **before** `@vymalo/opencode-models-info` (which inherits the bearer oauth2 stamps on the provider headers when it fetches metadata) and before `@vymalo/opencode-lightbridge` (which looks for the `settings.oauth2` marker oauth2 stamps). ratelimit, browser, devtools and otel have no ordering requirement:
 
 ```jsonc
 {
-  "plugin": [
+  "plugins": [
     "@vymalo/opencode-oauth2",
     "@vymalo/opencode-models-info",
     "@vymalo/opencode-ratelimit"
   ],
-  "provider": {
+  "providers": {
     "my-provider": {
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.example.com",
           "clientId": "opencode-client",
           "scopes": ["openid", "profile", "offline_access"]
         },
-        "meta": {
-          "modelsInfoUrl": "https://api.example.com/v1/models",
-          "rateLimit": { "maxWaitMs": 0, "maxRetries": 5 }
-        }
+        "modelsInfoUrl": "https://api.example.com/v1/models",
+        "rateLimit": { "maxWaitMs": 0, "maxRetries": 5 }
       }
     }
   }
 }
 ```
 
-On boot: oauth2 authenticates, discovers models from `/v1/models`, and stamps the access token onto the provider headers → models-info fetches `modelsInfoUrl` with that token and merges richer metadata → ratelimit wraps the fetch so every call honors the gateway's window. No `models` block to maintain, no `Authorization` header to manage — it's all automatic.
+On boot: oauth2 authenticates, discovers models from `/v1/models`, and stamps the access token onto the provider headers → models-info fetches `modelsInfoUrl` with that token and merges richer metadata → ratelimit gates every request on the gateway's window. No `models` block to maintain, no `Authorization` header to manage — it's all automatic.
 
 ## 📚 Documentation
 

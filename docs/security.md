@@ -23,24 +23,26 @@ you can reason about the blast radius before enabling one.
   renewable; entries missing a refresh token are evicted on load (machine flows excepted, since
   they re-acquire). See [token policy in the root README](../README.md#token-policy).
 - **Logging redacts secrets.** Token-like fields are redacted in the structured log stream.
-- **Bearer injection is per-request** via the `chat.headers` hook, so a stale config-time header
-  can never reach inference.
+- **Bearer injection is per-request** via the `model.request` session hook, so a stale
+  provider-record header can never reach inference. If no usable token can be produced the hook
+  dies and the request is refused locally (fail closed).
 
 ## `@vymalo/opencode-models-info` — metadata fetch
 
 - **Auth-agnostic.** It only reads/merges already-resolved config and fetches a metadata URL.
 - When paired with oauth2, it **inherits** the bearer oauth2 stamped onto the provider headers —
   it never acquires or stores credentials itself.
-- The metadata fetch honors `options.headers` + `meta.modelsInfoHeaders`. Only
-  `meta.modelsInfoHeaders` is part of the cache key — so if you switch tenants via
-  `meta.modelsInfoHeaders` the cache busts, but switching via the provider's `options.headers`
+- The metadata fetch honors the provider's `headers` + `settings.modelsInfoHeaders`. Only
+  `settings.modelsInfoHeaders` is part of the cache key — so if you switch tenants via
+  `settings.modelsInfoHeaders` the cache busts, but switching via the provider's `headers`
   alone does **not** bust it (those are sent on the fetch but not keyed). Put any tenant/auth
-  selector that must isolate cached metadata in `meta.modelsInfoHeaders`.
+  selector that must isolate cached metadata in `settings.modelsInfoHeaders`.
 
 ## `@vymalo/opencode-ratelimit` — response observation
 
-- **Never reads or sets `Authorization`.** It wraps `provider.options.fetch` purely to observe
-  response **status** and `x-ratelimit-*` **headers**, then throttles / backs off.
+- **Never reads or sets `Authorization`.** It uses the `http.request` / `http.response` / `retry`
+  session hooks purely to observe response **status** and `x-ratelimit-*` **headers**, then
+  throttles / backs off (it never reads the body).
 - **In-memory state only** — no disk cache, nothing persisted (a reset window is seconds; stale
   state would be worse than none).
 - Composes with any auth scheme because it's auth-independent.

@@ -23,9 +23,9 @@ pnpm --filter @vymalo/opencode-oauth2 build
 
 ## 2. Register It In OpenCode (Local Plugin Mode)
 
-Create a local OpenCode plugin file in your target project:
+Create a local OpenCode plugin **directory** in your target project (OpenCode v2 loads a local plugin from a directory with an `index.ts`; a single `.ts` file path is skipped with a warning):
 
-`<your-project>/.opencode/plugins/opencode-oauth2.ts`
+`<your-project>/.opencode/plugins/opencode-oauth2/index.ts`
 
 ```ts
 import LightbridgeOAuth2ModelSyncPlugin from "/absolute/path/to/opencode-oauth2/packages/opencode-oauth2/dist/index.js";
@@ -33,7 +33,7 @@ import LightbridgeOAuth2ModelSyncPlugin from "/absolute/path/to/opencode-oauth2/
 export default LightbridgeOAuth2ModelSyncPlugin;
 ```
 
-Use an absolute path to this repository on your machine.
+Use an absolute path to this repository on your machine. This layout follows the official [v1 to v2 plugin migration guide](https://opencode.ai/docs/build/plugins/migrate-v1); it has not been exercised against a real v2 host in this repo.
 
 ## 3. Configure OpenCode Provider
 
@@ -42,10 +42,11 @@ In your project `opencode.json`, add provider configuration:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "provider": {
+  "plugins": [{ "package": "./.opencode/plugins/opencode-oauth2" }],
+  "providers": {
     "example-ai": {
       "name": "Example AI",
-      "options": {
+      "settings": {
         "baseURL": "https://api.example.com/v1",
         "oauth2": {
           "issuer": "https://auth.example.com",
@@ -81,7 +82,7 @@ On first use of the configured provider:
 - browser opens for OAuth login
 - callback is handled locally by the plugin
 - model list is fetched and normalized
-- bearer token is injected on model requests
+- bearer token is injected on model requests (`session.hook("model.request")`)
 
 ## 5. Verify It Works
 
@@ -113,5 +114,5 @@ This workspace ships more **auth-agnostic** plugins you can stack on the same pr
 - [`@vymalo/opencode-ratelimit`](packages/opencode-ratelimit/README.md) — read the gateway's `x-ratelimit-*` headers and proactively throttle / back off on 429 (with reset-magnitude `tiers` and per-model `scope`).
 - [`@vymalo/opencode-otel`](packages/opencode-otel/README.md) — export what the session is doing and costing as OTLP traces, metrics and logs (real USD cost, all five token types, tool results, errors). Inert until an endpoint is configured. See [`docs/otel.md`](docs/otel.md).
 
-Recommended `plugin` order: `@vymalo/opencode-oauth2` → `@vymalo/opencode-models-info` → `@vymalo/opencode-ratelimit`. See the [root README](README.md#-stacking-the-belt) for a combined config example.
+Recommended `plugins` order: `@vymalo/opencode-oauth2` first, then `@vymalo/opencode-models-info` (it inherits the bearer oauth2 stamps on the provider headers) and `@vymalo/opencode-lightbridge` (it looks for the `settings.oauth2` marker oauth2 stamps); `@vymalo/opencode-ratelimit` has no ordering requirement. See the [root README](README.md#-stacking-the-belt) for a combined config example.
 

@@ -213,7 +213,7 @@ Coordinating the refresh itself — single-flight, the cross-process lock, and t
 - `session.hook("model.request")`: ensure a valid token and set `Authorization` on the request
 - `session.hook("http.response")`: repair Responses-API SSE streams for `responseApi` providers
 
-None of the five auth flows is an OpenCode v2 Integration method; they remain on the plugin-owned token runtime, see [ADR-0020](../../docs/adr/0020-oauth2-integration-domain.md). See [architecture.md](../../docs/architecture.md#the-two-hooks) for the behaviour of each step.
+None of the five auth flows is an OpenCode v2 Integration method; they remain on the plugin-owned token runtime, see [ADR-0020](../../docs/adr/0020-oauth2-integration-domain.md). See [architecture.md](../../docs/architecture.md#the-three-registrations) for the behaviour of each step.
 
 ## Relationship to `@vymalo/opencode-lightbridge`
 
