@@ -405,16 +405,23 @@ export interface CollectManagedProvidersOptions {
   settingsKeys: readonly string[];
 }
 
+/** The fields `upsertManagedProvider` writes; every one is already resolved by the caller. */
+export interface UpsertManagedProviderInput {
+  name: string;
+  package: string;
+  settings: Record<string, unknown>;
+}
+
 /**
  * Create or update one managed provider on the editor. A provider that does
  * not exist yet is added with `activation: "enabled"` (the gateway's bearer
  * is not a connection the host knows about, so `"auto"` could leave it
  * inactive); an existing one keeps its activation, id and other fields.
  */
-function upsertManagedProvider(
+export function upsertManagedProvider(
   editor: ProviderEditor,
   providerId: string,
-  next: { name: string; package: string; settings: Record<string, unknown> }
+  next: UpsertManagedProviderInput
 ): void {
   if (!editor.get(providerId)) {
     editor.add({

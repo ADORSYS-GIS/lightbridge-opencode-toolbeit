@@ -1,7 +1,7 @@
 import { hostname } from "node:os";
 import { join } from "node:path";
 
-import { Plugin, Provider } from "@opencode/plugin/effect";
+import { Plugin } from "@opencode/plugin/effect";
 import { defaultTextMapSetter } from "@opentelemetry/api";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import type { AuthServerConfig } from "@vymalo/opencode-auth-core/lib";
@@ -28,6 +28,7 @@ import {
   ProviderModelSyncEngine,
   resolveCachedBearer,
   resolveProviderPackage,
+  upsertManagedProvider,
   type ProviderEditor,
   type ProviderServerConfig
 } from "@vymalo/opencode-provider-sync/lib";
@@ -196,11 +197,9 @@ function asSettings(value: unknown): Record<string, unknown> {
 }
 
 /**
- * Create or update the one registered provider on the editor. A provider that
- * does not exist yet is added with `activation: "enabled"` (the gateway bearer
- * is injected per request, not held as a host connection, so `"auto"` could
- * leave it inactive); an existing one keeps its activation, id and other
- * fields.
+ * Resolve the one registered provider's name/package/settings from
+ * `register` and hand them to provider-sync's `upsertManagedProvider`, which
+ * owns the add-or-update-in-place behaviour.
  */
 function upsertRegisteredProvider(
   editor: ProviderEditor,
@@ -212,33 +211,15 @@ function upsertRegisteredProvider(
   // `Provider.Info.name` is required, so a provider declared without a name
   // reads back as its own id — treat that as "unset" and let `register.name` win.
   const existingName = existing && existing.name !== providerId ? existing.name : undefined;
-  const name = existingName ?? register.name ?? providerId;
-  const settings = applyResponsesApiSettings(
-    { ...asSettings(existing?.settings), baseURL: register.baseURL },
-    register.responseApi,
-    providerId,
-    logger
-  );
-  const pkg = resolveProviderPackage(register.responseApi);
-
-  if (!existing) {
-    editor.add({
-      info: {
-        id: Provider.ID.make(providerId),
-        name,
-        activation: "enabled",
-        package: pkg,
-        settings
-      },
-      models: []
-    });
-    return;
-  }
-
-  editor.update(providerId, (provider) => {
-    provider.package = pkg;
-    provider.name = name;
-    provider.settings = settings as typeof provider.settings;
+  upsertManagedProvider(editor, providerId, {
+    name: existingName ?? register.name ?? providerId,
+    package: resolveProviderPackage(register.responseApi),
+    settings: applyResponsesApiSettings(
+      { ...asSettings(existing?.settings), baseURL: register.baseURL },
+      register.responseApi,
+      providerId,
+      logger
+    )
   });
 }
 

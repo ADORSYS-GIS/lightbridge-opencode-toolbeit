@@ -88,6 +88,16 @@ describe("register module (ADR-0017 requirement 1)", () => {
     expect(first?.provider.activation).toBe("enabled");
     expect(settingsOf(first).baseURL).toBe(REGISTER.baseURL);
     expect(first?.models.size).toBe(0);
+    // The whole entry (not just spot fields) is what the shared upsert in
+    // provider-sync produces — this pins it against the pre-extraction output.
+    expect(first?.provider).toMatchObject({
+      id: PROVIDER_ID,
+      name: PROVIDER_ID,
+      activation: "enabled",
+      package: "aisdk:@ai-sdk/openai-compatible",
+      settings: { baseURL: REGISTER.baseURL }
+    });
+    expect(settingsOf(first)).toEqual({ baseURL: REGISTER.baseURL });
 
     await harness.settle();
     expect(harness.reloads()).toBe(1);

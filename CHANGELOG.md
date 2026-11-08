@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `code-index`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [Unreleased]
+
+### Changed
+
+- **provider-sync, lightbridge:** `upsertManagedProvider` (add the provider as `activation: "enabled"` if absent, otherwise update `package`/`name`/`settings` in place) is now exported from `@vymalo/opencode-provider-sync/lib` and is the single implementation; lightbridge's `register` module calls it instead of carrying its own copy. No behaviour change, and the shared root-token cache path is untouched. ([#128](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/128))
+
 ## [0.17.1] — 2026-09-18
 
 A dependency-only patch. No package's code changes in this release — it exists to carry a
