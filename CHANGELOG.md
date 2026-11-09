@@ -8,6 +8,10 @@ All sixteen workspace packages move on **one version line** and are released tog
 
 ## [Unreleased]
 
+### Added
+
+- **all packages:** A manually-dispatched `.github/workflows/dist-tag.yml` (`tag` default `opencode-v1`, `version` default `0.17.0`, `dry_run` default `true`) points one npm dist-tag at one existing version on all thirteen published packages over npm Trusted Publishing (OIDC), via `scripts/release/dist-tag.mjs`: a plan phase (inputs, version exists, OIDC exchange for every package; writes nothing) and an apply phase that reports every failing package at once. It is idempotent, refuses `latest`, never publishes or changes a version, and needs npm >= 11.21 (installed as `npm@^11`). **Prerequisite, once per package on npmjs.com:** a Trusted Publisher config for `dist-tag.yml` with "Allow npm dist-tag" enabled (off by default). The tag is `opencode-v1`, not `v1`: npm rejects any dist-tag that is a valid SemVer range. ([#148](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/148))
+
 ### Fixed
 
 - **release (publish workflow):** The publish skip path could not tell "this pipeline already published this version" from "someone published it some other way", so a hand-published version was reported as released and the package was silently skipped on every later run. `@vymalo/opencode-provider-sync` was hand-published at 0.17.0 on 2026-09-04 after run `33864587568` failed with `E404` (no Trusted Publisher existed for the new name); run `33865395921` then took the `npm view` skip, went green on the publish job, and every release until 0.18.0 skipped it again — it surfaced only when run `42573812315` first needed a genuinely new `provider-sync` version. A skip is now allowed only when the registry holds a provenance attestation built by this repo's `.github/workflows/publish.yml`; a version on npm without it fails the run. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
@@ -19,6 +23,7 @@ All sixteen workspace packages move on **one version line** and are released tog
 
 ### Documentation
 
+- **all packages:** "Staying on v1" in `docs/migration-v2.md` (and one line in the root README and the seven per-package "Migrating from v1" sections): `0.17.0` is the last v1-compatible release and stays on npm; install it by version or the `opencode-v1` tag; v1 is frozen, with no backported fixes. ([#148](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/148))
 - **release:** `CLAUDE.md` / `AGENTS.md` "Releasing" now documents the new-package bootstrap (manual first publish to reserve the name → attach a Trusted Publisher on npmjs.com → release) and the preflight / skip rules.
 - **release:** The `0.17.1` entry now notes that it never reached npm. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
 

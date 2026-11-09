@@ -119,6 +119,8 @@ MIT
 [ADR-0019](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/adr/0019-opencode-v2-cutover.md)
 for why there is no dual-support build.
 
+**Staying on v1:** `0.17.0` is the last v1-compatible release and stays on npm; install it with `@0.17.0` (or the `opencode-v1` dist-tag, once published). It is frozen: no fixes are backported, so this defers the upgrade, it does not avoid it. See [Staying on v1](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/migration-v2.md#staying-on-v1).
+
 | v1 | v2 |
 | --- | --- |
 | `"plugin": [["@vymalo/opencode-lightbridge", { ... }]]` | `"plugins": [{ "package": "@vymalo/opencode-lightbridge", "options": { ... } }]` |

@@ -8,6 +8,17 @@ Each package's README also has a "Migrating from v1" table with the package-spec
 
 > **How this page was checked.** Plugin-side claims are backed by `file:line` against the tree at the `0.18.0` cut. The host-level renames (`plugin` to `plugins`, and so on) are OpenCode's, not ours; they are confirmed against OpenCode's own [v1 migration guide](https://opencode.ai/docs/migrate-v1), not against code in this repo.
 
+## Staying on v1
+
+Not ready to move to OpenCode v2? You do not have to yet.
+
+- **`0.18.0` and later require an OpenCode v2 host.** They do not run on v1.
+- **`0.17.0` is the last v1-compatible release** of all thirteen published packages, and it stays on npm indefinitely. Its dependencies are pinned (`@opencode-ai/plugin` at `1.15.10`, and its sibling `@vymalo/*` packages at `0.17.0`), so it keeps resolving.
+- **Install it by version, which always works:** `npm i @vymalo/opencode-oauth2@0.17.0` (and the same for each other package you use, all at `0.17.0`). Once a maintainer has applied it, the `opencode-v1` dist-tag points at the same version: `npm i @vymalo/opencode-oauth2@opencode-v1`. The tag is a convenience, not a separate release.
+- **v1 is frozen.** No fixes, security or otherwise, will be backported to `0.17.x`. This is a way to defer the upgrade, not to avoid it. The tag is not called `v1` because npm rejects any dist-tag that parses as a SemVer range, and `v1` is one (`1.x`).
+
+Pin exact versions in your OpenCode config so a plain `@latest` never pulls `0.18.0` into a v1 host.
+
 ## 1. Config shape
 
 Three things moved, and they do **not** move uniformly across the plugins. Read your plugin's row in [section 2](#2-per-plugin-opt-in-keys) before assuming.

@@ -189,6 +189,14 @@ npm Trusted Publishing cannot create a package name; it can only be attached to 
 3. **Attach a Trusted Publisher on npmjs.com** (package → Settings → Trusted Publisher → GitHub Actions: this repo, workflow `publish.yml`).
 4. Only then release. Until step 3 is done the preflight fails for the package's *next* version (OIDC exchange 404), and the hand-published version itself is rejected as "no provenance" if the workflow meets it — by design; before this guard it was silently skipped forever, which is how `provider-sync` went two months unpublishable. Bump the version after attaching the publisher, then release as normal.
 
+### Dist-tags (`dist-tag.yml`)
+
+`.github/workflows/dist-tag.yml` (manual, `dry_run` defaults to `true`) points one dist-tag at one existing version on all thirteen packages, e.g. `gh workflow run dist-tag.yml -f dry_run=false` for the default `opencode-v1` -> `0.17.0`. It never publishes, never touches `latest`, and is idempotent. Things that will bite:
+
+- **Needs a per-package opt-in that CI cannot create.** npm Trusted Publishing authorizes dist-tag writes only when the trusted publisher config has **"Allow npm dist-tag"** enabled (off by default, independent of publish permission). npm matches the OIDC token to a config by **workflow filename**, so each of the thirteen packages needs a *second* Trusted Publisher config for `dist-tag.yml` (package -> Settings -> Trusted Publisher) with that option on; the `publish.yml` config does not cover it. Same shape as the bootstrap below: an invisible per-package npm setting. The workflow's plan phase fails on a missing config (OIDC exchange 404) with nothing changed; a missing "Allow npm dist-tag" can only be detected by the write, so `apply` reports all failing packages at once and a re-run is safe.
+- **npm >= 11.21.0 (or >= 12.2.0), not the Node-bundled npm.** The job installs `npm@^11` (not `@latest`); it uses `npm dist-tag`, the documented OIDC path, not `pnpm`.
+- **A tag cannot be called `v1`.** npm rejects any dist-tag that is a valid SemVer range, and `v1` is one. The v1 install target is `opencode-v1`.
+
 ### Changelog
 
 Every release is recorded in [`CHANGELOG.md`](CHANGELOG.md) — [Keep a Changelog](https://keepachangelog.com/) format, SemVer. All sixteen packages are kept on the same version line, there is a **single consolidated entry per version** (not per-package files); tag each line with the package it touches (`auth-core`, `core-otel`, `provider-sync`, `oauth2`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `repo-auth`, `lightbridge`) and link the PR. Group changes under `Added` / `Changed` / `Fixed` / `Documentation`. **Update the changelog in the same PR as the version bump** — the bump and its notes land together. Entries are attributed by `chore(release)` bump-commit boundaries (there are no git tags to anchor them).

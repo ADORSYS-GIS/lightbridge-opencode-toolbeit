@@ -1,0 +1,77 @@
+name: Dist-tag
+
+# Point one npm dist-tag at one EXISTING version for all thirteen published packages.
+# Manual only. It never publishes, never changes a version, and refuses to touch `latest`.
+# Default use: give OpenCode v1 users a stable install target —
+#   npm i @vymalo/opencode-oauth2@opencode-v1   (-> 0.17.0, the last v1-compatible release)
+# (The tag cannot be called `v1`: npm rejects any tag that is a valid SemVer range, and `v1` is
+# one — it parses as `1.x`. See docs/migration-v2.md.)
+#
+# PREREQUISITES (human, once, per package on npmjs.com — CI cannot do these):
+#   Package -> Settings -> Trusted Publisher -> add a GitHub Actions config for THIS repo with
+#   workflow `dist-tag.yml` and enable "Allow npm dist-tag" (off by default; independent of
+#   publish permission). The existing `publish.yml` config does not cover this workflow: npm
+#   matches the OIDC token to a config by workflow filename.
+# Until that is done the run fails by design, listing every package that still needs it.
+# See CLAUDE.md -> Releasing -> "Dist-tags".
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Dist-tag to set (cannot be `latest`, cannot look like a SemVer range such as `v1`)"
+        type: string
+        default: "opencode-v1"
+      version:
+        description: "Existing version every package's tag should point at"
+        type: string
+        default: "0.17.0"
+      dry_run:
+        description: "Validate and plan only; change no tag"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+# Never run two tag writes in parallel; queue rather than cancel.
+concurrency:
+  group: dist-tag
+  cancel-in-progress: false
+
+jobs:
+  dist-tag:
+    name: Set dist-tag
+    runs-on: ubuntu-latest
+    env:
+      # Passed via env, never interpolated into a shell command (inputs are user-controlled text).
+      DIST_TAG: ${{ inputs.tag }}
+      DIST_TAG_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          # No registry-url / NODE_AUTH_TOKEN: nothing here may carry a token. npm's own OIDC
+          # exchange must be the only credential in play.
+
+      - name: Install npm >= 11.21 (OIDC for dist-tag)
+        # Node 24 bundles an older npm. `npm dist-tag` only does the OIDC exchange from npm
+        # 11.21.0 (11.x) / 12.2.0 (12.x). Pinned to ^11, not @latest: the requirement is "at
+        # least 11.21", and a floating major already broke this repo once. We use npm, not
+        # pnpm, for the write because npm's OIDC dist-tag path is the documented one.
+        run: npm install -g 'npm@^11' && npm --version
+
+      - name: Plan (validate inputs, check every package, OIDC exchange — writes nothing)
+        run: node scripts/release/dist-tag.mjs plan
+
+      - name: Apply
+        if: ${{ inputs.dry_run != true }}
+        run: node scripts/release/dist-tag.mjs apply
+
+      - name: Dry-run notice
+        if: ${{ inputs.dry_run == true }}
+        run: echo "::notice::DRY RUN — planned ${DIST_TAG} -> ${DIST_TAG_VERSION}, changed no tag."
