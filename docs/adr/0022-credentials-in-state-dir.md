@@ -62,7 +62,7 @@ necessarily share the lock directory their own configuration implied.
 | Linux | `$XDG_STATE_HOME`, else `~/.local/state` — a **relative** `XDG_STATE_HOME` is ignored (the XDG Base Directory spec makes only absolute paths valid), as is an empty one |
 | Windows | `%LOCALAPPDATA%` — the same directory as the cache root, which Windows does not auto-purge, so the effective location is unchanged |
 
-`resolveCacheRoot()` is unchanged and keeps serving data that may be lost.
+`resolveCacheRoot()` keeps serving data that may be lost. For both roots, an env override (`XDG_STATE_HOME`, `XDG_CACHE_HOME`, `LOCALAPPDATA`) counts only when it is an absolute path on the target platform; an empty or relative value would resolve against the cwd and scatter per-directory credentials, so it falls back to the home-based default. (This also newly applies to `XDG_CACHE_HOME` and `LOCALAPPDATA` in the cache root; models-info keeps its own, unchanged cache resolver.)
 
 ### 2. Credentials move; caches stay
 
@@ -93,12 +93,33 @@ provider-sync persists a server's state as two records, merged back into the unc
   credential.
 
 Consequences of the split inside the engine: a token rotation writes **only** the credential (it no
-longer rewrites the model list); a sync writes both, credential first; a purged model cache costs one
+longer rewrites the model list); a sync writes **only** the model record (see "One writer per record" below); a purged model cache costs one
 network round trip and leaves the login intact; and lightbridge's root runtime — which also
 persisted `models: []` on a token write, a latent way to clobber oauth2's discovered models — now
 touches only the credential file. Cross-process adoption (ADR-0016) compares the credential's
 `updatedAt` and, when it adopts, re-reads the model record so the in-memory snapshot still moves as
 one.
+
+### 3a. One writer per record
+
+The credential is written **only** by `TokenRuntime` (`setCached`, under the refresh lock); the
+model record is written only by the sync path. There is no combined write — `saveServerState` was
+removed. Writing the credential from the sync path was a bug found in review of #152: `syncServer`
+held the token from before a slow `/models` fetch, so if another process (oauth2 and lightbridge
+share the file) rotated R1 → R2 meanwhile, the sync wrote R1 back with a *newer* stamp, every
+process adopted it, and the next refresh replayed R1 — RFC 6819 reuse detection then revokes the
+whole chain. (An earlier draft of this ADR called "credential written first" a safety property; it
+was the bug.) Two corollaries: the in-memory `updatedAt` is the *credential's* stamp and a model sync
+does not advance it, so memory is never left ahead of a token another process rotated; and a
+model-path call can never delete a credential.
+
+### 3b. A rejected refresh token is cleared
+
+When the IdP answers a refresh with a definitive 400 (`invalid_grant`), `TokenRuntime` removes the
+stored credential — under the refresh lock, and as a **compare-and-clear**: only if the store still
+holds the rejected refresh token (another process may have rotated it legitimately; a blind delete
+would log that process out). Network errors, 5xx and 401 never clear. Before, the dead token was
+stripped only from memory and replayed from the file on every call.
 
 ### 4. The lock sits beside the credential
 
