@@ -10,17 +10,17 @@ All sixteen workspace packages move on **one version line** and are released tog
 
 ### Fixed
 
-- **release (publish workflow):** The publish skip path could not tell "this pipeline already published this version" from "someone published it some other way", so a hand-published version was reported as released and the package was silently skipped on every later run. `@vymalo/opencode-provider-sync` was hand-published at 0.17.0 on 2026-09-04 after run `33864587568` failed with `E404` (no Trusted Publisher existed for the new name); run `33865395921` then took the `npm view` skip, went green on the publish job, and every release until 0.18.0 skipped it again — it surfaced only when run `42573812315` first needed a genuinely new `provider-sync` version. A skip is now allowed only when the registry holds a provenance attestation built by this repo's `.github/workflows/publish.yml`; a version on npm without it fails the run. (PR link below.)
-- **release (publish workflow):** A **preflight** now runs before anything is installed or pushed — in `dry_run` too — classifying all thirteen packages and running the npm Trusted Publishing OIDC token exchange (the call made before the `PUT`, without the `PUT`) for each one still to publish, so a missing Trusted Publisher fails the release up front with nothing published instead of partway (run `42573812315` left two of thirteen at the new version).
+- **release (publish workflow):** The publish skip path could not tell "this pipeline already published this version" from "someone published it some other way", so a hand-published version was reported as released and the package was silently skipped on every later run. `@vymalo/opencode-provider-sync` was hand-published at 0.17.0 on 2026-09-04 after run `33864587568` failed with `E404` (no Trusted Publisher existed for the new name); run `33865395921` then took the `npm view` skip, went green on the publish job, and every release until 0.18.0 skipped it again — it surfaced only when run `42573812315` first needed a genuinely new `provider-sync` version. A skip is now allowed only when the registry holds a provenance attestation built by this repo's `.github/workflows/publish.yml`; a version on npm without it fails the run. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
+- **release (publish workflow):** A **preflight** now runs before anything is installed or pushed — in `dry_run` too — classifying all thirteen packages and running the npm Trusted Publishing OIDC token exchange (the call made before the `PUT`, without the `PUT`) for each one still to publish, so a missing Trusted Publisher fails the release up front with nothing published instead of partway (run `42573812315` left two of thirteen at the new version). ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
 
 ### Changed
 
-- **release (publish workflow):** The thirteen near-identical pack and publish steps (and the tarball-verify list) are now one ordered loop over a single `PUBLISH_ORDER` in `scripts/release/publish-guard.mjs`, covered by Vitest (including a drift test against the workspace's non-private packages and their dependency order). The audit gate, tarball-content verification and `--provenance` are unchanged.
+- **release (publish workflow):** The thirteen near-identical pack and publish steps (and the tarball-verify list) are now one ordered loop over a single `PUBLISH_ORDER` in `scripts/release/publish-guard.mjs`, covered by Vitest (including a drift test against the workspace's non-private packages and their dependency order). The audit gate, tarball-content verification and `--provenance` are unchanged. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
 
 ### Documentation
 
 - **release:** `CLAUDE.md` / `AGENTS.md` "Releasing" now documents the new-package bootstrap (manual first publish to reserve the name → attach a Trusted Publisher on npmjs.com → release) and the preflight / skip rules.
-- **release:** The `0.17.1` entry now notes that it never reached npm.
+- **release:** The `0.17.1` entry now notes that it never reached npm. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
 
 ## [0.18.0] — 2026-11-09
 
