@@ -266,7 +266,7 @@ Source: [`src/scheduler.ts`](../packages/opencode-provider-sync/src/scheduler.ts
 
 - One scheduler per server. Interval is `server.syncIntervalMinutes * 60_000` ms; default 60 minutes.
 - Each tick calls `syncServer(serverId)` — same path warmup uses, but with no `interactive` override (so it inherits the default behavior of `ensureToken`).
-- **Failure handling.** `syncServer` catches every error, logs `sync_failed`, and **does not mutate runtime state**. The previously cached models stay available to OpenCode; the next interval retries.
+- **Failure handling.** `syncServer` catches every error, logs `sync_failed` (or, for the expected "needs an interactive login" refusal only, `sync_skipped_needs_login` at `warn`), and **does not mutate runtime state**. The previously cached models stay available to OpenCode; the next interval retries.
 - If a sync succeeds with a different model set, the cache is updated and OpenCode sees the new models on the next `provider.transform` pass (the engine calls `ctx.provider.reload()` when a sync changed the model set; a lazy sync triggered from `model.request` does the same).
 
 You don't normally want to disable the scheduler (there's no setting for it). If the upstream catalog is static, the scheduler is cheap — a `/models` GET every hour.
@@ -330,7 +330,8 @@ Anywhere the plugin logs a URL it ran (`tokenEndpoint`, `modelsUrl`), it goes th
 | `plugin_initialized` | first load | `serverCount` |
 | `sync_start` | every scheduler tick or warmup | `serverId`, `interactive` |
 | `sync_success` | model fetch succeeded | `modelCount`, `added`, `removed`, `renamed` |
-| `sync_failed` | any error during sync | `serverId`, `error` (string) |
+| `sync_failed` | a genuine error during sync (network, 5xx, malformed payload, failed refresh) — `error` level | `serverId`, `error` (string) |
+| `sync_skipped_needs_login` | non-interactive warmup/tick needed a browser or device-code login — expected, `warn` level, models stay empty until an interactive `opencode auth login` | `serverId`, `error` (string, includes the remedy) |
 | `sync_startup_failed` | warmup failed | `serverId`, `error` |
 | `oauth_login_started` | `authorization_code` PKCE began | `issuer`, `authorizationEndpoint` |
 | `oauth_login_success` / `oauth_login_failed` | PKCE result | |

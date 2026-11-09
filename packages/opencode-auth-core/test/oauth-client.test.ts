@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as browserModule from "../src/oauth/browser.js";
-import { OAuthClient } from "../src/oauth/client.js";
+import {
+  InteractiveAuthRequiredError,
+  OAuthClient,
+  isInteractiveAuthRequiredError
+} from "../src/oauth/client.js";
 import { createServerConfig, createSilentLogger } from "./helpers.js";
 
 function parseFormBody(init?: RequestInit): URLSearchParams {
@@ -588,6 +592,34 @@ describe("OAuthClient token lifecycle", () => {
       /interactive authentication required/
     );
     expect(fetchCalls).toBe(0);
+  });
+
+  it("throws a structurally identifiable InteractiveAuthRequiredError carrying the login remedy", async () => {
+    const client = new OAuthClient(createServerConfig({ authFlow: "device_code" }), {
+      logger: createSilentLogger(),
+      timeoutMs: 5000,
+      fetchImpl: async () => {
+        throw new Error("no fetch expected");
+      }
+    });
+
+    const error = await client.ensureToken(undefined, { interactive: false }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(InteractiveAuthRequiredError);
+    expect(isInteractiveAuthRequiredError(error)).toBe(true);
+    expect(error.code).toBe("interactive_auth_required");
+    expect(error.authFlow).toBe("device_code");
+    expect(error.message).toContain("opencode auth login");
+  });
+
+  it("isInteractiveAuthRequiredError is false for look-alikes and true for a cross-copy tagged error", () => {
+    expect(isInteractiveAuthRequiredError(new Error("interactive authentication required"))).toBe(
+      false
+    );
+    expect(isInteractiveAuthRequiredError("interactive authentication required")).toBe(false);
+    expect(isInteractiveAuthRequiredError(undefined)).toBe(false);
+    const foreign = Object.assign(new Error("x"), { code: "interactive_auth_required" });
+    expect(isInteractiveAuthRequiredError(foreign)).toBe(true);
   });
 
   it("refreshes when interactive=false and a refresh token is cached", async () => {

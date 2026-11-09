@@ -34,8 +34,11 @@ export {
 export type { TokenSet } from "./types.js";
 
 export {
+  INTERACTIVE_AUTH_REQUIRED_CODE,
+  InteractiveAuthRequiredError,
   OAuthClient,
   RefreshTokenError,
+  isInteractiveAuthRequiredError,
   toTokenSet
 } from "./oauth/client.js";
 

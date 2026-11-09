@@ -12,15 +12,15 @@ The plugin writes structured log records through the host's Effect logger into O
 
 ## `/models` doesn't list my provider after install
 
-**What's happening.** The plugin loaded fine, but the background warmup ran non-interactively (CI, no TTY, or `interactive: false`) and the cache was empty. `ensureToken` threw `interactive authentication required`; `syncServer` caught it, logged `sync_startup_failed`, and preserved the empty cache. The provider stays registered but with no models attached, so the model list is empty.
+**What's happening.** The plugin loaded fine, but the background warmup ran non-interactively (CI, no TTY, or `interactive: false`) and the cache was empty. `ensureToken` threw `interactive authentication required`; `syncServer` caught it, logged `sync_skipped_needs_login` (`warn`), and preserved the empty cache. The provider stays registered but with no models attached, so the model list is empty.
 
 **Look for.**
 
 - `plugin_initialized` — confirms the plugin loaded.
-- `sync_startup_failed` with `error: "interactive authentication required for server ..."` — confirms warmup gave up non-interactively.
+- `sync_skipped_needs_login` (`warn`) with `error: "interactive authentication required for server ... run \`opencode auth login\` interactively"` — confirms warmup gave up non-interactively. Older releases (<= 0.18.0) logged this as `ERROR sync_failed` on every cold start and scheduler tick; it was never a fault. A *different* `sync_failed` (still `error`) is a real failure.
 - Absence of `sync_success` and `model_discovery_*`.
 
-**Fix.** Trigger auth via an actual `opencode run` (the chat path calls `ensureToken` with `interactive: true` by default), or override warmup interactivity at start time. There's no plugin `options` knob for this — if you're embedding the runtime yourself, pass `interactive: true` to `start()`. From the OpenCode-hosted path, you can't override; just run a one-shot to bootstrap.
+**Fix.** Log in once interactively with `opencode auth login` (or trigger auth via an actual `opencode run`) (the chat path calls `ensureToken` with `interactive: true` by default), or override warmup interactivity at start time. There's no plugin `options` knob for this — if you're embedding the runtime yourself, pass `interactive: true` to `start()`. From the OpenCode-hosted path, you can't override; just run a one-shot to bootstrap.
 
 ```sh
 # Bootstrap auth interactively — completes the PKCE browser dance once,
