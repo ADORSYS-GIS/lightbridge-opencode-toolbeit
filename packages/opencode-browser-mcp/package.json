@@ -53,8 +53,9 @@
     "format:check": "biome format ."
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "@vymalo/opencode-browser": "workspace:*"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@vymalo/opencode-browser": "workspace:*",
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "vite": "^8.3.0",
