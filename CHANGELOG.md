@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
-## [Unreleased]
+## [0.18.1] — 2026-11-09
 
 ### Added
 
@@ -27,6 +27,7 @@ All sixteen workspace packages move on **one version line** and are released tog
 - **all packages:** "Staying on v1" in `docs/migration-v2.md` (and one line in the root README and the seven per-package "Migrating from v1" sections): `0.17.0` is the last v1-compatible release and stays on npm; install it by version or the `opencode-v1` tag; v1 is frozen, with no backported fixes. ([#148](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/148))
 - **release:** `CLAUDE.md` / `AGENTS.md` "Releasing" now documents the new-package bootstrap (manual first publish to reserve the name → attach a Trusted Publisher on npmjs.com → release) and the preflight / skip rules.
 - **release:** The `0.17.1` entry now notes that it never reached npm. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
+- **docs (ADR):** [ADR-0021](docs/adr/0021-needs-auth-via-connection-status.md) records that a needed sign-in will be reported to the host with the v2 integration domain's `connection.status` (`needs_auth`, carrying a message and an optional URL) instead of only reaching the host log. It **amends** [ADR-0020](docs/adr/0020-oauth2-integration-domain.md) rather than superseding it, because that notice is an annotation on an existing connection and transfers no credential, so ADR-0020's decision to keep all five auth flows on the plugin-owned `TokenRuntime` stands. A decision record only: no implementation in this release. ([#150](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/150))
 
 ## [0.18.0] — 2026-11-09
 
