@@ -5,6 +5,7 @@ import {
   readResponseBodyPreview as readResponsePreviewShared,
   scrubSecrets
 } from "./http-utils.js";
+import { writeTerminalPrompt } from "../terminal-prompt.js";
 import { generatePkcePair } from "./pkce.js";
 
 const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
@@ -50,6 +51,36 @@ export interface AcquireTokenViaDeviceCodeOptions {
    * Defaults to the neutral `"opencode"`.
    */
   serviceLabel?: string;
+  /**
+   * Invoked right after the device code is issued, before polling starts, so a
+   * host-visible surface can show the verification URL and user code (ADR-0021).
+   * Best-effort: a throw is swallowed and never fails the login.
+   */
+  onDeviceCode?: (info: DeviceCodeInfo) => void;
+  /**
+   * Invoked when the issued code can no longer be redeemed because it expired
+   * (the `expires_in` deadline passed, or the IdP answered `expired_token`), so
+   * a surface still pointing at its URL can drop it. Not called on success.
+   */
+  onDeviceCodeExpired?: (info: { serverId: string }) => void;
+}
+
+/** What a device-code flow hands a surface that wants to show it to the user. */
+export interface DeviceCodeInfo {
+  serverId: string;
+  verificationUri: string;
+  verificationUriComplete?: string;
+  userCode: string;
+  /** Epoch milliseconds at which the code stops working. */
+  expiresAt: number;
+}
+
+function safely(callback: (() => void) | undefined): void {
+  try {
+    callback?.();
+  } catch {
+    // A display hook must never fail the login it decorates.
+  }
 }
 
 interface DeviceAuthorizationResponse {
@@ -206,9 +237,22 @@ export async function acquireTokenViaDeviceCode(
   // rule (ADR-0014): the login URL/code is required UX, not a diagnostic —
   // hiding it would make a first-time login look like a hang. Mirrors the
   // browser-fallback pattern in client.ts.
+  // The write is guarded: under a v2 host stderr is a closed pipe, and a bare
+  // write there is an EPIPE the host logs as an unhandled-rejection ERROR.
   const serviceLabel = options.serviceLabel ?? "opencode";
-  process.stderr.write(
-    `\n[${serviceLabel}] device-code login for ${serverId}:\n  visit: ${verificationUri}\n  code:  ${deviceAuth.user_code}\n  (expires in ${deviceAuth.expires_in}s)\n\n`
+  writeTerminalPrompt(
+    `\n[${serviceLabel}] device-code login for ${serverId}:\n  visit: ${verificationUri}\n  code:  ${deviceAuth.user_code}\n  (expires in ${deviceAuth.expires_in}s)\n\n`,
+    logger
+  );
+
+  safely(() =>
+    options.onDeviceCode?.({
+      serverId,
+      verificationUri: deviceAuth.verification_uri,
+      verificationUriComplete: deviceAuth.verification_uri_complete,
+      userCode: deviceAuth.user_code,
+      expiresAt: now() + deviceAuth.expires_in * 1000
+    })
   );
 
   // Step 2: poll the token endpoint.
@@ -219,6 +263,7 @@ export async function acquireTokenViaDeviceCode(
   while (true) {
     const remainingMs = deadlineMs - now();
     if (remainingMs <= 0) {
+      safely(() => options.onDeviceCodeExpired?.({ serverId }));
       throw new Error("device code expired before authorization completed");
     }
 
@@ -326,6 +371,7 @@ export async function acquireTokenViaDeviceCode(
       }
 
       if (errorCode === "expired_token") {
+        safely(() => options.onDeviceCodeExpired?.({ serverId }));
         throw new Error("device code expired before user completed authorization");
       }
 

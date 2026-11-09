@@ -42,8 +42,10 @@ export type {
 export {
   applyResponsesApiSettings,
   collectManagedProviders,
+  createIntegrationSignInReporter,
   discoveredModelPlaceholder,
   mergeDiscoveredModels,
+  noteProviderIntegrations,
   parseOAuthExtension,
   parsePluginOptionsServers,
   propagateCachedBearer,
@@ -53,6 +55,7 @@ export {
   upsertManagedProvider,
   type CollectManagedProvidersOptions,
   type HasProviderSettings,
+  type IntegrationSignInReporterInput,
   type ManagedProviders,
   type ModelInfo,
   type ProviderEditor,

@@ -102,6 +102,10 @@ export interface Harness {
   close(): Promise<void>;
   /** Invoke a session hook and wait for it; rejects with the hook's defect, if any. */
   call(name: string, event: Record<string, unknown>): Promise<void>;
+  /** Every `connection.status` call the plugin made, in order. */
+  statusCalls: StatusCall[];
+  /** Resolves once the engine's queued sign-in notices have all been delivered. */
+  signInSettled(): Promise<void>;
 }
 
 /**
@@ -112,7 +116,24 @@ export function stateDirFor(cacheDir: string): string {
   return `${cacheDir}-state`;
 }
 
+/** What the fake `ctx.integration` should report (ADR-0021). */
+export interface FakeIntegration {
+  /** Ids returned to `integration.transform`. */
+  integrations?: string[];
+  /** `connection.active`; defaults to a connection for every integration. */
+  active?: (integrationID: string) => unknown;
+  /** Make `connection.status` die, as a broken host would. */
+  statusFails?: boolean;
+}
+
+export interface StatusCall {
+  integrationID: string;
+  connection: unknown;
+  status: { status: string; message: string; url?: string } | undefined;
+}
+
 export interface StartOptions {
+  integration?: FakeIntegration;
   options?: Record<string, unknown>;
   sources?: SourceProvider[];
   cacheDir?: string;
@@ -148,7 +169,27 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
     transformCb?.(last.editor);
   };
 
+  const statusCalls: StatusCall[] = [];
+  const fake = start.integration ?? {};
+  const integration = {
+    transform: (cb: (editor: unknown) => void) => {
+      cb({ list: () => (fake.integrations ?? []).map((id) => ({ id, name: id })) });
+      return registration;
+    },
+    connection: {
+      active: (id: string) =>
+        Effect.sync(() => (fake.active ? fake.active(id) : { type: "env", name: `conn-of-${id}` })),
+      status: (input: StatusCall) =>
+        fake.statusFails
+          ? Effect.die(new Error("host status exploded"))
+          : Effect.sync(() => {
+              statusCalls.push(input);
+            })
+    }
+  };
+
   const ctx = {
+    integration,
     options: start.options ?? {},
     provider: {
       transform: (cb: (editor: unknown) => void) => {
@@ -185,6 +226,10 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
     },
     async close() {
       await Effect.runPromise(Scope.close(scope, Exit.void));
+    },
+    statusCalls,
+    async signInSettled() {
+      await (handle as OAuth2RuntimeHandle).runtime()?.signInSettled();
     },
     async call(name, event) {
       const hook = hooks.get(name);

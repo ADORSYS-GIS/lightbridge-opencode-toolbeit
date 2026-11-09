@@ -1,7 +1,10 @@
 import { Plugin } from "@opencode/plugin/effect";
+import { IntegrationIndex } from "@vymalo/opencode-auth-core/lib";
 import {
   collectManagedProviders,
+  createIntegrationSignInReporter,
   mergeDiscoveredModels,
+  noteProviderIntegrations,
   type ProviderServerConfigInput,
   type ProviderEditor,
   propagateCachedBearer,
@@ -139,6 +142,18 @@ export function createOpencodeOauth2Plugin(
 
       const reloadProviders = (): Promise<void> => runInHost(hostContext, ctx.provider.reload());
 
+      // ADR-0021: a needed sign-in is reported on the host connection. The
+      // engine sees only the plain `SignInReporter`; this adapter is the one
+      // place `ctx.integration` is touched, and it runs inside the captured host
+      // context. Best-effort: no integration means no notice.
+      const integrationIndex = new IntegrationIndex();
+      const signInReporter = createIntegrationSignInReporter({
+        integration: ctx.integration,
+        index: integrationIndex,
+        run: (effect) => runInHost(hostContext, effect),
+        logger
+      });
+
       const safeModels = (providerId: string): Array<{ id: string; displayName: string }> => {
         try {
           return runtime?.getServerModels(providerId) ?? [];
@@ -191,7 +206,8 @@ export function createOpencodeOauth2Plugin(
           fetchImpl: factoryOptions.fetchImpl,
           onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
           cacheDir: factoryOptions.cacheDir,
-          stateDir: factoryOptions.stateDir
+          stateDir: factoryOptions.stateDir,
+          signInReporter
         });
         await next.initialize();
         runtime = next;
@@ -258,6 +274,7 @@ export function createOpencodeOauth2Plugin(
           servers = [];
         }
 
+        noteProviderIntegrations(editor, integrationIndex);
         managedIds = new Set(servers.map((server) => server.id));
         responseApiIds = new Set(
           servers.filter((server) => server.responseApi).map((server) => server.id)
@@ -283,6 +300,14 @@ export function createOpencodeOauth2Plugin(
 
         scheduleApply(servers);
       });
+
+      if (ctx.integration) {
+        // Fallback for ADR-0021's integration lookup: a read-only listing, used
+        // only when the host did not stamp `integrationID` on the provider.
+        yield* ctx.integration.transform((editor) => {
+          integrationIndex.noteIntegrations(editor.list().map((integration) => integration.id));
+        });
+      }
 
       yield* ctx.session.hook("model.request", (event) =>
         Effect.tryPromise({

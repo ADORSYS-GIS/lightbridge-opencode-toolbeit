@@ -56,8 +56,21 @@ export {
 
 export {
   acquireTokenViaDeviceCode,
-  type AcquireTokenViaDeviceCodeOptions
+  type AcquireTokenViaDeviceCodeOptions,
+  type DeviceCodeInfo
 } from "./oauth/device-code.js";
+
+export {
+  IntegrationIndex,
+  SignInNotifier,
+  createConnectionSignInReporter,
+  type ConnectionNeedsAuthStatus,
+  type ConnectionStatusPort,
+  type SignInNotice,
+  type SignInReporter
+} from "./sign-in-notice.js";
+
+export { writeTerminalPrompt, type PromptStream } from "./terminal-prompt.js";
 
 export {
   discoverOidcMetadata,

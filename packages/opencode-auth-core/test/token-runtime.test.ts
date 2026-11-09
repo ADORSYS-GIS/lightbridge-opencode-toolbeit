@@ -251,3 +251,87 @@ describe("TokenRuntime", () => {
     expect(leftovers).toEqual([]);
   });
 });
+
+describe("TokenRuntime onTokenObtained (ADR-0021)", () => {
+  const setup = async (fetchImpl: typeof fetch, onTokenObtained: () => void) => {
+    const stateDir = await mkdtemp(join(tmpdir(), "auth-core-obtained-"));
+    const runtime = new TokenRuntime(
+      "id-1",
+      createServerConfig({ authFlow: "client_credentials", clientSecret: "s" }),
+      { logger: createSilentLogger(), fetchImpl, stateDir, onTokenObtained }
+    );
+    return { runtime, store: new FileCacheStore(stateDir) };
+  };
+  const valid = { accessToken: "a", tokenType: "Bearer", expiresAt: Date.now() + 60_000 };
+
+  it("fires for a cached hit", async () => {
+    const hook = vi.fn();
+    const { runtime, store } = await setup(
+      (async () => makeJsonResponse({})) as typeof fetch,
+      hook
+    );
+    await store.save("id-1", valid);
+
+    await runtime.ensure();
+
+    expect(hook).toHaveBeenCalledOnce();
+  });
+
+  it("fires after a fresh acquisition", async () => {
+    const hook = vi.fn();
+    const { runtime } = await setup(
+      (async () =>
+        makeJsonResponse({
+          access_token: "fresh",
+          token_type: "Bearer",
+          expires_in: 3600
+        })) as typeof fetch,
+      hook
+    );
+
+    await expect(runtime.ensure()).resolves.toMatchObject({ accessToken: "fresh" });
+
+    expect(hook).toHaveBeenCalledOnce();
+  });
+
+  it("fires after refresh()", async () => {
+    const hook = vi.fn();
+    const { runtime } = await setup(
+      (async () =>
+        makeJsonResponse({
+          access_token: "again",
+          token_type: "Bearer",
+          expires_in: 3600
+        })) as typeof fetch,
+      hook
+    );
+
+    await runtime.refresh();
+
+    expect(hook).toHaveBeenCalledOnce();
+  });
+
+  it("never fires when the token could not be obtained", async () => {
+    const hook = vi.fn();
+    const { runtime } = await setup(
+      (async () => makeJsonResponse({ error: "server_error" }, false, 500)) as typeof fetch,
+      hook
+    );
+
+    await expect(runtime.ensure()).rejects.toThrow();
+
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it("a throwing hook does not fail the token path", async () => {
+    const { runtime, store } = await setup(
+      (async () => makeJsonResponse({})) as typeof fetch,
+      () => {
+        throw new Error("surface exploded");
+      }
+    );
+    await store.save("id-1", valid);
+
+    await expect(runtime.ensure()).resolves.toMatchObject({ accessToken: "a" });
+  });
+});

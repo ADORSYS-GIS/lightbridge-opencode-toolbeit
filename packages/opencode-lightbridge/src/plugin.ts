@@ -4,6 +4,7 @@ import {
   createJsonConsoleLogger,
   DEFAULT_TOKEN_EXPIRY_SKEW_MS,
   resolveStateRoot,
+  type SignInNotifier,
   TokenRuntime,
   type AuthServerConfig,
   type Logger,
@@ -63,6 +64,11 @@ export interface LightbridgeRuntimeOptions {
    * IdP access token directly as the bearer. Defaults to `false` (ADR-0017).
    */
   exchange?: boolean;
+  /**
+   * Reports a needed sign-in on the host connection (ADR-0021). Shared with the
+   * `register` engine so a login through either clears the other's notice.
+   */
+  signInNotifier?: SignInNotifier;
 }
 
 /**
@@ -136,6 +142,7 @@ function buildSharedRootTokenRuntime(
     onAuthorizationUrl: options.onAuthorizationUrl,
     tokenExpirySkewMs: options.tokenExpirySkewMs,
     serviceLabel: "opencode-lightbridge",
+    ...(options.signInNotifier ? options.signInNotifier.hooksFor(serverId, serverId) : {}),
     stateDir: credentials.directory,
     getCached: async () => (await credentials.load(serverId))?.token,
     setCached: async (token) => {

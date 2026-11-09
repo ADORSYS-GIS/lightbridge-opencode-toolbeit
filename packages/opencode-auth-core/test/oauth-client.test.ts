@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as browserModule from "../src/oauth/browser.js";
+import { resetTerminalPromptLatch } from "../src/terminal-prompt.js";
 import {
   InteractiveAuthRequiredError,
   OAuthClient,
@@ -1008,6 +1009,56 @@ describe("ADR-0014: the browser-fallback stderr prompt carve-out is labeled, not
 
     expect(written).toContain("[opencode] open this URL to authenticate");
     await expect(tokenPromise).resolves.toMatchObject({ accessToken: "fallback-access" });
+  });
+
+  it("a dead stderr (EPIPE) on the browser-fallback prompt leaves nothing unhandled and login completes", async () => {
+    resetTerminalPromptLatch();
+    process.stderr.removeAllListeners("error");
+    vi.spyOn(browserModule, "openExternalUrl").mockRejectedValue(new Error("no display"));
+    let unhandled = 0;
+    const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(((
+      _chunk: unknown,
+      callback?: (error?: Error | null) => void
+    ) => {
+      if (!String(_chunk).includes("[opencode]")) {
+        return true;
+      }
+      process.nextTick(() => {
+        callback?.(epipe);
+        process.nextTick(() => {
+          if (process.stderr.listenerCount("error") === 0) {
+            unhandled += 1;
+          } else {
+            process.stderr.emit("error", epipe);
+          }
+        });
+      });
+      return false;
+    }) as typeof process.stderr.write);
+
+    const client = new OAuthClient(createServerConfig(), {
+      logger: createSilentLogger(),
+      timeoutMs: 5000,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            access_token: "fallback-access",
+            refresh_token: "fallback-refresh",
+            token_type: "Bearer",
+            expires_in: 3600
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+    });
+
+    const tokenPromise = client.ensureToken();
+    await vi.waitFor(() => expect(write).toHaveBeenCalled());
+    await completeViaStderrPrompt(write);
+
+    await expect(tokenPromise).resolves.toMatchObject({ accessToken: "fallback-access" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(unhandled).toBe(0);
   });
 
   it("uses the caller-supplied serviceLabel instead of a hardcoded plugin name", async () => {

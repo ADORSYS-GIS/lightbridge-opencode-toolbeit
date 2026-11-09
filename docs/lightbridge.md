@@ -127,6 +127,20 @@ than sending it with no `Authorization` header. Both modules keep re-trying on t
 cadence (`gateway` on the next request, `otel` on the next batch flush), so a later successful login
 resumes both without a restart.
 
+### Sign-in visibility (ADR-0021)
+
+A needed sign-in is also reported on the host connection of the provider's integration
+(`ctx.integration.connection.status`, `needs_auth`), so a user working in the chat page or TUI sees it
+without reading a log. One notifier is shared by the `register` engine and the gateway/otel root runtime,
+so a login completed through either clears a notice the other raised. The notice is message-only when a
+sign-in is needed, carries the verification URL and user code while a device code is in flight, drops the
+URL if the code expires, and is cleared on the next successful token acquisition or refresh. The
+integration is found from `Provider.Info.integrationID` of the `register` provider or of any provider
+listed in `gateway.providers` (the runtime id `auth.id` can differ from those). Without an integration or
+connection (a provider configured by hand) nothing is reported and `sign_in_notice_skipped` is logged once
+at `debug`. Rendering on a real host is not yet verified; see
+[ADR-0021](adr/0021-needs-auth-via-connection-status.md).
+
 ## Module wiring (v2)
 
 ```mermaid

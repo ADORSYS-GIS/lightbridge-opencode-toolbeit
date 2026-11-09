@@ -129,18 +129,65 @@ flows on the plugin-owned `TokenRuntime`, no `ctx.integration` method registered
 - **No new dependency.** `ctx.integration` is already part of the v2 plugin context; this adds calls,
   not a surface.
 
-## Unverified without a running v2 host
+## Verified since
+
+Resolved by implementing this ADR against the `@opencode/plugin@2.2.6` / `@opencode/schema@2.2.6` /
+`@opencode/client@2.2.6` type definitions. **These are type-level facts**, not observations of a running host;
+what a running host does is still listed under *Unverified* below.
+
+- **Which `integrationID` a provider belongs to.** `Provider.Info` carries an optional `integrationID`
+  (`@opencode/schema` `dist/provider.d.ts:388`, branded `Integration.ID`), visible to a plugin in
+  `ctx.provider.transform` as `record.provider.integrationID`. The plugin records it per provider id and
+  looks the managed provider up there; it never derives an integration id from a well-known URL or origin,
+  because no type exposes that mapping. The fallback is `ctx.integration.transform`'s
+  `IntegrationEditor.list()` (`{ id, name }[]`), used only for an integration whose id equals the
+  provider id. `IntegrationEditor` has no way to find an integration by origin. Lightbridge's runtime id
+  (`auth.id`) may differ from its gateway providers' ids, so it also borrows the `integrationID` of any
+  provider listed in `gateway.providers`.
+- **What `connection.active` returns.** `Effect<ConnectionInfo | undefined>`, where `ConnectionInfo` is
+  `{ type: "credential"; id; label; method: "key" | "oauth" | "external"; status? } | { type: "env";
+  name; status? }` (`@opencode/client` `dist/promise/generated/types.d.ts:1054-1065`). The type allows
+  a connection for a command-/env-backed well-known integration; whether the host *returns* one is the gate
+  below.
+- **`connection.status` accepts a status without a credential change.** Its input is
+  `{ integrationID, connection, status: Connection.Status | undefined }`, and
+  `Connection.Status.url` is optional, so the *message-only* form this ADR specifies is a valid value.
+- **The seam exists in plain TypeScript.** `auth-core` now exports a `SignInReporter` interface, a
+  `SignInNotifier` (when to raise and clear), and `createConnectionSignInReporter`; the engine and
+  `auth-core` import nothing from the plugin API (enforced by
+  `packages/opencode-provider-sync/test/layering.test.ts`). Only the plugin adapters touch
+  `ctx.integration`, inside the captured host context. The device-code values were exposed by adding
+  optional `onDeviceCode` / `onDeviceCodeExpired` callbacks to `acquireTokenViaDeviceCode` and an
+  `onTokenObtained` callback to `TokenRuntime`; `DeviceAuthorizationResponse` is still unexported.
+- **A stale notice is cleared.** `TokenRuntime.onTokenObtained` fires after every successful
+  `ensure` / `refresh` (cached hit, refresh or login) and never on failure; the notifier clears only a
+  notice it raised itself.
+- **stderr no longer produces an unhandled error under a closed pipe.** Both ADR-0014 prompts now go
+  through `writeTerminalPrompt`, which attaches a short-lived `'error'` listener (it must outlive the
+  write callback, because Node emits the event on a later tick), swallows `EPIPE`, and logs once at
+  `debug`. The prompt still reaches a live stderr.
+
+## Still unverified without a running v2 host
 
 - **Whether `connection.active(integrationID)` returns a `ConnectionInfo` for a well-known
   integration whose `auth` is command- or env-based.** This is the gate: if it returns `undefined`,
   nothing in this ADR is reachable and it must be superseded rather than quietly no-op.
 - Whether the TUI and GUI render `needs_auth` on a non-OAuth connection, how prominently, and what
   they do with `url` (link, copy, or text).
-- Which `integrationID` a well-known origin receives, and how a plugin maps its `auth.id` or
-  provider id onto it.
+- Whether the host actually **stamps `Provider.Info.integrationID`** on a provider that comes from a
+  well-known document, and what id it uses. The implementation reads that field and falls back to an
+  integration whose id equals the provider id; it logs the known integration ids once at `debug`
+  (`sign_in_notice_skipped`, `reason: no_integration`) so a mismatch is diagnosable from the host log.
 - Whether `connection.status` may be called from inside a `session.hook`, or only within a transform
-  or the plugin's own scope.
+  or the plugin's own scope. The calls are made from detached promise continuations via `runInHost`
+  (the captured host context), never from the hook's own fiber, but nothing here proves the host accepts
+  that.
 - Whether the host itself ever sets, clears or overwrites a plugin-set status.
+- Whether a status set by a plugin survives a host restart. The notifier only clears a notice it raised
+  in the same process, so a status persisted by the host across a restart would outlive the login that
+  fixed it.
+- Whether a `url` that is a device-code verification page, with a user code only in `message`, is
+  rendered usably (the code is in the message precisely so it does not depend on `url` handling).
 
 ## Alternatives considered
 

@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [Unreleased]
+
+> Rendering of the new `needs_auth` notice in the OpenCode TUI and chat page is **not verified yet** on a real host; the tests exercise the plugin against fakes of `ctx.integration`. See [ADR-0021](docs/adr/0021-needs-auth-via-connection-status.md).
+
+### Added
+
+- **auth-core, provider-sync, oauth2, lightbridge:** A needed sign-in is now reported to the host with `ctx.integration.connection.status` (`needs_auth`, [ADR-0021](docs/adr/0021-needs-auth-via-connection-status.md)). Raised message-only where `sync_skipped_needs_login` is logged, with the verification URL and user code the moment a device code is issued, and message-only again when the code expires; cleared on the next successful token acquisition or refresh. Best-effort: no integration or connection means no notice (logged once at `debug`), and a failing or hung host call never fails a sync or a request.
+- **auth-core:** `AcquireTokenViaDeviceCodeOptions.onDeviceCode` / `onDeviceCodeExpired`, `TokenRuntimeOptions.onDeviceCode` / `onDeviceCodeExpired` / `onTokenObtained`, and the plain-TS `SignInReporter`, `SignInNotifier`, `IntegrationIndex` and `createConnectionSignInReporter` (no plugin-API import, enforced by a source-scan test).
+- **provider-sync:** `ProviderModelSyncEngineOptions.signInReporter` / `signInNotifier`, and the adapter helpers `createIntegrationSignInReporter` and `noteProviderIntegrations`.
+
+### Fixed
+
+- **auth-core:** The device-code and browser-fallback stderr prompts could not be written under a v2 host, whose stderr is a closed pipe; each attempt logged `ERROR "unhandled rejection" ... EPIPE` at the instant the code was issued. Both now go through `writeTerminalPrompt`, which swallows the failure and logs once at `debug`; the prompt still reaches a live stderr ([ADR-0014](docs/adr/0014-suite-wide-no-terminal-mirror.md) carve-out kept).
+
 ## [0.19.0] — 2026-11-09
 
 > **⚠️ One-time re-login required after upgrading.** OAuth credentials moved from the OS **cache** directory to the durable **state** directory, and there is **no migration and no fallback read** of the old location ([ADR-0022](docs/adr/0022-credentials-in-state-dir.md)). Every user of `oauth2`, `lightbridge` and `repo-auth` signs in **once** after the upgrade. The old files left under `~/Library/Caches/opencode-oauth2` (and `opencode-lightbridge`, `opencode-repo-auth`, `opencode-auth-core`) are inert and can be deleted.

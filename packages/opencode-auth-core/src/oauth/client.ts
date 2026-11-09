@@ -3,7 +3,8 @@ import { DEFAULT_TOKEN_EXPIRY_SKEW_MS } from "../config.js";
 import type { Logger } from "../logging.js";
 import type { TokenSet } from "../types.js";
 import { openExternalUrl } from "./browser.js";
-import { acquireTokenViaDeviceCode } from "./device-code.js";
+import { writeTerminalPrompt } from "../terminal-prompt.js";
+import { acquireTokenViaDeviceCode, type AcquireTokenViaDeviceCodeOptions } from "./device-code.js";
 import { discoverOidcMetadata } from "./discovery.js";
 import { readResponseBodyPreview, redactUrl, scrubSecrets } from "./http-utils.js";
 import { startLocalCallbackServer } from "./local-callback.js";
@@ -25,6 +26,9 @@ interface OAuthClientOptions {
    * Defaults to the neutral `"opencode"`.
    */
   serviceLabel?: string;
+  /** Device-code display hooks (ADR-0021); see {@link AcquireTokenViaDeviceCodeOptions}. */
+  onDeviceCode?: AcquireTokenViaDeviceCodeOptions["onDeviceCode"];
+  onDeviceCodeExpired?: AcquireTokenViaDeviceCodeOptions["onDeviceCodeExpired"];
 }
 
 interface ResolvedEndpoints {
@@ -162,6 +166,8 @@ export class OAuthClient {
   private readonly onAuthorizationUrl?: (url: string) => Promise<void> | void;
   private readonly tokenExpirySkewMs: number;
   private readonly serviceLabel: string;
+  private readonly onDeviceCode?: OAuthClientOptions["onDeviceCode"];
+  private readonly onDeviceCodeExpired?: OAuthClientOptions["onDeviceCodeExpired"];
 
   constructor(
     private readonly server: AuthServerConfig,
@@ -172,6 +178,8 @@ export class OAuthClient {
     this.timeoutMs = options.timeoutMs;
     this.onAuthorizationUrl = options.onAuthorizationUrl;
     this.serviceLabel = options.serviceLabel ?? "opencode";
+    this.onDeviceCode = options.onDeviceCode;
+    this.onDeviceCodeExpired = options.onDeviceCodeExpired;
     this.tokenExpirySkewMs =
       typeof options.tokenExpirySkewMs === "number" &&
       Number.isFinite(options.tokenExpirySkewMs) &&
@@ -605,7 +613,9 @@ export class OAuthClient {
       fetchImpl: this.fetchImpl,
       timeoutMs: this.timeoutMs,
       pkce: this.server.pkce,
-      serviceLabel: this.serviceLabel
+      serviceLabel: this.serviceLabel,
+      onDeviceCode: this.onDeviceCode,
+      onDeviceCodeExpired: this.onDeviceCodeExpired
     });
   }
 
@@ -662,8 +672,9 @@ export class OAuthClient {
           // which would enable login-CSRF via a forged localhost callback. This
           // is the one deliberate carve-out from the suite's no-TUI-output rule
           // (ADR-0014): the login URL is required UX, not a diagnostic.
-          process.stderr.write(
-            `\n[${this.serviceLabel}] open this URL to authenticate (${this.server.id}):\n${authorizeUrl.toString()}\n\n`
+          writeTerminalPrompt(
+            `\n[${this.serviceLabel}] open this URL to authenticate (${this.server.id}):\n${authorizeUrl.toString()}\n\n`,
+            this.logger
           );
         }
       }

@@ -8,6 +8,7 @@ import { DEFAULT_LOCK_STALE_MS, acquireFileLock } from "./lock.js";
 import type { Logger } from "./logging.js";
 import { createJsonConsoleLogger } from "./logging.js";
 import { OAuthClient, RefreshTokenError } from "./oauth/client.js";
+import type { AcquireTokenViaDeviceCodeOptions } from "./oauth/device-code.js";
 import type { TokenSet } from "./types.js";
 
 export interface TokenRuntimeOptions {
@@ -73,6 +74,21 @@ export interface TokenRuntimeOptions {
    * `"opencode"`.
    */
   serviceLabel?: string;
+  /**
+   * Fired right after a device code is issued (ADR-0021), so a host-visible
+   * surface can show the verification URL and user code. Best-effort.
+   */
+  onDeviceCode?: AcquireTokenViaDeviceCodeOptions["onDeviceCode"];
+  /** Fired when an issued device code expires unredeemed (ADR-0021). */
+  onDeviceCodeExpired?: AcquireTokenViaDeviceCodeOptions["onDeviceCodeExpired"];
+  /**
+   * Fired after `ensure` / `refresh` produced a usable identity-root token — a
+   * cached hit, a refresh or a fresh login alike (ADR-0021: "clear the notice on
+   * the next successful token acquisition"). NOT fired on failure. Called on
+   * every successful `ensure`, so it must be cheap and idempotent; a throw is
+   * swallowed.
+   */
+  onTokenObtained?: (info: { identity: string }) => void;
 }
 
 /**
@@ -100,6 +116,7 @@ export class TokenRuntime {
    */
   private inFlight?: Promise<TokenSet>;
   private lockUnwritableLogged = false;
+  private readonly onTokenObtained?: (info: { identity: string }) => void;
 
   constructor(identity: string, auth: AuthServerConfig, options: TokenRuntimeOptions = {}) {
     this.identity = identity;
@@ -108,6 +125,7 @@ export class TokenRuntime {
     this.getCachedOverride = options.getCached;
     this.setCachedOverride = options.setCached;
     this.clearCachedOverride = options.clearCached;
+    this.onTokenObtained = options.onTokenObtained;
 
     // `cacheDir` / `cacheNamespace` were renamed `stateDir` / `stateNamespace`
     // (ADR-0022). A JS caller still passing them would be silently ignored, so
@@ -135,7 +153,9 @@ export class TokenRuntime {
       timeoutMs: options.timeoutMs ?? 15_000,
       onAuthorizationUrl: options.onAuthorizationUrl,
       tokenExpirySkewMs: options.tokenExpirySkewMs,
-      serviceLabel: options.serviceLabel
+      serviceLabel: options.serviceLabel,
+      onDeviceCode: options.onDeviceCode,
+      onDeviceCodeExpired: options.onDeviceCodeExpired
     });
   }
 
@@ -194,6 +214,20 @@ export class TokenRuntime {
    * The valid-cached-token fast path takes no lock at all.
    */
   async ensure(options: { interactive?: boolean } = {}): Promise<TokenSet> {
+    const token = await this.ensureInner(options);
+    this.notifyTokenObtained();
+    return token;
+  }
+
+  private notifyTokenObtained(): void {
+    try {
+      this.onTokenObtained?.({ identity: this.identity });
+    } catch {
+      // A display hook must never fail the token path it decorates.
+    }
+  }
+
+  private async ensureInner(options: { interactive?: boolean }): Promise<TokenSet> {
     const cached = await this.getCached();
     if (this.client.isTokenValid(cached)) {
       return cached as TokenSet;
@@ -402,6 +436,7 @@ export class TokenRuntime {
   async refresh(options: { interactive?: boolean } = {}): Promise<TokenSet> {
     const token = await this.client.ensureToken(undefined, { interactive: options.interactive });
     await this.persist(token);
+    this.notifyTokenObtained();
     return token;
   }
 

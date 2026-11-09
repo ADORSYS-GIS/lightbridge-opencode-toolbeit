@@ -102,10 +102,10 @@ export function createEffectLogger(
  * inside the captured host context, so anything it logs reaches the host
  * logger instead of Effect's default one (ADR-0014).
  */
-export function runInHost(
+export function runInHost<A = void>(
   context: EffectContext.Context<never>,
-  effect: Effect.Effect<void>
-): Promise<void> {
+  effect: Effect.Effect<A>
+): Promise<A> {
   return Effect.runPromise(Effect.provideContext(effect, context));
 }
 

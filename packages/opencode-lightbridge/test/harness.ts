@@ -96,9 +96,25 @@ export interface Harness {
   /** Invoke a hook and wait for it; rejects with the hook's defect, if any. */
   call(key: string, event: Record<string, unknown>): Promise<void>;
   hasHook(key: string): boolean;
+  /** Every `connection.status` call the plugin made, in order. */
+  statusCalls: StatusCall[];
+}
+
+/** What the fake `ctx.integration` should report (ADR-0021). */
+export interface FakeIntegration {
+  integrations?: string[];
+  active?: (integrationID: string) => unknown;
+  statusFails?: boolean;
+}
+
+export interface StatusCall {
+  integrationID: string;
+  connection: unknown;
+  status: { status: string; message: string; url?: string } | undefined;
 }
 
 export interface StartOptions {
+  integration?: FakeIntegration;
   options?: Record<string, unknown>;
   sources?: SourceProvider[];
   factory?: Partial<LightbridgePluginFactoryOptions>;
@@ -122,7 +138,7 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
     });
 
   const hooks = new Map<string, AnyHook>();
-  let transformCb: ((editor: unknown) => void) | undefined;
+  const transformCbs: Array<(editor: unknown) => void> = [];
   let sources = start.sources ?? [];
   let last: ReturnType<typeof createEditor> | undefined;
   let reloads = 0;
@@ -131,7 +147,9 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
 
   const runTransform = () => {
     last = createEditor(sources);
-    transformCb?.(last.editor);
+    for (const cb of transformCbs) {
+      cb(last.editor);
+    }
   };
 
   const hookOf = (domain: string) => (name: string, cb: AnyHook) => {
@@ -139,12 +157,32 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
     return registration;
   };
 
+  const statusCalls: StatusCall[] = [];
+  const fake = start.integration ?? {};
+  const integration = {
+    transform: (cb: (editor: unknown) => void) => {
+      cb({ list: () => (fake.integrations ?? []).map((id) => ({ id, name: id })) });
+      return registration;
+    },
+    connection: {
+      active: (id: string) =>
+        Effect.sync(() => (fake.active ? fake.active(id) : { type: "env", name: `conn-of-${id}` })),
+      status: (input: StatusCall) =>
+        fake.statusFails
+          ? Effect.die(new Error("host status exploded"))
+          : Effect.sync(() => {
+              statusCalls.push(input);
+            })
+    }
+  };
+
   const ctx = {
+    integration,
     options: start.options ?? {},
     location: { directory: "/repo", project: { id: "toolbelt" } },
     provider: {
       transform: (cb: (editor: unknown) => void) => {
-        transformCb = cb;
+        transformCbs.push(cb);
         return registration;
       },
       reload: () =>
@@ -190,6 +228,7 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
       }
       await Effect.runPromise(hook(event));
     },
-    hasHook: (key) => hooks.has(key)
+    hasHook: (key) => hooks.has(key),
+    statusCalls
   };
 }

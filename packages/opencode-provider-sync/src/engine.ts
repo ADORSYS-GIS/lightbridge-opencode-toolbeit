@@ -6,11 +6,13 @@ import {
   DEFAULT_LOG_LEVEL,
   DEFAULT_TOKEN_EXPIRY_SKEW_MS,
   isInteractiveAuthRequiredError,
+  SignInNotifier,
   TokenRuntime,
   type AuthServerConfig,
   type Logger,
   type LogLevel,
   type OAuthAuthFlow,
+  type SignInReporter,
   type SubjectTokenSource,
   type TokenSet
 } from "@vymalo/opencode-auth-core/lib";
@@ -126,6 +128,19 @@ export interface ProviderModelSyncEngineOptions {
    * a handful of auth-core log events). Defaults to a generic engine label.
    */
   serviceLabel?: string;
+  /**
+   * Where a needed sign-in is reported (ADR-0021): a plain-TS seam the plugin
+   * adapter implements over `ctx.integration`. Optional and best-effort — the
+   * engine never imports the plugin API, and a failing reporter never fails a
+   * sync or a request.
+   */
+  signInReporter?: SignInReporter;
+  /**
+   * Share one notifier with another `TokenRuntime` user for the same server
+   * (lightbridge's root runtime), so a login completed through either clears the
+   * notice the other raised. Takes precedence over `signInReporter`.
+   */
+  signInNotifier?: SignInNotifier;
 }
 
 const DEFAULT_CACHE_NAMESPACE = "provider-sync";
@@ -231,6 +246,7 @@ export class ProviderModelSyncEngine {
   private readonly runtimeByServer = new Map<string, ServerRuntime>();
   private readonly cacheDirPath: string;
   private readonly stateDirPath: string;
+  private readonly signIn: SignInNotifier;
   /** Unique per-instance id for the scheduler-ownership registry (see above). */
   private readonly instanceId = randomUUID();
   private initialized = false;
@@ -255,6 +271,12 @@ export class ProviderModelSyncEngine {
         this.config.cacheNamespace
       );
     this.cacheStore = new ServerStateStore(this.cacheDirPath, this.stateDirPath, this.logger);
+    this.signIn = options.signInNotifier ?? new SignInNotifier(options.signInReporter, this.logger);
+  }
+
+  /** Resolves once every queued sign-in notice call has finished (tests, shutdown). */
+  signInSettled(): Promise<void> {
+    return this.signIn.settled();
   }
 
   /**
@@ -385,6 +407,7 @@ export class ProviderModelSyncEngine {
       onAuthorizationUrl: this.options.onAuthorizationUrl,
       tokenExpirySkewMs: this.config.tokenExpirySkewMs,
       serviceLabel: this.options.serviceLabel ?? DEFAULT_SERVICE_LABEL,
+      ...this.signIn.hooksFor(server.id, server.name || server.id),
       // The refresh lock (`<stateDir>/locks/<id>.lock`) must sit beside the
       // credential it guards, in the durable state dir (ADR-0016, ADR-0022) —
       // never in the OS cache dir the model list lives in.
@@ -664,6 +687,7 @@ export class ProviderModelSyncEngine {
           serverId,
           error: error.message
         });
+        this.signIn.needsLogin(serverId, this.requireServerConfig(serverId).name || serverId);
       } else {
         this.logger.error("sync_failed", {
           serverId,

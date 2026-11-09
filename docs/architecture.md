@@ -353,6 +353,38 @@ forwarding:
 1. **Browser-open failure during `authorization_code`.** When `openExternalUrl` throws (no display, missing handler), the plugin writes the authorization URL — which contains the `state` nonce — straight to stderr. Logging it through the logger would land the nonce in shared aggregation, which could enable login-CSRF via a forged callback.
 2. **Device-code user code + verification URL.** The user needs to read these out of their terminal to complete the flow. They are *also* logged (`oauth_device_code_issued`) — `user_code` is intentionally not redacted because it's an ephemeral single-use code with no value outside the active flow (RFC 8628 §3.2). But stderr is the reliable channel.
 
+Both prompts are written by `writeTerminalPrompt` (`auth-core`), which never throws and never leaves an unhandled stream error: under a v2 host stderr is a closed pipe, and a bare `process.stderr.write` there was reported as `ERROR "unhandled rejection"` (`EPIPE`) at the instant the code was issued. A failed or skipped write is logged once at `debug` (`terminal_prompt_skipped`). The prompt still goes to stderr whenever stderr is alive.
+
+### Reporting a needed sign-in to the host (ADR-0021)
+
+```mermaid
+sequenceDiagram
+  participant E as ProviderModelSyncEngine / LightbridgeRuntime
+  participant T as TokenRuntime (auth-core)
+  participant N as SignInNotifier (auth-core)
+  participant A as plugin adapter (oauth2 / lightbridge)
+  participant H as host ctx.integration
+  E->>N: needsLogin (sync_skipped_needs_login) : message only
+  T->>N: onDeviceCode : url + user code
+  T->>N: onDeviceCodeExpired : message only
+  T->>N: onTokenObtained (ensure / refresh succeeded)
+  N->>A: needsAuth(notice) / clear(serverId), serialised, 5s cap
+  A->>H: connection.active(integrationID) then connection.status(needs_auth | undefined)
+```
+
+```mermaid
+stateDiagram-v2
+  [*] --> Quiet
+  Quiet --> NeedsLogin: non-interactive refusal
+  NeedsLogin --> CodeIssued: device code issued (url + code)
+  CodeIssued --> NeedsLogin: code expired (url dropped)
+  CodeIssued --> Quiet: token obtained (cleared)
+  NeedsLogin --> Quiet: token obtained (cleared)
+  CodeIssued --> CodeIssued: periodic refusal is suppressed while the code is redeemable
+```
+
+`auth-core` and the sync engine import nothing from the plugin API (a source-scan test enforces it). They talk to a plain `SignInReporter`; each plugin supplies `createIntegrationSignInReporter`, which runs `ctx.integration.connection.active` / `.status` through `runInHost` (the captured host context) and maps the managed provider id to an `integrationID` from `Provider.Info.integrationID` seen in `provider.transform`, falling back to an integration whose id equals the provider id. No integration or connection means no notice (logged once at `debug`); a reporter that throws, rejects or hangs is contained and never fails a sync or a request. The log lines stay the contract.
+
 ### URL redaction (`redactUrl`)
 
 Anywhere the plugin logs a URL it ran (`tokenEndpoint`, `modelsUrl`), it goes through `redactUrl` first, which strips `user:pass@` userinfo, the query string, and the fragment. Configs like `https://user:pass@auth.example.com/realms/foo/token` don't leak credentials into the log.
@@ -365,6 +397,9 @@ Anywhere the plugin logs a URL it ran (`tokenEndpoint`, `modelsUrl`), it goes th
 | `sync_start` | every scheduler tick or warmup | `serverId`, `interactive` |
 | `sync_success` | model fetch succeeded | `modelCount`, `added`, `removed`, `renamed` |
 | `sync_failed` | a genuine error during sync (network, 5xx, malformed payload, failed refresh) — `error` level | `serverId`, `error` (string) |
+| `sign_in_notice_skipped` | the `needs_auth` notice could not be placed on a host connection (`reason`: `no_integration` / `no_connection`), `debug`, once per server and reason | `serverId`, `reason`, `knownIntegrations` |
+| `sign_in_notice_failed` | the host call reporting or clearing a notice failed or timed out, `debug` (never carries the message, which can hold the user code) | `kind`, `serverId`, `error` |
+| `terminal_prompt_skipped` | the stderr login prompt could not be written (closed pipe), `debug`, once | `reason` |
 | `sync_skipped_needs_login` | non-interactive warmup/tick needed a browser or device-code login — expected, `warn` level, models stay empty until an interactive login completes (see [troubleshooting](troubleshooting.md)) | `serverId`, `error` (string, includes the remedy) |
 | `sync_startup_failed` | warmup failed | `serverId`, `error` |
 | `oauth_login_started` | `authorization_code` PKCE began | `issuer`, `authorizationEndpoint` |

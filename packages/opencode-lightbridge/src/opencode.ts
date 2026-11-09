@@ -3,7 +3,11 @@ import { hostname } from "node:os";
 import { Plugin } from "@opencode/plugin/effect";
 import { defaultTextMapSetter } from "@opentelemetry/api";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
-import type { AuthServerConfig } from "@vymalo/opencode-auth-core/lib";
+import {
+  IntegrationIndex,
+  SignInNotifier,
+  type AuthServerConfig
+} from "@vymalo/opencode-auth-core/lib";
 import {
   buildResource,
   createProviders,
@@ -22,7 +26,9 @@ import {
 } from "@vymalo/opencode-core-otel";
 import {
   applyResponsesApiSettings,
+  createIntegrationSignInReporter,
   mergeDiscoveredModels,
+  noteProviderIntegrations,
   propagateCachedBearer,
   ProviderModelSyncEngine,
   resolveCachedBearer,
@@ -420,6 +426,33 @@ export function createLightbridgePlugin(
         });
       }
 
+      // ADR-0021: ONE notifier for the whole plugin, shared by the register
+      // engine and the root runtime, so a login through either clears a notice
+      // the other raised. The host API is touched only by this adapter, inside
+      // the captured host context; no integration means no notice.
+      const integrationIndex = new IntegrationIndex();
+      const signInNotifier = new SignInNotifier(
+        createIntegrationSignInReporter({
+          integration: ctx.integration,
+          index: integrationIndex,
+          // The runtime id is `auth.id`; a gateway provider may carry the integration.
+          aliases: () => parsed.gateway?.providers ?? [],
+          run: (effect) => runInHost(hostContext, effect),
+          logger
+        }),
+        logger
+      );
+      if (parsed.register || parsed.gateway) {
+        yield* ctx.provider.transform((editor) => {
+          noteProviderIntegrations(editor, integrationIndex);
+        });
+      }
+      if (ctx.integration && (parsed.register || parsed.gateway)) {
+        yield* ctx.integration.transform((editor) => {
+          integrationIndex.noteIntegrations(editor.list().map((integration) => integration.id));
+        });
+      }
+
       // The ONE shared runtime (ADR-0012) — constructed exactly once whenever a
       // module (gateway/otel) needs a token, reused by both the gateway injector
       // and the OTEL token source below. `undefined` only for a register/auth-only
@@ -435,7 +468,8 @@ export function createLightbridgePlugin(
             onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
             stateDir: factoryOptions.stateDir,
             tokenExpirySkewMs: factoryOptions.tokenExpirySkewMs,
-            exchange: parsed.gateway?.exchange ?? false
+            exchange: parsed.gateway?.exchange ?? false,
+            signInNotifier
           })
         : undefined;
 
@@ -475,7 +509,8 @@ export function createLightbridgePlugin(
             cacheDir: factoryOptions.cacheDir ? rootCacheDir(factoryOptions.cacheDir) : undefined,
             stateDir: factoryOptions.stateDir ? rootStateDir(factoryOptions.stateDir) : undefined,
             cacheNamespaceSegment: ROOT_CACHE_SEGMENT,
-            serviceLabel: "opencode-lightbridge"
+            serviceLabel: "opencode-lightbridge",
+            signInNotifier
           }
         );
         await next.initialize();

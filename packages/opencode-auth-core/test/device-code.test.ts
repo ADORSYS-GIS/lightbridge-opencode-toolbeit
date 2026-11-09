@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { acquireTokenViaDeviceCode } from "../src/oauth/device-code.js";
+import { resetTerminalPromptLatch } from "../src/terminal-prompt.js";
 import { createSilentLogger } from "./helpers.js";
 
 interface FetchCall {
@@ -770,5 +771,222 @@ describe("ADR-0014: the device-code stderr prompt carve-out is labeled, not hard
     const written = write.mock.calls.map((call) => String(call[0])).join("");
     expect(written).toContain("[opencode-lightbridge] device-code login for example-ai");
     expect(written).not.toContain("[opencode-oauth2]");
+  });
+});
+
+describe("acquireTokenViaDeviceCode: ADR-0021 hooks and the dead-stderr guard", () => {
+  const issued = () =>
+    new Response(
+      JSON.stringify({
+        device_code: "dev-code-abc",
+        user_code: "WDJB-MJHT",
+        verification_uri: "https://auth.example.com/device",
+        verification_uri_complete: "https://auth.example.com/device?user_code=WDJB-MJHT",
+        expires_in: 600,
+        interval: 1
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  const success = () =>
+    new Response(
+      JSON.stringify({
+        access_token: "device-access",
+        refresh_token: "device-refresh",
+        token_type: "Bearer",
+        expires_in: 3600
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  const base = {
+    deviceAuthorizationEndpoint: "https://auth.example.com/device/authorize",
+    tokenEndpoint: "https://auth.example.com/oauth/token",
+    clientId: "device-client",
+    scopes: ["openid"],
+    serverId: "example-ai",
+    timeoutMs: 5000
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("calls onDeviceCode right after the code is issued, before polling", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const order: string[] = [];
+    const received: unknown[] = [];
+    const { fetch: fetchImpl } = recordingFetch([
+      () => {
+        order.push("authorize");
+        return issued();
+      },
+      () => {
+        order.push("poll");
+        return success();
+      }
+    ]);
+
+    await acquireTokenViaDeviceCode({
+      ...base,
+      logger: createSilentLogger(),
+      fetchImpl,
+      now: () => 1_000_000,
+      sleep: async () => {},
+      onDeviceCode: (info) => {
+        order.push("hook");
+        received.push(info);
+      }
+    });
+
+    expect(order).toEqual(["authorize", "hook", "poll"]);
+    expect(received).toEqual([
+      {
+        serverId: "example-ai",
+        verificationUri: "https://auth.example.com/device",
+        verificationUriComplete: "https://auth.example.com/device?user_code=WDJB-MJHT",
+        userCode: "WDJB-MJHT",
+        expiresAt: 1_000_000 + 600_000
+      }
+    ]);
+  });
+
+  it("a throwing onDeviceCode never fails the login", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const { fetch: fetchImpl } = recordingFetch([issued, success]);
+
+    const token = await acquireTokenViaDeviceCode({
+      ...base,
+      logger: createSilentLogger(),
+      fetchImpl,
+      sleep: async () => {},
+      onDeviceCode: () => {
+        throw new Error("surface exploded");
+      }
+    });
+
+    expect(token.accessToken).toBe("device-access");
+  });
+
+  it("calls onDeviceCodeExpired when the expires_in deadline passes, then throws", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const expired = vi.fn();
+    let clock = 0;
+    const { fetch: fetchImpl } = recordingFetch([
+      issued,
+      () =>
+        new Response(JSON.stringify({ error: "authorization_pending" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        })
+    ]);
+
+    await expect(
+      acquireTokenViaDeviceCode({
+        ...base,
+        logger: createSilentLogger(),
+        fetchImpl,
+        now: () => clock,
+        sleep: async () => {
+          clock += 700_000;
+        },
+        onDeviceCodeExpired: expired
+      })
+    ).rejects.toThrow(/expired/);
+
+    expect(expired).toHaveBeenCalledExactlyOnceWith({ serverId: "example-ai" });
+  });
+
+  it("calls onDeviceCodeExpired on an expired_token answer", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const expired = vi.fn();
+    const { fetch: fetchImpl } = recordingFetch([
+      issued,
+      () =>
+        new Response(JSON.stringify({ error: "expired_token" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        })
+    ]);
+
+    await expect(
+      acquireTokenViaDeviceCode({
+        ...base,
+        logger: createSilentLogger(),
+        fetchImpl,
+        sleep: async () => {},
+        onDeviceCodeExpired: expired
+      })
+    ).rejects.toThrow(/expired/);
+
+    expect(expired).toHaveBeenCalledOnce();
+  });
+
+  it("does not call onDeviceCodeExpired on success or on a user denial", async () => {
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const expired = vi.fn();
+    await acquireTokenViaDeviceCode({
+      ...base,
+      logger: createSilentLogger(),
+      fetchImpl: recordingFetch([issued, success]).fetch,
+      sleep: async () => {},
+      onDeviceCodeExpired: expired
+    });
+    await expect(
+      acquireTokenViaDeviceCode({
+        ...base,
+        logger: createSilentLogger(),
+        fetchImpl: recordingFetch([
+          issued,
+          () =>
+            new Response(JSON.stringify({ error: "access_denied" }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" }
+            })
+        ]).fetch,
+        sleep: async () => {},
+        onDeviceCodeExpired: expired
+      })
+    ).rejects.toThrow(/denied/);
+
+    expect(expired).not.toHaveBeenCalled();
+  });
+
+  it("a dead stderr (EPIPE) neither throws nor leaves an unhandled error, and the login completes", async () => {
+    resetTerminalPromptLatch();
+    // Earlier tests stub stderr.write without ever settling it, which strands the
+    // guard's one-shot listener; start this one from a clean slate.
+    process.stderr.removeAllListeners("error");
+    let unhandled = 0;
+    const error = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+    vi.spyOn(process.stderr, "write").mockImplementation(((
+      _chunk: unknown,
+      callback?: (error?: Error | null) => void
+    ) => {
+      // Only the login prompt is a dead-pipe write; stray warnings pass through.
+      if (!String(_chunk).includes("[opencode]")) {
+        return true;
+      }
+      process.nextTick(() => {
+        callback?.(error);
+        process.nextTick(() => {
+          if (process.stderr.listenerCount("error") === 0) {
+            unhandled += 1;
+          } else {
+            process.stderr.emit("error", error);
+          }
+        });
+      });
+      return false;
+    }) as typeof process.stderr.write);
+
+    const token = await acquireTokenViaDeviceCode({
+      ...base,
+      logger: createSilentLogger(),
+      fetchImpl: recordingFetch([issued, success]).fetch,
+      sleep: async () => {}
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(token.accessToken).toBe("device-access");
+    expect(unhandled).toBe(0);
   });
 });

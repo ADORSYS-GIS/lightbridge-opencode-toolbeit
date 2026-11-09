@@ -1,6 +1,12 @@
-import { Model, Provider } from "@opencode/plugin/effect";
+import { Model, type Plugin, Provider } from "@opencode/plugin/effect";
 import type { ProviderEditor } from "@opencode/plugin/effect/provider";
 
+import {
+  createConnectionSignInReporter,
+  type IntegrationIndex,
+  type SignInReporter
+} from "@vymalo/opencode-auth-core/lib";
+import type { Effect } from "effect";
 import type {
   Logger,
   OAuthAuthFlow,
@@ -696,4 +702,56 @@ export function propagateCachedBearer(
   });
   stamped?.set(providerId, authorization);
   logger.debug("oauth2_bearer_propagated_to_provider_headers", { providerId });
+}
+
+/**
+ * Record, from inside a `ctx.provider.transform` callback, the `integrationID`
+ * the host stamped on each provider (`Provider.Info.integrationID`, optional).
+ * This is how a plugin learns which host integration a managed provider belongs
+ * to (ADR-0021): a plugin cannot create or look up an integration by origin.
+ */
+export function noteProviderIntegrations(editor: ProviderEditor, index: IntegrationIndex): void {
+  for (const record of editor.list()) {
+    index.noteProvider(record.provider.id, record.provider.integrationID);
+  }
+}
+
+type HostIntegration = Plugin.Context["integration"];
+type HostConnection = Parameters<HostIntegration["connection"]["status"]>[0]["connection"];
+
+export interface IntegrationSignInReporterInput {
+  /** `ctx.integration`. Tolerated absent: the notice is best-effort. */
+  integration: HostIntegration | undefined;
+  index: IntegrationIndex;
+  /** Other provider ids whose integration this server id may borrow. */
+  aliases?: (serverId: string) => readonly string[];
+  /** Runs a host Effect inside the captured host context (`runInHost`), never a bare runtime. */
+  run: <A>(effect: Effect.Effect<A>) => Promise<A>;
+  logger: Logger;
+}
+
+/**
+ * `SignInReporter` over `ctx.integration.connection.{active,status}` (ADR-0021).
+ * The engine and `auth-core` only see the plain `SignInReporter` interface; this
+ * is the plugin-side adapter and the one place the host API is touched.
+ */
+export function createIntegrationSignInReporter(
+  input: IntegrationSignInReporterInput
+): SignInReporter {
+  const { integration, index, run } = input;
+  return createConnectionSignInReporter<HostConnection>(
+    {
+      resolveIntegrationID: (serverId) =>
+        integration ? index.resolve(serverId, input.aliases?.(serverId)) : undefined,
+      diagnostics: () => ({ knownIntegrations: index.knownIntegrationIds() }),
+      activeConnection: async (integrationID) =>
+        integration ? run(integration.connection.active(integrationID)) : undefined,
+      setStatus: async ({ integrationID, connection, status }) => {
+        if (integration) {
+          await run(integration.connection.status({ integrationID, connection, status }));
+        }
+      }
+    },
+    input.logger
+  );
 }
