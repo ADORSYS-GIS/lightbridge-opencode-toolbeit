@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { ServerStateStore } from "../src/cache.js";
 import { ProviderModelSyncEngine } from "../src/engine.js";
 import type { NormalizedModel } from "../src/types.js";
-import { createServerConfig, createSilentLogger } from "./helpers.js";
+import { createServerConfig, createSilentLogger, seedServerState } from "./helpers.js";
 
 const SERVER_ID = "example-ai";
 
@@ -75,7 +75,7 @@ async function writeStateFile(
 ): Promise<void> {
   const store = new ServerStateStore(dirs.cacheDir, dirs.stateDir);
   await store.ensureReady();
-  await store.saveServerState({
+  await seedServerState(store, {
     serverId: SERVER_ID,
     updatedAt,
     lastSyncAt: updatedAt,
@@ -206,7 +206,7 @@ describe("cross-process token state (shared credential file)", () => {
     await processB.initialize();
 
     const store = new ServerStateStore(dirs.cacheDir, dirs.stateDir);
-    await store.saveServerState({
+    await seedServerState(store, {
       serverId: SERVER_ID,
       updatedAt: Date.now(),
       models: [],

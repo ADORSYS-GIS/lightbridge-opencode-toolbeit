@@ -109,3 +109,44 @@ describe("TokenRuntime default credential location (ADR-0022)", () => {
     expect(await readdir(stateDir)).toContain("human-id.json");
   });
 });
+
+describe("env roots must be absolute (ADR-0022)", () => {
+  const home = "/home/dev";
+
+  it("win32: empty or relative LOCALAPPDATA falls back to ~/AppData/Local (state and cache)", () => {
+    for (const bad of ["", "relative\\dir", ".\\x", "AppData"]) {
+      const env = { LOCALAPPDATA: bad };
+      expect(resolveStateRoot({ platform: "win32", env, home })).toBe(
+        join(home, "AppData", "Local")
+      );
+      expect(resolveCacheRoot({ platform: "win32", env, home })).toBe(
+        join(home, "AppData", "Local")
+      );
+    }
+  });
+
+  it("win32: an absolute LOCALAPPDATA (drive or UNC) is honoured by both roots", () => {
+    for (const good of ["C:\\Users\\dev\\AL", "\\\\server\\share\\AL"]) {
+      const env = { LOCALAPPDATA: good };
+      expect(resolveStateRoot({ platform: "win32", env, home })).toBe(good);
+      expect(resolveCacheRoot({ platform: "win32", env, home })).toBe(good);
+    }
+  });
+
+  it("linux cache root: honours an absolute XDG_CACHE_HOME, ignores a relative or empty one", () => {
+    expect(
+      resolveCacheRoot({ platform: "linux", env: { XDG_CACHE_HOME: "/var/cache/dev" }, home })
+    ).toBe("/var/cache/dev");
+    for (const bad of ["", "cache", "./cache"]) {
+      expect(resolveCacheRoot({ platform: "linux", env: { XDG_CACHE_HOME: bad }, home })).toBe(
+        "/home/dev/.cache"
+      );
+    }
+  });
+
+  it("darwin cache root: ~/Library/Caches", () => {
+    expect(resolveCacheRoot({ platform: "darwin", env: {}, home })).toBe(
+      "/home/dev/Library/Caches"
+    );
+  });
+});

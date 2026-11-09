@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { ModelCacheStore, ServerCredentialStore, ServerStateStore } from "../src/cache.js";
 import type { CachedServerState } from "../src/types.js";
+import { seedServerState } from "./helpers.js";
 
 interface Dirs {
   cacheDir: string;
@@ -38,7 +39,7 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     const { cacheDir, stateDir } = await tempDirs("roundtrip");
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState(sampleState());
+    await seedServerState(store, sampleState());
 
     const loaded = await store.loadServerState("example-ai");
     expect(loaded?.token?.refreshToken).toBe("refresh-token");
@@ -50,7 +51,7 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     const { cacheDir, stateDir } = await tempDirs("split");
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState(sampleState());
+    await seedServerState(store, sampleState());
 
     expect(await readFile(join(stateDir, "example-ai.json"), "utf8")).toContain("refresh-token");
 
@@ -68,7 +69,7 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     const { cacheDir, stateDir } = await tempDirs("models");
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState(sampleState());
+    await seedServerState(store, sampleState());
 
     expect(await readFile(join(cacheDir, "example-ai.models.json"), "utf8")).toContain("glm-5");
     expect(await readFile(join(stateDir, "example-ai.json"), "utf8")).not.toContain("glm-5");
@@ -78,7 +79,7 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     const { cacheDir, stateDir } = await tempDirs("modes");
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState(sampleState());
+    await seedServerState(store, sampleState());
 
     expect(await mode(stateDir)).toBe(0o700);
     expect(await mode(cacheDir)).toBe(0o700);
@@ -90,7 +91,8 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     const { cacheDir, stateDir } = await tempDirs("no-refresh");
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState(
+    await seedServerState(
+      store,
       sampleState({ token: { accessToken: "access-token", tokenType: "Bearer" } })
     );
 
@@ -108,7 +110,8 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     // writers racing the same record. A shared `.tmp` name made one writer's
     // rename ENOENT-fail on the temp file another had already consumed.
     const saves = Array.from({ length: 25 }, (_, i) =>
-      store.saveServerState(
+      seedServerState(
+        store,
         sampleState({
           rawModels: [{ id: `glm-${i}` }],
           models: [{ id: `glm-${i}`, displayName: `GLM ${i}` }],
@@ -130,7 +133,7 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     const { cacheDir, stateDir } = await tempDirs("invalid");
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState(sampleState());
+    await seedServerState(store, sampleState());
 
     const filePath = join(stateDir, "example-ai.json");
     const persisted = JSON.parse(await readFile(filePath, "utf8")) as Record<string, unknown>;
@@ -146,7 +149,7 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     const { cacheDir, stateDir } = await tempDirs("purged");
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState(sampleState());
+    await seedServerState(store, sampleState());
 
     // What macOS / cleanup tools do to ~/Library/Caches.
     await rm(cacheDir, { recursive: true, force: true });
@@ -179,7 +182,7 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     const { cacheDir } = await tempDirs("same-root");
     const store = new ServerStateStore(cacheDir, cacheDir);
     await store.ensureReady();
-    await store.saveServerState(sampleState());
+    await seedServerState(store, sampleState());
 
     expect((await readdir(cacheDir)).sort()).toEqual(["example-ai.json", "example-ai.models.json"]);
     const loaded = await store.loadServerState("example-ai");
@@ -187,17 +190,30 @@ describe("ServerStateStore (ADR-0022: credentials in state, models in cache)", (
     expect(loaded?.models.map((model) => model.id)).toEqual(["glm-5"]);
   });
 
-  it("removes the credential file when saving a state without a token", async () => {
-    const { cacheDir, stateDir } = await tempDirs("logout");
+  it("a model-path write never deletes or replaces the credential (credentials have one writer)", async () => {
+    const { cacheDir, stateDir } = await tempDirs("model-write");
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState(sampleState());
-    await store.saveServerState(sampleState({ token: undefined }));
+    await seedServerState(store, sampleState());
+    const before = await readFile(join(stateDir, "example-ai.json"), "utf8");
 
-    expect(await readdir(stateDir)).not.toContain("example-ai.json");
-    const loaded = await store.loadServerState("example-ai");
-    expect(loaded?.token).toBeUndefined();
-    expect(loaded?.models.map((model) => model.id)).toEqual(["glm-5"]);
+    // A model-path write, even from a state with no token or a stale one.
+    await store.models.save(sampleState({ token: undefined }));
+    await store.models.save(
+      sampleState({ token: { accessToken: "stale", tokenType: "Bearer", refreshToken: "R0" } })
+    );
+
+    expect(await readFile(join(stateDir, "example-ai.json"), "utf8")).toBe(before);
+  });
+
+  it("reports the CREDENTIAL's stamp as updatedAt, not the (newer) model record's", async () => {
+    const { cacheDir, stateDir } = await tempDirs("stamp");
+    const store = new ServerStateStore(cacheDir, stateDir);
+    await store.ensureReady();
+    await store.credentials.save("example-ai", { accessToken: "a", tokenType: "Bearer" }, 100);
+    await store.models.save(sampleState({ updatedAt: 999_999 }));
+
+    expect((await store.loadServerState("example-ai"))?.updatedAt).toBe(100);
   });
 
   it("returns undefined when neither record exists", async () => {

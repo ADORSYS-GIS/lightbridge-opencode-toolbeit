@@ -227,6 +227,35 @@ describe("LightbridgeRuntime — exchange: false (default, ADR-0017)", () => {
     expect(fetches).toBe(1);
   });
 
+  it("clears a root refresh token the IdP rejected (400) and does not replay it", async () => {
+    const stateRoot = await mkdtemp(join(tmpdir(), "lightbridge-dead-"));
+    await seedHuman(stateRoot, {
+      accessToken: "old",
+      tokenType: "Bearer",
+      refreshToken: "dead-refresh",
+      expiresAt: Date.now() - 1000
+    });
+    let refreshPosts = 0;
+    const runtime = new LightbridgeRuntime(auth, PROJECT_ID, {
+      logger: createSilentLogger(),
+      stateDir: stateRoot,
+      fetchImpl: async (_input, init) => {
+        if (parseFormBody(init).get("grant_type") === "refresh_token") {
+          refreshPosts += 1;
+          return makeJsonResponse({ error: "invalid_grant" }, 400);
+        }
+        throw new Error("no other network call expected");
+      }
+    });
+
+    await runtime.getProjectToken({ interactive: false }).catch(() => undefined);
+    expect(refreshPosts).toBe(1);
+    expect(await readSharedCredential(stateRoot)).toBeUndefined();
+
+    await runtime.getProjectToken({ interactive: false }).catch(() => undefined);
+    expect(refreshPosts).toBe(1);
+  });
+
   it("writes the root token 0o600 under the state root and takes its refresh lock beside it", async () => {
     const stateRoot = await mkdtemp(join(tmpdir(), "lightbridge-lock-"));
     await seedHuman(stateRoot, {

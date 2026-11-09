@@ -6,6 +6,8 @@ import type { Plugin } from "@opencode/plugin/effect";
 import { Effect, Exit, Scope } from "effect";
 import { vi } from "vitest";
 
+import type { CachedServerState } from "@vymalo/opencode-provider-sync/lib";
+
 import { ServerStateStore } from "../src/cache.js";
 import {
   createOpencodeOauth2Plugin,
@@ -202,7 +204,7 @@ export async function seedCache(
 ): Promise<void> {
   const cache = new ServerStateStore(cacheDir, stateDirFor(cacheDir));
   await cache.ensureReady();
-  await cache.saveServerState({
+  await seedServerState(cache, {
     serverId: overrides.serverId ?? "example-ai",
     updatedAt: Date.now(),
     lastSyncAt: Date.now(),
@@ -237,3 +239,17 @@ export const requestEvent = (providerID: string, headers: Record<string, string>
   model: { id: "glm-5", providerID },
   headers
 });
+
+/**
+ * Test seeding only: writes both records the way a finished login + sync would.
+ * Production code never writes the credential from the model path.
+ */
+export async function seedServerState(
+  store: ServerStateStore,
+  state: CachedServerState
+): Promise<void> {
+  if (state.token) {
+    await store.credentials.save(state.serverId, state.token, state.updatedAt);
+  }
+  await store.models.save(state);
+}

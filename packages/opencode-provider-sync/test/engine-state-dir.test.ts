@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { resolveCacheRoot, resolveStateRoot } from "@vymalo/opencode-auth-core/lib";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { ServerStateStore, resolveStateDir } from "../src/cache.js";
+import { ModelCacheStore, ServerStateStore, resolveStateDir } from "../src/cache.js";
 import { ProviderModelSyncEngine } from "../src/engine.js";
-import { createServerConfig, createSilentLogger } from "./helpers.js";
+import { createServerConfig, createSilentLogger, seedServerState } from "./helpers.js";
 
 const SERVER_ID = "example-ai";
 
@@ -41,7 +41,7 @@ function createFetch(onTokenRequest?: () => Promise<void>): typeof fetch {
 async function expiredCredentialIn(cacheDir: string, stateDir: string): Promise<void> {
   const store = new ServerStateStore(cacheDir, stateDir);
   await store.ensureReady();
-  await store.saveServerState({
+  await seedServerState(store, {
     serverId: SERVER_ID,
     updatedAt: Date.now() - 10_000,
     models: [],
@@ -106,12 +106,15 @@ describe("ProviderModelSyncEngine storage roots (ADR-0022)", () => {
     expect(await readFile(join(cacheDir, `${SERVER_ID}.models.json`), "utf8")).toContain("glm-5");
   });
 
-  it("a token-only rotation does not rewrite the model cache", async () => {
+  it("a token-only rotation does not rewrite the model cache (the write itself is observed)", async () => {
     const root = await mkdtemp(join(tmpdir(), "engine-tokenonly-"));
     const cacheDir = join(root, "cache");
     const stateDir = join(root, "state");
     await expiredCredentialIn(cacheDir, stateDir);
+    const modelFile = join(cacheDir, `${SERVER_ID}.models.json`);
+    const before = await stat(modelFile);
 
+    const modelSaves = vi.spyOn(ModelCacheStore.prototype, "save");
     const engine = new ProviderModelSyncEngine(
       { servers: [createServerConfig()] },
       { cacheDir, stateDir, logger: createSilentLogger(), fetchImpl: createFetch() }
@@ -119,13 +122,15 @@ describe("ProviderModelSyncEngine storage roots (ADR-0022)", () => {
     await engine.initialize();
     await engine.ensureAccessToken(SERVER_ID);
 
-    expect(
-      (await readFile(join(stateDir, `${SERVER_ID}.json`), "utf8")).includes("rotated-refresh")
-    ).toBe(true);
-    expect(await readdir(cacheDir)).toEqual([`${SERVER_ID}.models.json`]);
-    expect(await readFile(join(cacheDir, `${SERVER_ID}.models.json`), "utf8")).not.toContain(
-      "glm-5"
+    // The rotation really happened and reached the credential file...
+    expect(await readFile(join(stateDir, `${SERVER_ID}.json`), "utf8")).toContain(
+      "rotated-refresh"
     );
+    // ...without any write to the model store: no save call, same file identity and mtime.
+    expect(modelSaves).not.toHaveBeenCalled();
+    const after = await stat(modelFile);
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
   });
 
   it("defaults the credential to the state root and the model list to the cache root", async () => {
@@ -135,7 +140,7 @@ describe("ProviderModelSyncEngine storage roots (ADR-0022)", () => {
     const cacheDir = join(resolveCacheRoot(), "seg", "ns");
     expect(resolveStateDir("seg", "ns")).toBe(stateDir);
 
-    await new ServerStateStore(cacheDir, stateDir).saveServerState({
+    await seedServerState(new ServerStateStore(cacheDir, stateDir), {
       serverId: id,
       updatedAt: Date.now(),
       models: [],

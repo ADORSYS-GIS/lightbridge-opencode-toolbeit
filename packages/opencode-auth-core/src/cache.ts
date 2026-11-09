@@ -1,21 +1,26 @@
 import { chmod, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { homedir } from "node:os";
 
 import type { Logger } from "./logging.js";
 
-function resolveDefaultCacheRoot(): string {
-  if (process.platform === "win32") {
-    return process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+/**
+ * An env-provided root counts only if it is an ABSOLUTE path on the target
+ * platform. An empty or relative value (for example `LOCALAPPDATA=""`, or a
+ * relative `XDG_*_HOME`) would otherwise resolve against the process cwd and
+ * scatter per-directory credentials or caches, so it is ignored in favour of
+ * the home-based default.
+ */
+function absoluteOrUndefined(
+  value: string | undefined,
+  platform: NodeJS.Platform
+): string | undefined {
+  if (!value) {
+    return undefined;
   }
-
-  if (process.platform === "darwin") {
-    return join(homedir(), "Library", "Caches");
-  }
-
-  return process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache");
+  return (platform === "win32" ? win32 : posix).isAbsolute(value) ? value : undefined;
 }
 
 /**
@@ -23,13 +28,26 @@ function resolveDefaultCacheRoot(): string {
  * only DISPOSABLE data (discovered-model lists, metadata catalogs): macOS,
  * Linux and cleanup tools purge cache dirs, so nothing that cannot be rebuilt
  * from the network may live here. Credentials belong under `resolveStateRoot`
- * (ADR-0022).
+ * (ADR-0022). Like the state root, an env override (`LOCALAPPDATA`,
+ * `XDG_CACHE_HOME`) is honoured only when absolute.
  */
-export function resolveCacheRoot(): string {
-  return resolveDefaultCacheRoot();
+export function resolveCacheRoot(environment: StateRootEnvironment = {}): string {
+  const platform = environment.platform ?? process.platform;
+  const env = environment.env ?? process.env;
+  const home = environment.home ?? homedir();
+
+  if (platform === "win32") {
+    return absoluteOrUndefined(env.LOCALAPPDATA, platform) ?? join(home, "AppData", "Local");
+  }
+
+  if (platform === "darwin") {
+    return join(home, "Library", "Caches");
+  }
+
+  return absoluteOrUndefined(env.XDG_CACHE_HOME, platform) ?? join(home, ".cache");
 }
 
-/** Inputs of `resolveStateRoot`, injectable so each platform is testable on any host. */
+/** Inputs of `resolveStateRoot` / `resolveCacheRoot`, injectable so each platform is testable on any host. */
 export interface StateRootEnvironment {
   platform?: NodeJS.Platform;
   env?: Record<string, string | undefined>;
@@ -47,7 +65,8 @@ export interface StateRootEnvironment {
  *   is ignored (it would otherwise resolve against the process cwd and scatter
  *   per-directory credentials).
  * - Windows: `%LOCALAPPDATA%` — the same root as the cache root, which Windows
- *   does not auto-purge. Because the two roots coincide there, credential and
+ *   does not auto-purge; an empty or relative value is ignored like `XDG_STATE_HOME`.
+ *   Because the two roots coincide there, credential and
  *   model-cache files never share a filename (see provider-sync's stores).
  */
 export function resolveStateRoot(environment: StateRootEnvironment = {}): string {
@@ -56,15 +75,14 @@ export function resolveStateRoot(environment: StateRootEnvironment = {}): string
   const home = environment.home ?? homedir();
 
   if (platform === "win32") {
-    return env.LOCALAPPDATA ?? join(home, "AppData", "Local");
+    return absoluteOrUndefined(env.LOCALAPPDATA, platform) ?? join(home, "AppData", "Local");
   }
 
   if (platform === "darwin") {
     return join(home, "Library", "Application Support");
   }
 
-  const xdg = env.XDG_STATE_HOME;
-  return xdg && isAbsolute(xdg) ? xdg : join(home, ".local", "state");
+  return absoluteOrUndefined(env.XDG_STATE_HOME, platform) ?? join(home, ".local", "state");
 }
 
 /**

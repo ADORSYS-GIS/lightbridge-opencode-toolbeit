@@ -407,11 +407,22 @@ export class ProviderModelSyncEngine {
           updatedAt: Date.now(),
           token
         };
-        // Credential only: a token rotation must not rewrite the (disposable)
-        // model cache, and the credential is the one record that cannot be
-        // rebuilt from the network.
+        // Credential only (and only ever from here, under TokenRuntime's refresh
+        // lock): a token rotation must not rewrite the (disposable) model cache.
         await this.cacheStore.credentials.save(serverId, token, next.updatedAt);
         runtime.state = next;
+      },
+      // A refresh token the IdP rejected (400) is removed from the credential
+      // file (compare-and-clear, under the lock, in TokenRuntime) so it is not
+      // replayed on every later call.
+      clearCached: async () => {
+        await this.cacheStore.credentials.remove(serverId);
+        // Memory is the fallback when the file is missing (readCachedToken), so
+        // drop the dead token there too or it would be replayed from memory.
+        const runtime = this.runtimeByServer.get(serverId);
+        if (runtime) {
+          runtime.state = { ...runtime.state, token: undefined };
+        }
       }
     });
   }
@@ -605,20 +616,25 @@ export class ProviderModelSyncEngine {
         renamed: diff.renamed.length
       });
 
-      // Base the write on the CURRENT in-memory state, not on `previousState`:
-      // `ensure()` re-reads the shared state file and may have adopted a newer
-      // snapshot another process wrote (see `readCachedToken`), and spreading
-      // the pre-ensure snapshot would silently roll that back.
+      // Model record ONLY. The credential is written exclusively by
+      // `TokenRuntime` (`setCached`, under the refresh lock): `token` above is
+      // from BEFORE the slow `/models` fetch, and writing it back could replace
+      // a refresh token another process rotated meanwhile with a stale one that
+      // carries a newer stamp, so the next refresh replays it and the IdP's
+      // reuse detection revokes the whole chain.
+      //
+      // The in-memory state is based on the CURRENT `runtime.state` (which
+      // `ensure()` / `readCachedToken` keep in step with the credential file)
+      // and keeps its token and its `updatedAt` - the credential's stamp, which
+      // a model sync must not advance.
       const nextState: CachedServerState = {
         ...runtime.state,
-        updatedAt: Date.now(),
         lastSyncAt: Date.now(),
-        token,
         rawModels,
         models: normalizedModels
       };
 
-      await this.cacheStore.saveServerState(nextState);
+      await this.cacheStore.models.save(nextState);
       runtime.state = nextState;
 
       // Stay quiet on the steady-state happy path (no model changes), but

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { ServerStateStore } from "../src/cache.js";
 import type { NormalizedModel } from "../src/types.js";
-import { startPlugin, stateDirFor } from "./harness.js";
+import { seedServerState, startPlugin, stateDirFor } from "./harness.js";
 
 const SERVER_ID = "example-ai";
 
@@ -72,7 +72,7 @@ async function writeStateFile(
 ): Promise<void> {
   const store = new ServerStateStore(cacheDir, stateDirFor(cacheDir));
   await store.ensureReady();
-  await store.saveServerState({
+  await seedServerState(store, {
     serverId: SERVER_ID,
     updatedAt,
     lastSyncAt: updatedAt,

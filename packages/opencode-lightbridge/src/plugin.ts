@@ -140,6 +140,11 @@ function buildSharedRootTokenRuntime(
     getCached: async () => (await credentials.load(serverId))?.token,
     setCached: async (token) => {
       await credentials.save(serverId, token, Date.now());
+    },
+    // Compare-and-clear of a refresh token the IdP rejected is done by
+    // TokenRuntime under the lock; this only performs the removal.
+    clearCached: async () => {
+      await credentials.remove(serverId);
     }
   });
 }

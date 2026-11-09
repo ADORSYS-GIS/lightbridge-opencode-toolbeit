@@ -155,11 +155,18 @@ export class ModelCacheStore {
     return parsed;
   }
 
+  /**
+   * Persists the MODEL record only. Credentials are written exclusively by
+   * `TokenRuntime` (via `ServerCredentialStore.save`, under the refresh lock);
+   * a model-path writer holding a token from before a slow `/models` fetch would
+   * otherwise overwrite a refresh token another process rotated meanwhile and
+   * trip IdP reuse detection. The record is stamped with the write time and
+   * deliberately omits the token.
+   */
   async save(state: CachedServerState): Promise<void> {
-    // Explicitly omit the token: a model record must never carry credentials.
     const record: StoredModels = {
       serverId: state.serverId,
-      updatedAt: state.updatedAt,
+      updatedAt: Date.now(),
       lastSyncAt: state.lastSyncAt,
       models: state.models,
       rawModels: state.rawModels
@@ -169,9 +176,11 @@ export class ModelCacheStore {
 }
 
 /**
- * Both records for one server, merged into the in-memory `CachedServerState`.
- * The credential survives a purged model cache (and vice versa): either record
- * alone yields a usable state; `undefined` only when neither exists.
+ * Both records for one server, merged into the in-memory `CachedServerState`
+ * for READING. The credential survives a purged model cache (and vice versa):
+ * either record alone yields a usable state; `undefined` only when neither
+ * exists. There is deliberately no combined write: the two records have
+ * different writers (credential: `TokenRuntime`; models: the sync path).
  */
 export class ServerStateStore {
   readonly credentials: ServerCredentialStore;
@@ -196,21 +205,15 @@ export class ServerStateStore {
 
     return {
       serverId,
-      updatedAt: Math.max(credential?.updatedAt ?? 0, models?.updatedAt ?? 0),
+      // `updatedAt` is the CREDENTIAL's stamp: it is what cross-process adoption
+      // compares, and a model sync must never make memory look newer than a
+      // token another process rotated meanwhile. Falls back to the model
+      // record's stamp only when there is no credential.
+      updatedAt: credential?.updatedAt ?? models?.updatedAt ?? 0,
       lastSyncAt: models?.lastSyncAt,
       models: models?.models ?? [],
       rawModels: models?.rawModels ?? [],
       token: credential?.token
     };
-  }
-
-  /** Writes the credential FIRST: a rotated refresh token is the record that must not be lost. */
-  async saveServerState(state: CachedServerState): Promise<void> {
-    if (state.token) {
-      await this.credentials.save(state.serverId, state.token, state.updatedAt);
-    } else {
-      await this.credentials.remove(state.serverId);
-    }
-    await this.models.save(state);
   }
 }

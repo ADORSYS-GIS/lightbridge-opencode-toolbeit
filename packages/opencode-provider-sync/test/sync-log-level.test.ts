@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { ServerStateStore } from "../src/cache.js";
 import { ProviderModelSyncEngine } from "../src/engine.js";
-import { createServerConfig } from "./helpers.js";
+import { createServerConfig, seedServerState } from "./helpers.js";
 
 interface LogRecord {
   level: LogLevel;
@@ -47,7 +47,7 @@ async function makeEngine(
   if (cachedToken) {
     const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState({
+    await seedServerState(store, {
       serverId: SERVER_ID,
       updatedAt: Date.now(),
       token: {
