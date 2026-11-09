@@ -290,6 +290,7 @@ Full index: [`docs/README.md`](docs/README.md). The highlights:
 
 | Page | When you need it |
 | --- | --- |
+| [`docs/migration-v2.md`](docs/migration-v2.md) | Upgrading from `0.17.x` to the OpenCode v2 plugin API — config renames, per-plugin opt-in keys, `effect` as a peer dependency, plugin ordering, removals |
 | [`docs/architecture.md`](docs/architecture.md) | Hooks, token lifecycle per flow, cache layout, sync scheduler, logging |
 | [`docs/well-known.md`](docs/well-known.md) | How `.well-known/opencode` distributes a provider + plugin setup to clients |
 | [`docs/models-info.md`](docs/models-info.md) | Metadata enrichment — composition with any auth scheme, caching, failure modes |

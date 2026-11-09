@@ -36,7 +36,18 @@ cat > "$OPENCODE_CONFIG_DIR/opencode.json" <<'JSON'
 JSON
 ```
 
-Now `opencode run --model "miaou/glm-5" "..."` uses the sandbox; your real config is untouched.
+> **`OPENCODE_CONFIG_DIR` alone does not isolate the sandbox.** OpenCode's data, state and cache directories stay shared, and `auth.json` there can carry a `.well-known/opencode` pointer. A remote config document is then still fetched and merged into your "clean" run, which can silently pull in a real published plugin and its live provider config. You can easily mistake a remotely merged provider for your own. Point all four XDG roots at the sandbox as well:
+>
+> ```sh
+> export XDG_DATA_HOME="$OPENCODE_CONFIG_DIR/xdg/data"
+> export XDG_CACHE_HOME="$OPENCODE_CONFIG_DIR/xdg/cache"
+> export XDG_STATE_HOME="$OPENCODE_CONFIG_DIR/xdg/state"
+> export XDG_CONFIG_HOME="$OPENCODE_CONFIG_DIR/xdg/config"
+> mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
+> opencode debug paths   # every path should now be inside the sandbox
+> ```
+
+With that set, `opencode run --model "miaou/glm-5" "..."` uses the sandbox.
 
 ### Plugin re-export trick
 
@@ -51,7 +62,15 @@ export { default } from "/absolute/path/to/lightbridge-opencode/packages/opencod
 TS
 ```
 
-> This directory layout follows the official [OpenCode v1 to v2 plugin migration guide](https://opencode.ai/docs/build/plugins/migrate-v1); it has not been exercised against a real v2 host in this repo.
+> **What has been verified.** The directory layout follows the official [OpenCode v1 to v2 plugin migration guide](https://opencode.ai/docs/build/plugins/migrate-v1), and the `dist/` re-export form above was exercised end to end against a real host: `opencode v2.2.5` (Homebrew) on macOS, loading `@vymalo/opencode-devtools` and `@vymalo/opencode-ratelimit` built from `098077b` against `@opencode/plugin` 2.2.6. A host one patch behind the pinned plugin API loaded them fine.
+>
+> - Config: `{"plugins": [{"package": "./plugins/devtools", "options": {"logLevel": "debug"}}, {"package": "./plugins/ratelimit", ...}]}`, booted with `opencode debug agents --standalone --print-logs --log-level debug`.
+> - The host logged `loading plugin` for both and watched every module in each plugin's resolved `dist/` graph, so the whole graph resolved, not only the entry file.
+> - Each plugin's structured events (`devtools_plugin_enabled`, `ratelimit_plugin_initialized`) reached the host log sink through the Effect logger at their true severity, with no terminal mirror ([ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md), [ADR-0019](adr/0019-opencode-v2-cutover.md)). No `ERROR` or `WARN` lines. `effect` resolved from the host, not a bundled copy.
+>
+> **Not verified:** the `src/` import variant below, the other six plugins, and Linux or Windows.
+>
+> **Checking that a local plugin loaded.** `opencode plugin list` reports nothing for path-based plugins (it lists registry and package plugins only), so it is not a usable check. Run with `--print-logs` and look for the `loading plugin` line.
 
 Build the plugin in watch mode:
 

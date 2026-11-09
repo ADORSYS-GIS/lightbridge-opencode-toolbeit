@@ -61,6 +61,7 @@ install; come here when you need depth on a specific topic.
 
 | Page | What it covers |
 | --- | --- |
+| [migration-v2.md](migration-v2.md) | Upgrading from `0.17.x` to the OpenCode v2 plugin API — config renames, per-plugin `settings.<key>` / `options`, `effect` as a peer dependency, required plugin ordering, removed signals |
 | [security.md](security.md) | Consolidated security model across all plugins — token cache, the browser bridge, blast radius, reducing it |
 | [troubleshooting.md](troubleshooting.md) | Symptom-keyed fixes across every plugin |
 | [adr/](adr/) | Architecture Decision Records — load-bearing, non-obvious decisions and *why* (e.g. [why the browser bridge uses `ws`, not `Bun.serve` or socket.io](adr/0001-bridge-transport-ws-not-bun-serve-or-socketio.md)) |
