@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [Unreleased]
+
+### Fixed
+
+- **release (publish workflow):** The publish skip path could not tell "this pipeline already published this version" from "someone published it some other way", so a hand-published version was reported as released and the package was silently skipped on every later run. `@vymalo/opencode-provider-sync` was hand-published at 0.17.0 on 2026-09-04 after run `33864587568` failed with `E404` (no Trusted Publisher existed for the new name); run `33865395921` then took the `npm view` skip, went green on the publish job, and every release until 0.18.0 skipped it again — it surfaced only when run `42573812315` first needed a genuinely new `provider-sync` version. A skip is now allowed only when the registry holds a provenance attestation built by this repo's `.github/workflows/publish.yml`; a version on npm without it fails the run. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
+- **release (publish workflow):** A **preflight** now runs before anything is installed or pushed — in `dry_run` too — classifying all thirteen packages and running the npm Trusted Publishing OIDC token exchange (the call made before the `PUT`, without the `PUT`) for each one still to publish, so a missing Trusted Publisher fails the release up front with nothing published instead of partway (run `42573812315` left two of thirteen at the new version). ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
+
+### Changed
+
+- **release (publish workflow):** The thirteen near-identical pack and publish steps (and the tarball-verify list) are now one ordered loop over a single `PUBLISH_ORDER` in `scripts/release/publish-guard.mjs`, covered by Vitest (including a drift test against the workspace's non-private packages and their dependency order). The audit gate, tarball-content verification and `--provenance` are unchanged. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
+
+### Documentation
+
+- **release:** `CLAUDE.md` / `AGENTS.md` "Releasing" now documents the new-package bootstrap (manual first publish to reserve the name → attach a Trusted Publisher on npmjs.com → release) and the preflight / skip rules.
+- **release:** The `0.17.1` entry now notes that it never reached npm. ([#147](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/147))
+
 ## [0.18.0] — 2026-11-09
 
 The release that moves the whole suite onto the **OpenCode v2 plugin API** (`@opencode/plugin`, [ADR-0019](docs/adr/0019-opencode-v2-cutover.md)). In the order it landed:
@@ -104,6 +120,8 @@ The release that moves the whole suite onto the **OpenCode v2 plugin API** (`@op
 - **all packages:** Brought the root documentation in line with the completed OpenCode v2 cutover ([ADR-0019](docs/adr/0019-opencode-v2-cutover.md), source of truth [#128](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/128)). `CLAUDE.md` / `AGENTS.md` drop the mid-migration banner, correct the package count to sixteen (three private), remove every `code-index` reference, describe each plugin by the v2 domain transforms and hooks it really registers, re-derive the models-info `Authorization` handoff on `Provider.Info.headers`, document that `oauth2` must be listed before `models-info` and `lightbridge`, and record the `effect` peer-dependency invariant and the Effect-logger convention. The remaining v1-shaped guides and config examples (`README.md`, `GETTING_STARTED.md`, `docs/architecture.md`, `docs/troubleshooting.md`, `docs/local-development.md`, `docs/github-actions.md`, `docs/kubernetes.md`, `docs/security.md`, `docs/well-known.md`, `docs/lightbridge.md`, `docs/repo-auth.md`) move to the v2 config shape (`plugins`, `providers`, `settings`). `plans/opencode-v2.md` is marked done, and `docs/adr/0019-opencode-v2-cutover.md` no longer points at the removed `code-index` package. The preamble above now says sixteen packages and drops the `code-index` tag. ([#142](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/142))
 
 ## [0.17.1] — 2026-09-18
+
+> **Never published to npm.** No `publish.yml` run was made for 0.17.1 — every `@vymalo/*` package went from 0.17.0 straight to 0.18.0 (`npm view` lists no 0.17.1 for any of them), so its dependency pin reached consumers with 0.18.0. The entry below is kept as the record of what the version contained.
 
 A dependency-only patch. No package's code changes in this release — it exists to carry a
 transitive-dependency pin that the 0.17.0 publish gate rejected, so the suite has a version on npm

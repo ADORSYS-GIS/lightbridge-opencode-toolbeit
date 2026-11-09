@@ -54,6 +54,16 @@ jobs:
           scope: '@vymalo'
           always-auth: true
 
+      - name: Publish preflight (every package, before anything is pushed)
+        # Runs in dry-run too. For each published package: classify its version
+        # on the registry, and for every one that still has to publish run the
+        # npm Trusted Publishing OIDC exchange — the exact call pnpm makes before
+        # its PUT, without the PUT. A missing Trusted Publisher, a name that was
+        # never bootstrapped, or a hand-published version now fails the run here,
+        # before a single package is published, instead of partway through.
+        # See CLAUDE.md → Releasing → "Adding a new published package".
+        run: node scripts/release/publish-guard.mjs preflight
+
       - name: Install (frozen lockfile)
         # Guarantees the installed tree exactly matches pnpm-lock.yaml — no
         # silent dependency drift between dev and the publish run.
@@ -93,101 +103,21 @@ jobs:
           pnpm --filter @vymalo/opencode-browser-extension zip:firefox
           ls -la apps/browser-extension/.output/*.zip
 
-      - name: Pack oauth2 tarball (for inspection and as a release asset)
+      - name: Pack tarballs (all published packages)
+        # One loop over the single package list in scripts/release/publish-guard.mjs
+        # (PUBLISH_ORDER) — no per-package copy of the list to drift.
         run: |
-          mkdir -p dist-tarball/oauth2
-          pnpm --filter @vymalo/opencode-oauth2 pack \
-            --pack-destination "$PWD/dist-tarball/oauth2"
-          ls -la dist-tarball/oauth2/
-
-      - name: Pack auth-core tarball
-        run: |
-          mkdir -p dist-tarball/auth-core
-          pnpm --filter @vymalo/opencode-auth-core pack \
-            --pack-destination "$PWD/dist-tarball/auth-core"
-          ls -la dist-tarball/auth-core/
-
-      - name: Pack models-info tarball
-        run: |
-          mkdir -p dist-tarball/models-info
-          pnpm --filter @vymalo/opencode-models-info pack \
-            --pack-destination "$PWD/dist-tarball/models-info"
-          ls -la dist-tarball/models-info/
-
-      - name: Pack ratelimit tarball
-        run: |
-          mkdir -p dist-tarball/ratelimit
-          pnpm --filter @vymalo/opencode-ratelimit pack \
-            --pack-destination "$PWD/dist-tarball/ratelimit"
-          ls -la dist-tarball/ratelimit/
-
-      - name: Pack browser tarball
-        run: |
-          mkdir -p dist-tarball/browser
-          pnpm --filter @vymalo/opencode-browser pack \
-            --pack-destination "$PWD/dist-tarball/browser"
-          ls -la dist-tarball/browser/
-
-      - name: Pack browser-mcp tarball
-        run: |
-          mkdir -p dist-tarball/browser-mcp
-          pnpm --filter @vymalo/opencode-browser-mcp pack \
-            --pack-destination "$PWD/dist-tarball/browser-mcp"
-          ls -la dist-tarball/browser-mcp/
-
-      - name: Pack devtools tarball
-        run: |
-          mkdir -p dist-tarball/devtools
-          pnpm --filter @vymalo/opencode-devtools pack \
-            --pack-destination "$PWD/dist-tarball/devtools"
-          ls -la dist-tarball/devtools/
-
-      - name: Pack devtools-mcp tarball
-        run: |
-          mkdir -p dist-tarball/devtools-mcp
-          pnpm --filter @vymalo/opencode-devtools-mcp pack \
-            --pack-destination "$PWD/dist-tarball/devtools-mcp"
-          ls -la dist-tarball/devtools-mcp/
-
-      - name: Pack otel tarball
-        run: |
-          mkdir -p dist-tarball/otel
-          pnpm --filter @vymalo/opencode-otel pack \
-            --pack-destination "$PWD/dist-tarball/otel"
-          ls -la dist-tarball/otel/
-
-      - name: Pack repo-auth tarball
-        run: |
-          mkdir -p dist-tarball/repo-auth
-          pnpm --filter @vymalo/opencode-repo-auth pack \
-            --pack-destination "$PWD/dist-tarball/repo-auth"
-          ls -la dist-tarball/repo-auth/
-
-      - name: Pack core-otel tarball
-        run: |
-          mkdir -p dist-tarball/core-otel
-          pnpm --filter @vymalo/opencode-core-otel pack \
-            --pack-destination "$PWD/dist-tarball/core-otel"
-          ls -la dist-tarball/core-otel/
-
-      - name: Pack provider-sync tarball
-        run: |
-          mkdir -p dist-tarball/provider-sync
-          pnpm --filter @vymalo/opencode-provider-sync pack \
-            --pack-destination "$PWD/dist-tarball/provider-sync"
-          ls -la dist-tarball/provider-sync/
-
-      - name: Pack lightbridge tarball
-        run: |
-          mkdir -p dist-tarball/lightbridge
-          pnpm --filter @vymalo/opencode-lightbridge pack \
-            --pack-destination "$PWD/dist-tarball/lightbridge"
-          ls -la dist-tarball/lightbridge/
+          set -euo pipefail
+          node scripts/release/publish-guard.mjs list | while read -r _dir name short; do
+            mkdir -p "dist-tarball/${short}"
+            pnpm --filter "${name}" pack --pack-destination "$PWD/dist-tarball/${short}" </dev/null
+            ls -la "dist-tarball/${short}/"
+          done
 
       - name: Verify tarball contents
         # Defense-in-depth: confirms each package is shipping its dist/, NOT
         # shipping source or tests, and that the package isn't accidentally
-        # empty. Runs against both tarballs.
+        # empty. Runs against every published tarball.
         run: |
           set -euo pipefail
           verify_tarball() {
@@ -221,264 +151,39 @@ jobs:
             echo "OK: $tarball"
           }
 
-          for tarball in dist-tarball/oauth2/*.tgz dist-tarball/auth-core/*.tgz dist-tarball/models-info/*.tgz dist-tarball/ratelimit/*.tgz dist-tarball/browser/*.tgz dist-tarball/browser-mcp/*.tgz dist-tarball/devtools/*.tgz dist-tarball/devtools-mcp/*.tgz dist-tarball/otel/*.tgz dist-tarball/repo-auth/*.tgz dist-tarball/core-otel/*.tgz dist-tarball/provider-sync/*.tgz dist-tarball/lightbridge/*.tgz; do
+          expected=$(node scripts/release/publish-guard.mjs list | wc -l | tr -d ' ')
+          found=$(ls dist-tarball/*/*.tgz | wc -l | tr -d ' ')
+          if [ "$expected" != "$found" ]; then
+            echo "FAIL: expected $expected tarballs (one per published package), found $found"
+            exit 1
+          fi
+
+          for tarball in dist-tarball/*/*.tgz; do
             verify_tarball "$tarball"
           done
 
-      - name: Publish auth-core to npm (with provenance)
+      - name: Publish to npm (ordered, with provenance)
         if: ${{ inputs.dry_run != true }}
-        # Published BEFORE oauth2: oauth2 depends on @vymalo/opencode-auth-core
-        # (rewritten from workspace:* to the real version on publish), so the
-        # dependency must already exist on the registry when oauth2's tarball
-        # is pushed, or installs of the newly published oauth2 fail (ERESOLVE).
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-auth-core/package.json').version")
-          if npm view "@vymalo/opencode-auth-core@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-auth-core@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-auth-core publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish core-otel to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        # Alongside auth-core: the other foundational shared package. otel
-        # depends on @vymalo/opencode-core-otel (rewritten from workspace:*
-        # to the real version on publish), and lightbridge depends on BOTH
-        # this and auth-core — both must exist on the registry before either
-        # dependent's tarball is pushed.
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-core-otel/package.json').version")
-          if npm view "@vymalo/opencode-core-otel@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-core-otel@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-core-otel publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish provider-sync to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        # Alongside auth-core/core-otel: the third foundational shared
-        # package. oauth2 depends on @vymalo/opencode-provider-sync
-        # (rewritten from workspace:* to the real version on publish), so it
-        # must exist on the registry before oauth2's tarball is pushed.
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-provider-sync/package.json').version")
-          if npm view "@vymalo/opencode-provider-sync@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-provider-sync@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-provider-sync publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish repo-auth to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        # After auth-core: repo-auth depends on @vymalo/opencode-auth-core
-        # (rewritten from workspace:* to the real version on publish), so the
-        # dependency must exist on the registry first.
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-repo-auth/package.json').version")
-          if npm view "@vymalo/opencode-repo-auth@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-repo-auth@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-repo-auth publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish oauth2 to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        # Depends on BOTH @vymalo/opencode-auth-core and
-        # @vymalo/opencode-provider-sync (each rewritten from workspace:* to
-        # the real version on publish) — both must already be on the registry.
-        # --provenance:    generates a signed SLSA L2 attestation linking the
-        #                  tarball to this workflow run + commit SHA. npm
-        #                  verifies it server-side; consumers can verify
-        #                  locally via `npm install --provenance` or by
-        #                  inspecting the package page on npmjs.com.
-        # --no-git-checks: bypass pnpm's "are you on a clean main branch?"
-        #                  guard. Release events check out a detached HEAD on
-        #                  the tag SHA, which would otherwise trip the check.
+        # One ordered loop over PUBLISH_ORDER (scripts/release/publish-guard.mjs):
+        # dependencies first (auth-core, core-otel, provider-sync, then their
+        # dependents, lightbridge last) because a published dependent's
+        # workspace:* deps are rewritten to real versions that must already
+        # exist on the registry.
+        #
+        # A package is SKIPPED only if its version on the registry carries a
+        # provenance attestation from THIS repo's publish.yml. A version that
+        # is on npm without that proof (a manual publish, another workflow)
+        # fails the run instead of being reported as "already released" — the
+        # old `npm view` skip hid a never-publishable provider-sync for two
+        # months. The preflight step above already checked every package.
+        #
+        # --provenance:    signed SLSA attestation linking the tarball to this
+        #                  workflow run + commit SHA; consumers verify it via
+        #                  `npm audit signatures` or the npmjs.com package page.
+        # --no-git-checks: release events check out a detached HEAD, which
+        #                  pnpm's clean-branch guard would otherwise reject.
         # --access public: required for first publish under a new scope.
-        # Skips publish if the version is already on the registry — so a
-        # release that only bumps one package's version doesn't fail.
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-oauth2/package.json').version")
-          if npm view "@vymalo/opencode-oauth2@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-oauth2@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-oauth2 publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          # Belt and braces — also enables provenance for any underlying npm
-          # CLI invocation that pnpm delegates to.
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish models-info to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-models-info/package.json').version")
-          if npm view "@vymalo/opencode-models-info@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-models-info@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-models-info publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish ratelimit to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-ratelimit/package.json').version")
-          if npm view "@vymalo/opencode-ratelimit@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-ratelimit@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-ratelimit publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish browser to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-browser/package.json').version")
-          if npm view "@vymalo/opencode-browser@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-browser@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-browser publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish browser-mcp to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-browser-mcp/package.json').version")
-          if npm view "@vymalo/opencode-browser-mcp@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-browser-mcp@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-browser-mcp publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish devtools to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-devtools/package.json').version")
-          if npm view "@vymalo/opencode-devtools@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-devtools@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-devtools publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish devtools-mcp to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-devtools-mcp/package.json').version")
-          if npm view "@vymalo/opencode-devtools-mcp@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-devtools-mcp@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-devtools-mcp publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish otel to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        # After core-otel: otel depends on @vymalo/opencode-core-otel
-        # (rewritten from workspace:* to the real version on publish).
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-otel/package.json').version")
-          if npm view "@vymalo/opencode-otel@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-otel@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-otel publish \
-            --access public \
-            --no-git-checks \
-            --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Publish lightbridge to npm (with provenance)
-        if: ${{ inputs.dry_run != true }}
-        # Last: lightbridge depends on BOTH @vymalo/opencode-auth-core and
-        # @vymalo/opencode-core-otel (each rewritten from workspace:* to the
-        # real version on publish) — both must already be on the registry.
-        run: |
-          set -e
-          version=$(node -p "require('./packages/opencode-lightbridge/package.json').version")
-          if npm view "@vymalo/opencode-lightbridge@${version}" version >/dev/null 2>&1; then
-            echo "::notice::@vymalo/opencode-lightbridge@${version} already on npm — skipping."
-            exit 0
-          fi
-          pnpm --filter @vymalo/opencode-lightbridge publish \
-            --access public \
-            --no-git-checks \
-            --provenance
+        run: node scripts/release/publish-guard.mjs publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.MCP_NPM_AUTH_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
