@@ -92,12 +92,13 @@ If you're hitting the *opposite* problem — a non-compliant IdP that rejects th
 - `sync_failed` with `error: "model discovery failed (403) at https://api.example.com/v1/models"`.
 - `model_discovery_error_body` with `status: 403` and a `bodyPreview` (token-shaped substrings are masked by `scrubSecrets`).
 
-**Diagnose.** Copy the access token from the cache and curl `/v1/models` directly:
+**Diagnose.** Copy the access token from the credential file and curl `/v1/models` directly:
 
 ```sh
-# Pull the access token from the cache (replace with your platform's path).
+# Pull the access token from the credential file in the state dir (replace with your
+# platform's path; macOS shown — Linux is ~/.local/state, ADR-0022).
 token=$(jq -r .token.accessToken \
-  ~/Library/Caches/opencode-oauth2/opencode-oauth2-model-sync/miaou.json)
+  ~/Library/Application\ Support/opencode-oauth2/opencode-oauth2-model-sync/miaou.json)
 
 # Hit /v1/models with it.
 curl -i \

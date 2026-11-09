@@ -14,7 +14,7 @@ On an enrolled repo (one whose config declares a `projectId` in a provider's `se
 
 1. **Resolves the repo's git identity** — worktree-aware, credentials stripped — for logging and repo correlation (v1 derives nothing from it; see [Out of scope / deferred](#out-of-scope--deferred)).
 2. **Ensures the developer's human token** via `auth-core`'s `TokenRuntime` (`device_code` / `authorization_code`, `offline_access`), cached per human.
-3. **Exchanges it once per project** — a single RFC 8693 token exchange presenting `project_id` as a form param — and caches the SPI-sealed project token per project (`human-<hash(human:projectId)>.json`, OS cache dir, `0o600`, atomic rename, NTFS-safe key).
+3. **Exchanges it once per project** — a single RFC 8693 token exchange presenting `project_id` as a form param — and caches the SPI-sealed project token per project (`human-<hash(human:projectId)>.json`, in the durable OS **state** dir — never the purgeable cache dir, [ADR-0022](adr/0022-credentials-in-state-dir.md) — `0o600`, atomic rename, NTFS-safe key).
 4. **Injects `Authorization: Bearer <project-token>`** on the *gateway provider only* (guarded by managed provider id), per request, from the `model.request` session hook.
 
 It **no-ops** (never crashes, never touches other providers) when: the repo has no `origin` remote, the provider has no `settings.repoAuth` block, the block has no `projectId`, or the provider is already managed by `@vymalo/opencode-oauth2`.
@@ -65,7 +65,7 @@ sequenceDiagram
     participant OC as OpenCode
     participant RA as opencode-repo-auth
     participant Git as .git/config
-    participant Cache as ~/.cache/opencode-repo-auth
+    participant Cache as ~/.local/state/opencode-repo-auth
     participant KC as Keycloak token endpoint
     participant GW as Gateway provider
 
@@ -104,7 +104,7 @@ Runs on every provider load/reload. It must stay **synchronous and cheap**, so i
 1. **Walk `editor.list()`**; a provider opts in via **`settings.repoAuth`**. Parse + validate the block (see [Config shape](#config-shape)). Providers without it are skipped (`repo_auth_provider_skipped`).
 2. **oauth2-conflict guard** (see below): a provider that looks oauth2-managed is skipped with `repo_auth_skipped_oauth2_provider` (warn).
 3. **Single-IdP guard:** two opted-in providers must resolve to the same IdP (they share one human root file); the first IdP group wins, the rest are skipped with `repo_auth_multiple_idps_unsupported`.
-4. **Build the runtimes** over `auth-core`: one `TokenRuntime` keyed by the human identity, `cacheDir = <cacheRoot>/opencode-repo-auth`. They are rebuilt only when the managed-set signature changes (`repo_auth_runtime_rebuild` / `repo_auth_runtime_reused`).
+4. **Build the runtimes** over `auth-core`: one `TokenRuntime` keyed by the human identity, `stateDir = <stateRoot>/opencode-repo-auth` (macOS `~/Library/Application Support`, Linux `$XDG_STATE_HOME` or `~/.local/state`, Windows `%LOCALAPPDATA%`; refresh locks in `locks/` beside the tokens). They are rebuilt only when the managed-set signature changes (`repo_auth_runtime_rebuild` / `repo_auth_runtime_reused`).
 5. **Stamp already-resolved bearers** (sync): `propagateCachedBearer(editor, id, authorization, logger, stamped)` writes `Provider.Info.headers.Authorization` only if it was handed a value. See [Config-time bearer handoff](#config-time-bearer-handoff-for-models-info).
 
 The git identity is resolved **once at plugin load** (not per transform): `repo_auth_remote_resolved` or `repo_auth_remote_missing`. Log-only, as before.
@@ -181,8 +181,8 @@ The flow is two-phase — **boot** (plugin load + provider transform) and **per 
 | Project | `proj-123` | declared in `opencode.json`, never derived |
 | IdP | `https://idp.acme.com/realms/camer-digital` (Keycloak) | |
 | Gateway | `https://gateway.acme.com/v1` | the only provider repo-auth manages |
-| **Human token** | `eyJ…` (JWT) + refresh token | "who Alice is" — cached at `~/.cache/opencode-repo-auth/human.json` |
-| **Project token** | `eyJ…` (JWT with `account_id` + `project_id` claims) | "Alice working on proj-123" — cached at `~/.cache/opencode-repo-auth/human:<hash>.json` |
+| **Human token** | `eyJ…` (JWT) + refresh token | "who Alice is" — cached at `~/.local/state/opencode-repo-auth/human.json` (Linux; see ADR-0022 for other OSes) |
+| **Project token** | `eyJ…` (JWT with `account_id` + `project_id` claims) | "Alice working on proj-123" — cached at `~/.local/state/opencode-repo-auth/human-<hash>.json` |
 
 `opencode.json` (the enrolled-repo config):
 
@@ -214,7 +214,7 @@ The flow is two-phase — **boot** (plugin load + provider transform) and **per 
 1. opencode starts in the repo and loads plugins. repo-auth's plugin Effect runs and captures the host's Effect context so its diagnostics reach the host log, never the terminal.
 2. **Git identity (log-only):** the plugin reads `.git/config` (worktree-aware — `.git` is a *file* here pointing at the common dir) and finds `origin = git@github.com:acme/webapp.git`, normalizes it to `github.com/acme/webapp` (userinfo stripped, scp form normalized), logs `repo_auth_remote_resolved`. Nothing is derived from it in v1.
 3. **Provider transform:** the plugin finds `gateway` carries `settings.repoAuth` → parses it → `projectId = "proj-123"` + the auth config. This is the only provider it will ever touch.
-4. **Runtime:** one `TokenRuntime` (auth-core) keyed by the human identity, cache dir `~/.cache/opencode-repo-auth/`.
+4. **Runtime:** one `TokenRuntime` (auth-core) keyed by the human identity, state dir `~/.local/state/opencode-repo-auth/`.
 5. **Warmup (async, non-interactive):** `resolveCachedBearer` refreshes the human token if needed and does the exchange below. On first run there is no cached login, so it is skipped (`repo_auth_bearer_propagation_skipped_no_token`) and the login happens on the first request instead. On success the plugin calls `ctx.provider.reload()` and the transform stamps `Provider.Info.headers.Authorization` so `models-info` can fetch an OAuth2-protected `modelsInfoUrl`. A user-set `Authorization` still wins.
 6. Boot is done. Nothing was sent to the gateway.
 
@@ -223,7 +223,7 @@ The flow is two-phase — **boot** (plugin load + provider transform) and **per 
 1. Alice types a message; opencode resolves the model to provider `gateway` and fires the `model.request` session hook.
 2. **Guard:** `gateway` is a managed provider (carries `settings.repoAuth`) → proceed. Any other provider → return untouched.
 3. **Human token** (`ensure(human)`, interactive allowed): if Alice never logged in, this is where the device-code flow runs — auth-core prints a `[opencode-repo-auth] device-code login for …` block to the terminal with the verification URL and code (the one deliberate exception to the plugin's otherwise-silent terminal, [ADR-0014](adr/0014-suite-wide-no-terminal-mirror.md) — every other diagnostic goes only to OpenCode's own log), Alice completes it in her browser, the plugin polls and stores the human token + refresh token. If she has one, it's reused/refreshed silently. A first-time refresh is one `POST grant_type=refresh_token`.
-4. **Project token:** read `<cacheDir>/human-<hash(human:proj-123)>.json`:
+4. **Project token:** read `<stateDir>/human-<hash(human:proj-123)>.json`:
    - still valid → use it;
    - expired or absent → one POST to the token endpoint (no user interaction — the human refresh token makes it automatic) → save → use it:
 
@@ -271,10 +271,10 @@ chat request → inject project token on the gateway provider only
 | **Renewal** | Has a **refresh token** (`offline_access` scope) → renews itself silently | **No refresh token** → when it expires, re-do the exchange ("model b") |
 | **Lifetime** | Longer (Keycloak access token, refreshable) | Short (typically minutes) |
 | **Who consumes it** | Only the plugin itself — as the `subject_token` in the exchange | The **gateway** — as `Authorization: Bearer` on every chat request |
-| **Where it's cached** | `~/.cache/opencode-repo-auth/human.json` | `~/.cache/opencode-repo-auth/human-<hash>("human:<proj-123>").json` (identity-prefixed `-`, hashed over the `identity:key` pair — no `:` in filenames, so the layout is NTFS-safe; separate human identities can never collide on the same project key) |
+| **Where it's cached** | `~/.local/state/opencode-repo-auth/human.json` | `~/.local/state/opencode-repo-auth/human-<hash>("human:<proj-123>").json` (identity-prefixed `-`, hashed over the `identity:key` pair — no `:` in filenames, so the layout is NTFS-safe; separate human identities can never collide on the same project key) |
 | **If it leaks** | Attacker can impersonate Alice — exchange it for project tokens of **any** project she belongs to. This is the master credential. | Attacker can make gateway requests billed to **one project**, for a few minutes, until it expires. Bounded blast radius. |
 
-> **If a project token was revoked but its cached copy hasn't expired yet**, the gateway will keep returning `401` until the TTL elapses — the exchange only re-runs on expiry, and the plugin does not observe 401s (it registers no response hook). The project token is bound to a short TTL by design, so this self-heals within minutes. To force it now, delete the cached file (`<cacheDir>/human-<hash>.json`) — the next request re-exchanges from the human root. `repo-auth reset` (see [Caching and reset](#caching-and-reset)) clears the human root and every exchanged token at once.
+> **If a project token was revoked but its cached copy hasn't expired yet**, the gateway will keep returning `401` until the TTL elapses — the exchange only re-runs on expiry, and the plugin does not observe 401s (it registers no response hook). The project token is bound to a short TTL by design, so this self-heals within minutes. To force it now, delete the cached file (`<stateDir>/human-<hash>.json`) — the next request re-exchanges from the human root. `repo-auth reset` (see [Caching and reset](#caching-and-reset)) clears the human root and every exchanged token at once.
 
 The human token is the **offline root** (the thing that can renew itself); the project token is the **leaf credential** (what actually touches the gateway). The gateway never sees the human token; the human token never carries project context.
 
@@ -344,11 +344,11 @@ Plugin-level options (v1: `pluginConfig`) go on the plugin entry; the only one i
 ### Runtime composition over auth-core
 
 - **One `TokenRuntime` per distinct `AuthServerConfig`** (v1: one — a single Keycloak realm). The runtime is identity-keyed; the identity is the **human** (`"human"` constant — the plugin is single-IdP in v1; if multi-IdP ever lands, derive `issuer|clientId`).
-- **Human root token**: `ensure()` / `refresh()` — cached at `<cacheDir>/human.json`.
-- **Project token**: `exchangeTo(projectId, subjectToken, { project_id })` — cached at `<cacheDir>/human-<hash("human:"+projectId)>.json`.
+- **Human root token**: `ensure()` / `refresh()` — cached at `<stateDir>/human.json`.
+- **Project token**: `exchangeTo(projectId, subjectToken, { project_id })` — cached at `<stateDir>/human-<hash("human:"+projectId)>.json`.
 - **Key derivation** is `auth-core`'s `exchangeCacheKey` — `${identity}-${hashCacheKey(`${identity}:${key}`)}`: a deterministic truncated `sha256` hex of the **`identity:key` pair** (the `/`-separator was replaced by `-` and the full pair is hashed, so the filename is NTFS-safe — no `:` — and two identities exchanging for the same project can never collide). It is a cache-key derivation from an upstream id, not a minted record id — the CUID2 rule does not apply. `FileCacheStore` uses keys verbatim as filenames ([`cache.ts:36`](../packages/opencode-auth-core/src/cache.ts)).
-- **Reset / log-out** (`repo_auth_reset`): removes `human.json` **and** every `human-*` exchanged token — `TokenRuntime.reset` now walks the cache dir via `listKeys(`${identity}-`)` and deletes each ([`token-runtime.ts`](../packages/opencode-auth-core/src/token-runtime.ts)). A bad day can be undone with `rm -rf <cacheDir>`, but the API no longer leaves orphaned project tokens behind a cleared human root.
-- **`cacheDir`**: `join(resolveCacheRoot(), "opencode-repo-auth")` — the ticket's namespace, and the pattern `resolveCacheRoot` exists for (oauth2 keeps `<root>/opencode-oauth2`; auth-core's default `opencode-auth-core/` is not used here).
+- **Reset / log-out** (`repo_auth_reset`): removes `human.json` **and** every `human-*` exchanged token — `TokenRuntime.reset` now walks the state dir via `listKeys(`${identity}-`)` and deletes each ([`token-runtime.ts`](../packages/opencode-auth-core/src/token-runtime.ts)). A bad day can be undone with `rm -rf <stateDir>` (you will then sign in again), but the API no longer leaves orphaned project tokens behind a cleared human root.
+- **`stateDir`**: `join(resolveStateRoot(), "opencode-repo-auth")` — the ticket's namespace under the durable state root (ADR-0022; oauth2 keeps `<root>/opencode-oauth2`; auth-core's default `opencode-auth-core/` is not used here). Refresh locks go in `<stateDir>/locks/`.
 
 ### The auth-core gap (key decision)
 
@@ -409,7 +409,7 @@ The v2 interaction and lifecycle diagrams are under [Plugin behavior](#plugin-be
 sequenceDiagram
     autonumber
     participant RA as opencode-repo-auth
-    participant Cache as ~/.cache/opencode-repo-auth
+    participant Cache as ~/.local/state/opencode-repo-auth
     participant KC as Keycloak token endpoint
     participant SPI as LightbridgeTokenExchangeProvider
     participant AZ as authz resolver (OPA)
@@ -436,7 +436,7 @@ sequenceDiagram
 - **Managed-provider guard** — the project bearer is only ever injected on providers carrying `settings.repoAuth`. No repo/project identity leaks to other providers (the ticket's "leaking repo URL to non-gateway providers" risk).
 - **oauth2-conflict guard** — never both plugins on one provider; skip + warn, never crash.
 - **Redaction** — auth-core's logger redacts `token|secret|password` fields; `scrubSecrets` masks token-shaped substrings in error bodies; `redactUrl` strips userinfo/query from logged endpoints. The normalized remote has userinfo stripped before it is ever logged.
-- **Disk** — `0o600` files, atomic rename, `0o700` dirs (auth-core `FileCacheStore`, ADR-0005).
+- **Disk** — `0o600` files, atomic rename, `0o700` dirs (auth-core `FileCacheStore`, ADR-0005), under the durable state root, never the cache root (ADR-0022).
 - **Fail closed** — exchange failure ⇒ no header ⇒ gateway 401. The plugin never invents a token, and never lets its config-time stamp outlive a failed exchange (`dropStampedAuthorization`).
 - **No content capture** — the plugin only reads/writes headers and the token cache; it never sees prompts or responses.
 
@@ -495,6 +495,6 @@ sequenceDiagram
 
 The `repoAuth` block's own fields (`projectId`, `issuer`, `clientId`, `scopes`, `authFlow`, endpoints, `pkce`,
 `clientSecret`, `subjectTokenSource`) are unchanged, as are the exchange wire contract, the cache layout
-(`~/.cache/opencode-repo-auth`, so an existing login survives the upgrade), and every surviving `repo_auth_*`
+(originally `~/.cache/opencode-repo-auth`, so an existing login survived that upgrade — **superseded by [ADR-0022](adr/0022-credentials-in-state-dir.md): credentials now live in the state dir and one re-login is required**), and every surviving `repo_auth_*`
 event name. Renamed: `repo_auth_config_hook_*` → `repo_auth_plugin_start` / `repo_auth_transform_finished`,
 `repo_auth_chat_headers_*` → `repo_auth_model_request_*`. The `repo_auth_bearer_propagat*` events are unchanged.

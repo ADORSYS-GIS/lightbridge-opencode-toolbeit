@@ -181,8 +181,8 @@ function parseFormBody(init?: RequestInit): URLSearchParams {
   return new URLSearchParams(String(body ?? ""));
 }
 
-async function seedHuman(cacheDir: string): Promise<void> {
-  await new FileCacheStore(cacheDir).save(HUMAN_IDENTITY, {
+async function seedHuman(stateDir: string): Promise<void> {
+  await new FileCacheStore(stateDir).save(HUMAN_IDENTITY, {
     accessToken: "human-token",
     tokenType: "Bearer",
     refreshToken: "human-refresh",
@@ -209,11 +209,11 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("injects the project bearer per request on a managed provider", async () => {
-    const cacheDir = await tmp("repo-auth-oc-chat-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-chat-");
+    await seedHuman(stateDir);
     const harness = await start({
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () =>
         makeJsonResponse({ access_token: "chat-scoped", token_type: "Bearer", expires_in: 300 })
     });
@@ -224,11 +224,11 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("overwrites a pre-existing Authorization on a managed provider (project bearer wins)", async () => {
-    const cacheDir = await tmp("repo-auth-oc-wins-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-wins-");
+    await seedHuman(stateDir);
     const harness = await start({
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () =>
         makeJsonResponse({ access_token: "chat-scoped", token_type: "Bearer", expires_in: 300 })
     });
@@ -239,10 +239,10 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("leaves non-managed providers untouched and never calls the network", async () => {
-    const cacheDir = await tmp("repo-auth-oc-other-");
+    const stateDir = await tmp("repo-auth-oc-other-");
     const harness = await start({
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () => {
         throw new Error("fetch must not be called for an unmanaged provider");
       }
@@ -257,10 +257,10 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("does not resolve any token inside the transform itself (sync and cheap)", async () => {
-    const cacheDir = await tmp("repo-auth-oc-sync-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-sync-");
+    await seedHuman(stateDir);
     const fetchImpl = vi.fn(async () => makeJsonResponse({}));
-    const harness = await start({ logger: createSilentLogger(), cacheDir, fetchImpl });
+    const harness = await start({ logger: createSilentLogger(), stateDir, fetchImpl });
 
     harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
 
@@ -268,12 +268,12 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("FAILS CLOSED: an exchange error injects no header and the hook resolves", async () => {
-    const cacheDir = await tmp("repo-auth-oc-failclosed-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-failclosed-");
+    await seedHuman(stateDir);
     const logger = createRecordingLogger();
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async () =>
         new Response(JSON.stringify({ error: "invalid_grant" }), { status: 404 })
     });
@@ -289,11 +289,11 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("FAILS CLOSED: a network error injects no header", async () => {
-    const cacheDir = await tmp("repo-auth-oc-failclosed-net-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-failclosed-net-");
+    await seedHuman(stateDir);
     const harness = await start({
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () => {
         throw new Error("connection refused");
       }
@@ -305,10 +305,10 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("FAILS CLOSED: a cold cache (no human token) injects no header", async () => {
-    const cacheDir = await tmp("repo-auth-oc-cold-");
+    const stateDir = await tmp("repo-auth-oc-cold-");
     const harness = await start({
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () => {
         throw new Error("no network in this test");
       }
@@ -320,11 +320,11 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("skips a provider without projectId, emitting a warning, and injects nothing", async () => {
-    const cacheDir = await tmp("repo-auth-oc-nopid-");
+    const stateDir = await tmp("repo-auth-oc-nopid-");
     const logger = createRecordingLogger();
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async () => makeJsonResponse({})
     });
     harness.transform([
@@ -339,11 +339,11 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("skips a provider carrying settings.oauth2, emitting a warning", async () => {
-    const cacheDir = await tmp("repo-auth-oc-conflict-");
+    const stateDir = await tmp("repo-auth-oc-conflict-");
     const logger = createRecordingLogger();
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async () => makeJsonResponse({})
     });
     harness.transform([
@@ -361,11 +361,11 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("skips a provider owned by an Integration (OAuth-managed), emitting a warning", async () => {
-    const cacheDir = await tmp("repo-auth-oc-integration-");
+    const stateDir = await tmp("repo-auth-oc-integration-");
     const logger = createRecordingLogger();
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async () => makeJsonResponse({})
     });
     harness.transform([
@@ -377,12 +377,12 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("skips a malformed repoAuth block but still manages the remaining providers", async () => {
-    const cacheDir = await tmp("repo-auth-oc-malformed-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-malformed-");
+    await seedHuman(stateDir);
     const logger = createRecordingLogger();
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async () =>
         makeJsonResponse({ access_token: "ok-token", token_type: "Bearer", expires_in: 300 })
     });
@@ -399,12 +399,12 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("skips a provider whose auth block fails validation and injects nothing", async () => {
-    const cacheDir = await tmp("repo-auth-oc-invalid-auth-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-invalid-auth-");
+    await seedHuman(stateDir);
     const logger = createRecordingLogger();
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async () =>
         makeJsonResponse({ access_token: "ok-token", token_type: "Bearer", expires_in: 300 })
     });
@@ -418,13 +418,13 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("keeps only the first IdP group when providers disagree (single-IdP v1 guard)", async () => {
-    const cacheDir = await tmp("repo-auth-oc-2idp-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-2idp-");
+    await seedHuman(stateDir);
     const logger = createRecordingLogger();
     const captured: string[] = [];
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async (_input, init) => {
         const body = parseFormBody(init);
         if (body.get("grant_type") === "urn:ietf:params:oauth:grant-type:token-exchange") {
@@ -451,12 +451,12 @@ describe("createOpencodeRepoAuthPlugin", () => {
   });
 
   it("reuses the runtime when the managed set is unchanged, drops it when opt-in vanishes", async () => {
-    const cacheDir = await tmp("repo-auth-oc-reuse-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-reuse-");
+    await seedHuman(stateDir);
     const logger = createRecordingLogger();
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async () =>
         makeJsonResponse({ access_token: "tok", token_type: "Bearer", expires_in: 300 })
     });
@@ -505,10 +505,10 @@ describe("config-time bearer handoff (async resolve, sync stamp)", () => {
     makeJsonResponse({ access_token: "project-bearer", token_type: "Bearer", expires_in: 300 });
 
   it("stamps Provider.Info.headers.Authorization after the async warmup reloads", async () => {
-    const cacheDir = await tmp("repo-auth-oc-stamp-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-stamp-");
+    await seedHuman(stateDir);
     const logger = createRecordingLogger();
-    const harness = await start({ logger, cacheDir, fetchImpl: ok });
+    const harness = await start({ logger, stateDir, fetchImpl: ok });
     const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
 
     harness.transform([provider]);
@@ -524,10 +524,10 @@ describe("config-time bearer handoff (async resolve, sync stamp)", () => {
   });
 
   it("warms once per managed set: the reload does not trigger another warmup", async () => {
-    const cacheDir = await tmp("repo-auth-oc-once-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-once-");
+    await seedHuman(stateDir);
     const fetchImpl = vi.fn(ok);
-    const harness = await start({ logger: createSilentLogger(), cacheDir, fetchImpl });
+    const harness = await start({ logger: createSilentLogger(), stateDir, fetchImpl });
 
     harness.transform([{ id: "gateway", settings: repoAuthSettings() }]);
     await harness.settle();
@@ -538,10 +538,10 @@ describe("config-time bearer handoff (async resolve, sync stamp)", () => {
   });
 
   it("never overwrites a user-set Authorization (case-insensitive)", async () => {
-    const cacheDir = await tmp("repo-auth-oc-userset-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-userset-");
+    await seedHuman(stateDir);
     const logger = createRecordingLogger();
-    const harness = await start({ logger, cacheDir, fetchImpl: ok });
+    const harness = await start({ logger, stateDir, fetchImpl: ok });
     const provider: ProviderFixture = {
       id: "gateway",
       settings: repoAuthSettings(),
@@ -558,11 +558,11 @@ describe("config-time bearer handoff (async resolve, sync stamp)", () => {
   });
 
   it("stamps nothing and never reloads on a cold cache (no interactive login at load)", async () => {
-    const cacheDir = await tmp("repo-auth-oc-coldstamp-");
+    const stateDir = await tmp("repo-auth-oc-coldstamp-");
     const logger = createRecordingLogger();
     const harness = await start({
       logger,
-      cacheDir,
+      stateDir,
       fetchImpl: async () => {
         throw new Error("load-time warmup must not attempt interactive auth");
       }
@@ -580,11 +580,11 @@ describe("config-time bearer handoff (async resolve, sync stamp)", () => {
   });
 
   it("FAILS CLOSED: a failed exchange at load stamps nothing", async () => {
-    const cacheDir = await tmp("repo-auth-oc-failstamp-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-failstamp-");
+    await seedHuman(stateDir);
     const harness = await start({
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () => new Response(JSON.stringify({ error: "denied" }), { status: 403 })
     });
     const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
@@ -597,12 +597,12 @@ describe("config-time bearer handoff (async resolve, sync stamp)", () => {
   });
 
   it("FAILS CLOSED: a later exchange failure strips the stamp it wrote, but not a user header", async () => {
-    const cacheDir = await tmp("repo-auth-oc-stripstamp-");
-    await seedHuman(cacheDir);
+    const stateDir = await tmp("repo-auth-oc-stripstamp-");
+    await seedHuman(stateDir);
     let fail = false;
     const harness = await start({
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       // expires_in 1 is inside the skew window, so every request re-exchanges.
       fetchImpl: async () =>
         fail
@@ -628,9 +628,9 @@ describe("config-time bearer handoff (async resolve, sync stamp)", () => {
   });
 
   it("clears the stamp bookkeeping when the opt-in disappears", async () => {
-    const cacheDir = await tmp("repo-auth-oc-clearstamp-");
-    await seedHuman(cacheDir);
-    const harness = await start({ logger: createSilentLogger(), cacheDir, fetchImpl: ok });
+    const stateDir = await tmp("repo-auth-oc-clearstamp-");
+    await seedHuman(stateDir);
+    const harness = await start({ logger: createSilentLogger(), stateDir, fetchImpl: ok });
     const provider: ProviderFixture = { id: "gateway", settings: repoAuthSettings() };
     harness.transform([provider]);
     await harness.settle();

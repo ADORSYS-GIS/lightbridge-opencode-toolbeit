@@ -16,7 +16,15 @@ export { buildModelsUrl, fetchModels, type ModelDiscoveryOptions } from "./model
 
 export { diffModels, normalizeModelId, normalizeModelList } from "./model-normalization.js";
 
-export { resolveCacheDir, FileCacheStore } from "./cache.js";
+export {
+  ModelCacheStore,
+  ServerCredentialStore,
+  ServerStateStore,
+  resolveCacheDir,
+  resolveStateDir,
+  type StoredCredential,
+  type StoredModels
+} from "./cache.js";
 
 export { startScheduler, type SchedulerHandle, type SchedulerOptions } from "./scheduler.js";
 

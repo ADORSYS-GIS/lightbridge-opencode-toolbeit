@@ -59,7 +59,7 @@ interface StartedPlugin {
 }
 
 async function startPlugin(
-  cacheDir: string,
+  stateDir: string,
   providerId: string,
   overrides: Record<string, unknown> = {}
 ): Promise<StartedPlugin> {
@@ -99,7 +99,7 @@ async function startPlugin(
 
   await Effect.runPromise(
     Effect.scoped(
-      createOpencodeRepoAuthPlugin({ logger: logger(), cacheDir, cwd: tmpdir() }).effect(ctx)
+      createOpencodeRepoAuthPlugin({ logger: logger(), stateDir, cwd: tmpdir() }).effect(ctx)
     )
   );
   if (!transformCb || !modelRequestHook) {
@@ -185,10 +185,10 @@ describe.skipIf(!TOKEN_URL)("repo-auth ↔ WireMock integration", () => {
   }
 
   it("exchanges the seeded human root for a sealed bearer over real HTTP, stamps it, and injects it per request", async () => {
-    const cacheDir = await makeCacheDir();
-    await new FileCacheStore(cacheDir).save("human", humanToken());
+    const stateDir = await makeCacheDir();
+    await new FileCacheStore(stateDir).save("human", humanToken());
 
-    const started = await startPlugin(cacheDir, "gateway");
+    const started = await startPlugin(stateDir, "gateway");
     await started.settle(true);
 
     // The load-time warmup exchanged (outside the transform) and the reload
@@ -211,9 +211,9 @@ describe.skipIf(!TOKEN_URL)("repo-auth ↔ WireMock integration", () => {
   });
 
   it("reuses the cached project bearer without another exchange", async () => {
-    const cacheDir = await makeCacheDir();
-    await new FileCacheStore(cacheDir).save("human", humanToken());
-    const started = await startPlugin(cacheDir, "gateway");
+    const stateDir = await makeCacheDir();
+    await new FileCacheStore(stateDir).save("human", humanToken());
+    const started = await startPlugin(stateDir, "gateway");
     await started.settle(true);
 
     // The warmup exchange is the only request so far…
@@ -228,18 +228,18 @@ describe.skipIf(!TOKEN_URL)("repo-auth ↔ WireMock integration", () => {
   });
 
   it("re-exchanges when only a stale project bearer is cached", async () => {
-    const cacheDir = await makeCacheDir();
-    await new FileCacheStore(cacheDir).save("human", humanToken());
+    const stateDir = await makeCacheDir();
+    await new FileCacheStore(stateDir).save("human", humanToken());
     // Seed an expired exchanged token under the derived project key.
     const projectKey = `human-${hashCacheKey("human:proj-123")}`;
-    await new FileCacheStore(cacheDir).save(projectKey, {
+    await new FileCacheStore(stateDir).save(projectKey, {
       accessToken: "stale-project-bearer",
       tokenType: "Bearer",
       expiresAt: Date.now() - 60_000
     });
 
     // The warmup detects the stale bearer and re-exchanges…
-    const started = await startPlugin(cacheDir, "gateway");
+    const started = await startPlugin(stateDir, "gateway");
     await started.settle(true);
     expect(started.provider.headers?.Authorization).toBe(`Bearer ${SEALED_MEMBER_TOKEN}`);
 
@@ -255,10 +255,10 @@ describe.skipIf(!TOKEN_URL)("repo-auth ↔ WireMock integration", () => {
   });
 
   it("fails closed for a non-member project: nothing stamped, no header, hook resolves", async () => {
-    const cacheDir = await makeCacheDir();
-    await new FileCacheStore(cacheDir).save("human", humanToken());
+    const stateDir = await makeCacheDir();
+    await new FileCacheStore(stateDir).save("human", humanToken());
     // proj-999 misses the member mapping → WireMock's catch-all answers 403.
-    const started = await startPlugin(cacheDir, "gateway-other", { projectId: "proj-999" });
+    const started = await startPlugin(stateDir, "gateway-other", { projectId: "proj-999" });
     await started.settle(false);
 
     // The warmup failed (non-interactive) → nothing stamped.

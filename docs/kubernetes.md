@@ -68,7 +68,7 @@ spec:
                   mountPath: /etc/opencode
                   readOnly: true
                 - name: opencode-cache
-                  mountPath: /root/.cache/opencode-oauth2
+                  mountPath: /root/.local/state/opencode-oauth2
           volumes:
             - name: oauth2-token
               projected:
@@ -83,7 +83,8 @@ spec:
             - name: opencode-config
               configMap:
                 name: opencode-config
-            # emptyDir so the access-token cache is per-pod-instance. For a
+            # emptyDir so the stored access token (credentials live in the state dir,
+            # ADR-0022, not the cache dir) is per-pod-instance. For a
             # short CronJob there's nothing to cache between runs — each pod
             # gets a fresh token. Use a PVC if you want cache survival across
             # pod restarts (rare for CronJobs).
@@ -224,7 +225,7 @@ spec:
 ### How rotation actually works
 
 1. Pod starts; kubelet writes a JWT to `/var/run/secrets/tokens/oauth2/token` valid for `expirationSeconds`.
-2. Plugin reads it on first auth, exchanges for an access token (also typically 1 hour), caches the access token in `~/.cache/opencode-oauth2/...`.
+2. Plugin reads it on first auth, exchanges for an access token (also typically 1 hour), stores the access token in the state dir, `~/.local/state/opencode-oauth2/...` (ADR-0022; not the cache dir).
 3. Access token nears expiry → `isTokenValid` returns false → `loginJwtBearer()` → `resolveSubjectToken()` re-reads the file → kubelet may have already rotated it (no-op for the plugin) → POST to IdP → new access token.
 4. Kubelet rotates the projected JWT in place, atomically. The plugin sees the new contents on the next read.
 

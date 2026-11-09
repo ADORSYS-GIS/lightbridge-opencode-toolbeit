@@ -29,7 +29,7 @@ export {
 
 export { OAuth2ModelSyncPlugin, type PluginOptions } from "./plugin.js";
 
-export { resolveCacheDir, FileCacheStore } from "./cache.js";
+export { resolveCacheDir, resolveStateDir, ServerStateStore } from "./cache.js";
 
 export { createOpencodeOauth2Plugin, PLUGIN_ID } from "./opencode.js";
 export type { OAuth2RuntimeHandle, OpenCodePluginFactoryOptions } from "./opencode.js";

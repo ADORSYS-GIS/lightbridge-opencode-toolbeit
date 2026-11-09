@@ -27,7 +27,7 @@ forked; this package is a thin composition layer plus two small injectors.
 ```mermaid
 flowchart LR
   subgraph LB["@vymalo/opencode-lightbridge"]
-    TR["one TokenRuntime · one cache dir<br/>ensure() → exchangeTo(project_id)"]
+    TR["one TokenRuntime · one credential dir<br/>ensure() → exchangeTo(project_id)"]
   end
   TR -->|"model.request hook (per request)"| GW["LLM gateway"]
   TR -->|"TokenSource.headers() (per export)"| COL["OTEL collector"]
@@ -266,14 +266,21 @@ regardless — see the next section.
 ## One login, shared cache with oauth2 (ADR-0017)
 
 The human root token lives in the **same on-disk file** `@vymalo/opencode-oauth2` uses for a server
-of this id: `<cacheRoot>/opencode-oauth2/opencode-oauth2-model-sync/<auth.id>.json`. Configure the
+of this id: `<stateRoot>/opencode-oauth2/opencode-oauth2-model-sync/<auth.id>.json`, where
+`<stateRoot>` is the durable OS **state** directory — `~/Library/Application Support` (macOS),
+`$XDG_STATE_HOME` or `~/.local/state` (Linux), `%LOCALAPPDATA%` (Windows) — **not** the cache
+directory ([ADR-0022](adr/0022-credentials-in-state-dir.md): the OS purges caches, and a purged
+refresh token logged the user out). The cross-process refresh lock is `locks/<auth.id>.lock` in that
+same directory, beside the token, and oauth2 takes the very same lock. The discovered-model list is a
+separate, disposable file in the cache root (`<cacheRoot>/opencode-oauth2/opencode-oauth2-model-sync/<auth.id>.models.json`),
+which lightbridge's token runtime never touches. Configure the
 same `id`/`issuer`/`clientId` in both plugins and logging in through **either one** makes the token
 available to **both** — no second device-code/browser flow.
 
 This works whether or not `register` is configured:
 
-- With `register`: lightbridge's own `ProviderModelSyncEngine` writes to that file directly, the
-  same way oauth2's does.
+- With `register`: lightbridge's own `ProviderModelSyncEngine` writes the credential (and the model
+  list) exactly where oauth2's does.
 - Without `register` (just `auth` + `gateway`/`otel`): `LightbridgeRuntime` reads/refreshes through
   a lightweight `TokenRuntime` pointed at the same file — it never runs a scheduler or its own
   model-discovery HTTP calls, so it cannot race oauth2's own polling; see
@@ -281,15 +288,14 @@ This works whether or not `register` is configured:
   that protects the case where both DO run an engine for the same id.
 
 **Scope:** only the human/IdP root token is shared. The project-scoped token produced by the
-(opt-in) RFC 8693 exchange has no oauth2 equivalent and stays in its own store, unchanged
-(`<cacheRoot>/opencode-lightbridge/lightbridge-<hash>.json`).
+(opt-in) RFC 8693 exchange has no oauth2 equivalent and stays in its own store
+(`<stateRoot>/opencode-lightbridge/lightbridge-<hash>.json`, also under the state root).
 
-**Upgrading from a pre-ADR-0017 install?** Nothing to do — the first time the plugin needs the
-root token, it transparently adopts a still-valid (or expired-but-refreshable) token from the OLD
-location (`<cacheRoot>/opencode-lightbridge/lightbridge.json`) into the new shared file. No fresh
-login is forced. The old file is left in place (non-destructive); this is a one-time, idempotent
-check. The exchanged project token is NOT migrated (see Scope above) — worst case, one extra
-exchange call on first use post-upgrade, not a re-login.
+> **⚠️ Upgrading to the release that includes ADR-0022: log in once.** Credentials moved from the
+> cache directory to the state directory, with **no migration and no fallback read**. The first
+> request after upgrading needs a fresh sign-in; the old files under `~/Library/Caches/…` (or
+> `$XDG_CACHE_HOME`) are inert and can be deleted. ADR-0017's earlier one-time migration of a
+> pre-0.17 `opencode-lightbridge/lightbridge.json` was removed in the same change.
 
 ## The exchange is opt-in (ADR-0017)
 
@@ -329,7 +335,7 @@ valid and inert.
 
 | | Standalone (`oauth2` + `repo-auth` + `otel`) | `opencode-lightbridge` |
 | --- | --- | --- |
-| Logins (same IdP) | up to 3 (separate `TokenRuntime`s, separate cache dirs) | 1 (shared with oauth2 when `id`/`issuer`/`clientId` match — see [above](#one-login-shared-cache-with-oauth2-adr-0017)) |
+| Logins (same IdP) | up to 3 (separate `TokenRuntime`s, separate credential dirs) | 1 (shared with oauth2 when `id`/`issuer`/`clientId` match — see [above](#one-login-shared-cache-with-oauth2-adr-0017)) |
 | Provider registration + model discovery | oauth2 only | `register` (ADR-0017) — same engine, same behaviour |
 | Cache namespace | `opencode-oauth2/` + `opencode-repo-auth/` + otel's `tokenCommand` (external) | `opencode-oauth2/…/<id>.json` (shared root) + `opencode-lightbridge/` (exchanged project token only) |
 | OTEL credential | static header or external `tokenCommand` helper | the same shared credential as the gateway |
@@ -338,8 +344,8 @@ valid and inert.
 
 ## Package layout
 
-Mirrors the per-package convention (see `AGENTS.md`), **minus `cache.ts`** (auth-core's/provider-sync's
-`FileCacheStore`, reached through `TokenRuntime`/`ProviderModelSyncEngine`, owns persistence):
+Mirrors the per-package convention (see `AGENTS.md`), **minus `cache.ts`** (auth-core's `FileCacheStore` and
+provider-sync's `ServerCredentialStore`, reached through `TokenRuntime`/`ProviderModelSyncEngine`, own persistence):
 
 ```
 packages/opencode-lightbridge/
@@ -349,7 +355,6 @@ packages/opencode-lightbridge/
 │   ├── otel-adapter.ts # v2 events/hooks → core-otel recorder inputs (pure, host-free)
 │   ├── logging.ts   # captureHostContext + createEffectLogger (ADR-0014/0019)
 │   ├── plugin.ts    # LightbridgeRuntime — the shared root-token wrapper (ensure/exchange/shared cache)
-│   ├── migration.ts # ADR-0017: one-time old-cache → shared-cache root-token migration
 │   ├── config.ts    # pluginOptions parsing + validation → LightbridgeOptions
 │   └── lib.ts       # public API (embedders)
 └── test/            # vitest, *.test.ts
@@ -362,12 +367,14 @@ Same posture as `@vymalo/opencode-repo-auth`, extended to the OTEL egress and `r
 - **Fail closed** — a token-resolution failure means no gateway request and, for OTEL, no export
   attempt at all (not just no `Authorization` header — see
   [ADR-0015](adr/0015-otel-fail-closed-credential-gate.md)). No module ever invents a token.
-- **Two cache locations, by design (ADR-0017)** — the shared human root token lives at
-  `<cacheRoot>/opencode-oauth2/opencode-oauth2-model-sync/<auth.id>.json` (shared with oauth2 on
+- **Two credential locations, by design (ADR-0017), both in the state directory (ADR-0022)** — the
+  shared human root token lives at
+  `<stateRoot>/opencode-oauth2/opencode-oauth2-model-sync/<auth.id>.json` (shared with oauth2 on
   purpose); the exchanged project-scoped token (only when `gateway.exchange: true`) stays at
-  `<cacheRoot>/opencode-lightbridge/` (lightbridge-exclusive, no oauth2 equivalent).
+  `<stateRoot>/opencode-lightbridge/` (lightbridge-exclusive, no oauth2 equivalent). Refresh locks sit
+  in a `locks/` directory beside each. Nothing credential-bearing is written to the cache directory.
 - **Redaction** — auth-core's logger redacts `token|secret|password` fields.
-- **Disk** — `0o600` files, atomic rename (auth-core `FileCacheStore`, [ADR-0005](adr/0005-atomic-file-writes-per-writer-temp.md)).
+- **Disk** — `0o600` files, `0o700` directories, atomic rename (auth-core `FileCacheStore`, [ADR-0005](adr/0005-atomic-file-writes-per-writer-temp.md)).
 - **No content capture** — the OTEL half inherits `@vymalo/opencode-core-otel`'s privacy posture
   (no prompts/responses/tool arguments in telemetry; see [`otel.md` → Privacy](otel.md)).
 

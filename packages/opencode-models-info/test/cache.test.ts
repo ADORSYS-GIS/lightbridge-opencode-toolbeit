@@ -117,3 +117,27 @@ describe("cacheKey", () => {
     expect(cacheKey("a", "u", undefined)).toBe(cacheKey("a", "u"));
   });
 });
+
+describe("resolveCacheDir stays in the disposable cache root (ADR-0022)", () => {
+  it("never resolves into the durable state root", async () => {
+    const { resolveCacheDir } = await import("../src/cache.js");
+    const previous = process.env.XDG_STATE_HOME;
+    process.env.XDG_STATE_HOME = "/var/durable-state";
+    try {
+      const dir = resolveCacheDir();
+      expect(dir.endsWith("opencode-models-info")).toBe(true);
+      expect(dir).not.toContain("Application Support");
+      expect(dir).not.toContain("/var/durable-state");
+      expect(dir).not.toContain(join(".local", "state"));
+      if (process.platform === "darwin") {
+        expect(dir).toContain(join("Library", "Caches"));
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env.XDG_STATE_HOME;
+      } else {
+        process.env.XDG_STATE_HOME = previous;
+      }
+    }
+  });
+});

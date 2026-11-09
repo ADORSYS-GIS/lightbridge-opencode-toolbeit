@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { FileCacheStore, hashCacheKey, resolveCacheDir } from "./cache.js";
+import { FileCacheStore, hashCacheKey, resolveStateDir } from "./cache.js";
 import type { AuthServerConfig } from "./config.js";
 import { validateAuthConfig } from "./config.js";
 import type { FileLock } from "./lock.js";
@@ -17,11 +17,16 @@ export interface TokenRuntimeOptions {
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
   tokenExpirySkewMs?: number;
   /**
-   * Cache namespace for the identity-keyed on-disk token cache. Default
-   * `"tokens"`. Ignored when `getCached` / `setCached` are supplied.
+   * Namespace for the identity-keyed on-disk token store under the durable
+   * STATE root (ADR-0022). Default `"tokens"`. Ignored when `stateDir` is set.
    */
-  cacheNamespace?: string;
-  cacheDir?: string;
+  stateNamespace?: string;
+  /**
+   * Directory holding this runtime's persisted tokens AND its `locks/` refresh
+   * lock files — the lock lives beside the credential it guards (ADR-0016,
+   * ADR-0022). Credentials never go in the OS cache dir.
+   */
+  stateDir?: string;
   /**
    * Override the cached-token read. When supplied, the runtime stores nothing
    * on disk itself; the caller owns persistence (e.g. oauth2's fused
@@ -40,6 +45,16 @@ export interface TokenRuntimeOptions {
    * Override the cached-token write. See `getCached`.
    */
   setCached?: (token: TokenSet) => Promise<void>;
+  /**
+   * Override the cached-token removal, used when the IdP definitively rejects
+   * the stored refresh token (HTTP 400) so a dead credential is not replayed on
+   * every later call. Called only under the refresh lock and only after the
+   * runtime has re-read the store and confirmed it still holds the rejected
+   * refresh token (compare-and-clear). Required alongside `getCached` /
+   * `setCached` for the clear to take effect; without it only the in-memory
+   * copy is dropped. See `getCached`.
+   */
+  clearCached?: () => Promise<void>;
   /**
    * How long a cross-process refresh lock may sit untouched before another
    * process treats it as abandoned and breaks it. Default 30s — it must
@@ -75,6 +90,7 @@ export class TokenRuntime {
   private readonly logger: Logger;
   private readonly getCachedOverride?: () => Promise<TokenSet | undefined>;
   private readonly setCachedOverride?: (token: TokenSet) => Promise<void>;
+  private readonly clearCachedOverride?: () => Promise<void>;
   private readonly lockStaleMs: number;
   /**
    * In-process single-flight slot. Every concurrent `ensure` that finds the
@@ -91,6 +107,17 @@ export class TokenRuntime {
     this.logger = options.logger ?? createJsonConsoleLogger("info");
     this.getCachedOverride = options.getCached;
     this.setCachedOverride = options.setCached;
+    this.clearCachedOverride = options.clearCached;
+
+    // `cacheDir` / `cacheNamespace` were renamed `stateDir` / `stateNamespace`
+    // (ADR-0022). A JS caller still passing them would be silently ignored, so
+    // fail loudly instead (TypeScript callers already get a compile error).
+    const legacy = options as Record<string, unknown>;
+    if ("cacheDir" in legacy || "cacheNamespace" in legacy) {
+      throw new Error(
+        "TokenRuntimeOptions.cacheDir/cacheNamespace were renamed stateDir/stateNamespace (ADR-0022): credentials no longer live in the cache dir"
+      );
+    }
 
     this.lockStaleMs =
       typeof options.lockStaleMs === "number" &&
@@ -99,8 +126,8 @@ export class TokenRuntime {
         ? options.lockStaleMs
         : DEFAULT_LOCK_STALE_MS;
 
-    const cacheDir = options.cacheDir ?? resolveCacheDir(options.cacheNamespace ?? "tokens");
-    this.cacheStore = new FileCacheStore(cacheDir, this.logger);
+    const stateDir = options.stateDir ?? resolveStateDir(options.stateNamespace ?? "tokens");
+    this.cacheStore = new FileCacheStore(stateDir, this.logger);
 
     this.client = new OAuthClient(this.config, {
       fetchImpl: options.fetchImpl,
@@ -276,6 +303,9 @@ export class TokenRuntime {
           if (recovered) {
             return recovered;
           }
+          if (error.status === 400 && base.refreshToken) {
+            await this.clearIfStillRejected(base.refreshToken);
+          }
         }
       }
     }
@@ -321,7 +351,42 @@ export class TokenRuntime {
         identity: this.identity,
         error: error instanceof Error ? error.message : String(error)
       });
+      if (error instanceof RefreshTokenError && error.status === 400) {
+        await this.clearIfStillRejected(newer.refreshToken);
+      }
       return undefined;
+    }
+  }
+
+  private async clearStored(): Promise<void> {
+    if (this.clearCachedOverride) {
+      return this.clearCachedOverride();
+    }
+    if (!this.setCachedOverride) {
+      await this.cacheStore.remove(this.cacheKey());
+    }
+  }
+
+  /**
+   * Compare-and-clear for a refresh token the IdP definitively rejected
+   * (HTTP 400). Runs under the refresh lock. Re-reads the store and removes the
+   * credential ONLY if it still holds the rejected refresh token: another
+   * process may have legitimately rotated it since, and a blind delete would
+   * log that process out. Network errors and 5xx never reach here.
+   */
+  private async clearIfStillRejected(rejectedRefreshToken: string): Promise<void> {
+    try {
+      const current = await this.getCached();
+      if (current?.refreshToken !== rejectedRefreshToken) {
+        return;
+      }
+      await this.clearStored();
+      this.logger.info("token_rejected_credential_cleared", { identity: this.identity });
+    } catch (error) {
+      this.logger.debug("token_clear_failed", {
+        identity: this.identity,
+        error: error instanceof Error ? error.message : String(error)
+      });
     }
   }
 

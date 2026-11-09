@@ -4,9 +4,9 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { FileCacheStore } from "../src/cache.js";
+import { ServerStateStore } from "../src/cache.js";
 import type { NormalizedModel } from "../src/types.js";
-import { startPlugin } from "./harness.js";
+import { seedServerState, startPlugin, stateDirFor } from "./harness.js";
 
 const SERVER_ID = "example-ai";
 
@@ -70,9 +70,9 @@ async function writeStateFile(
   updatedAt: number,
   models: NormalizedModel[] = [{ id: "glm-5", displayName: "GLM 5" }]
 ): Promise<void> {
-  const store = new FileCacheStore(cacheDir);
+  const store = new ServerStateStore(cacheDir, stateDirFor(cacheDir));
   await store.ensureReady();
-  await store.saveServerState({
+  await seedServerState(store, {
     serverId: SERVER_ID,
     updatedAt,
     lastSyncAt: updatedAt,

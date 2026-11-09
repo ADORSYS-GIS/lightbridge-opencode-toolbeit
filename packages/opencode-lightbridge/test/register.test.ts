@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,10 +11,11 @@ import {
   LightbridgeRuntime,
   ROOT_CACHE_NAMESPACE,
   ROOT_CACHE_SEGMENT,
-  rootCacheDir
+  rootCacheDir,
+  rootStateDir
 } from "../src/plugin.js";
 import { startPlugin, type StartOptions } from "./harness.js";
-import { createRecordingLogger, createSilentLogger } from "./helpers.js";
+import { createRecordingLogger, createSilentLogger, stateRootFor } from "./helpers.js";
 
 const PROVIDER_ID = "lightbridge-gateway";
 const REGISTER = { baseURL: "https://gateway.example.com/v1" };
@@ -73,7 +74,13 @@ async function startRegister(
   const harness = await startPlugin({
     options: { auth: registerAuth(), register: REGISTER },
     ...extra,
-    factory: { logger, cacheDir, fetchImpl: extra.fetchImpl ?? fetchImpl, ...extra.factory }
+    factory: {
+      logger,
+      cacheDir,
+      stateDir: stateRootFor(cacheDir),
+      fetchImpl: extra.fetchImpl ?? fetchImpl,
+      ...extra.factory
+    }
   });
   return { harness, logger, urls, cacheDir };
 }
@@ -270,6 +277,7 @@ describe("ADR-0017 requirement 2 — one login, shared token cache with oauth2",
     const oauth2LikeEngine = new ProviderModelSyncEngine(oauth2LikeConfig(auth, serverId), {
       logger: createSilentLogger(),
       cacheDir: rootCacheDir(cacheRoot),
+      stateDir: rootStateDir(stateRootFor(cacheRoot)),
       fetchImpl: createRegisterFetch().fetchImpl
     });
     await oauth2LikeEngine.initialize();
@@ -279,7 +287,7 @@ describe("ADR-0017 requirement 2 — one login, shared token cache with oauth2",
 
     const runtime = new LightbridgeRuntime(validateAuthConfig(auth), undefined, {
       logger: createSilentLogger(),
-      cacheDir: cacheRoot,
+      stateDir: stateRootFor(cacheRoot),
       fetchImpl: async () => {
         throw new Error("no login expected — oauth2 already logged in for this shared identity");
       }
@@ -296,8 +304,18 @@ describe("ADR-0017 requirement 2 — one login, shared token cache with oauth2",
     expect(first.urls.some((u) => u.includes("/protocol/openid-connect/token"))).toBe(true);
     await first.harness.close();
 
-    // The cache file lives where oauth2 writes it: <root>/opencode-oauth2/opencode-oauth2-model-sync.
+    // The files live where oauth2 writes them: the credential under the STATE
+    // root, the disposable model list under the CACHE root — same relative path.
     expect(rootCacheDir(cacheRoot)).toBe(join(cacheRoot, ROOT_CACHE_SEGMENT, ROOT_CACHE_NAMESPACE));
+    const stateRoot = stateRootFor(cacheRoot);
+    expect(rootStateDir(stateRoot)).toBe(join(stateRoot, ROOT_CACHE_SEGMENT, ROOT_CACHE_NAMESPACE));
+    expect(await readFile(join(rootStateDir(stateRoot), `${PROVIDER_ID}.json`), "utf8")).toContain(
+      "register-token"
+    );
+    expect(await readdir(rootCacheDir(cacheRoot))).toEqual([`${PROVIDER_ID}.models.json`]);
+    expect(
+      await readFile(join(rootCacheDir(cacheRoot), `${PROVIDER_ID}.models.json`), "utf8")
+    ).not.toContain("register-token");
     expect(ROOT_CACHE_SEGMENT).toBe("opencode-oauth2");
     expect(ROOT_CACHE_NAMESPACE).toBe("opencode-oauth2-model-sync");
 
@@ -305,6 +323,7 @@ describe("ADR-0017 requirement 2 — one login, shared token cache with oauth2",
     const oauth2Like = new ProviderModelSyncEngine(oauth2LikeConfig(registerAuth(), PROVIDER_ID), {
       logger: createSilentLogger(),
       cacheDir: rootCacheDir(cacheRoot),
+      stateDir: rootStateDir(stateRootFor(cacheRoot)),
       fetchImpl: (async () => {
         throw new Error("must not fetch");
       }) as unknown as typeof fetch
@@ -346,6 +365,7 @@ describe("ADR-0017 requirement 4b — scheduler ownership with lightbridge and o
       {
         logger: createSilentLogger(),
         cacheDir: rootCacheDir(cacheRoot),
+        stateDir: rootStateDir(stateRootFor(cacheRoot)),
         cacheNamespaceSegment: ROOT_CACHE_SEGMENT,
         fetchImpl: second.fetchImpl
       }

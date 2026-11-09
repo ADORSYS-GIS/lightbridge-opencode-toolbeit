@@ -65,7 +65,7 @@ deliberate exception).
 
 `projectId` comes from config — it is **never** derived from the git remote, because a repo may
 belong to many projects. The git `origin` (worktree-aware, hardened against odd `.git` pointers) is
-resolved for **logging only**. The exchanged token is cached per project, `0o600`, atomic-rename.
+resolved for **logging only**. The exchanged token is cached per project in the durable OS state dir (never the cache dir, ADR-0022), `0o600`, atomic-rename.
 
 ## Don't stack it with `oauth2`
 
@@ -103,7 +103,6 @@ MIT
 | host `config.logLevel` drove the log level | `options.logLevel`, else `OPENCODE_LOG_LEVEL` |
 | config-time bearer stamp onto `options.headers` | `Provider.Info.headers.Authorization`, resolved async then stamped on `provider.reload()`; never stamped if the exchange fails |
 
-The `repoAuth` block's own fields, the exchange wire contract, the cache location (so an existing
-login survives) and the surviving `repo_auth_*` event names are unchanged. `effect` `^4.0.0` is now a
+The `repoAuth` block's own fields, the exchange wire contract, the on-disk layout under its root (but note ADR-0022 moved that root from the cache dir to the state dir — one re-login) and the surviving `repo_auth_*` event names are unchanged. `effect` `^4.0.0` is now a
 peer dependency (the host supplies it).
 

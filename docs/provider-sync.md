@@ -29,11 +29,17 @@ loaded directly by the OpenCode host. It is a library two plugins compose: `@vym
 - **`model-normalization.ts`** — `normalizeModelId`/`normalizeModelList`/`diffModels`: turns raw
   model ids (`glm-5`, `qwen2-72b-instruct`) into readable display names (`GLM 5`, `Qwen2 72B
   Instruct`) and computes added/removed/renamed diffs between syncs.
-- **`cache.ts`** — `resolveCacheDir(segment, namespace)` + `FileCacheStore`: the fused
-  model+token on-disk state, atomic-write via auth-core's generic `FileCacheStore`. `segment`
-  identifies the **consuming plugin** (e.g. `"opencode-oauth2"`), not this package — every real
-  consumer sets it explicitly via `ProviderModelSyncEngineOptions.cacheNamespaceSegment` so an
-  existing install's cache path never moves just because the engine it's built on does.
+- **`cache.ts`** — `resolveCacheDir` / `resolveStateDir(segment, namespace)` and the stores built on
+  them (ADR-0022): `ServerCredentialStore` (the OAuth token, `<id>.json`, under the durable
+  **state** root), `ModelCacheStore` (the discovered-model list, `<id>.models.json`, under the
+  disposable **cache** root) and `ServerStateStore`, which merges the two into the in-memory
+  `CachedServerState`. All write through auth-core's atomic `FileCacheStore` (per-writer temp +
+  rename, `0o600`/`0o700`). `segment` identifies the **consuming plugin** (e.g. `"opencode-oauth2"`),
+  not this package — every real consumer sets it explicitly via
+  `ProviderModelSyncEngineOptions.cacheNamespaceSegment`, and the same relative path is used under
+  both roots. The engine passes the credential directory to `TokenRuntime` as `stateDir`, so the
+  refresh lock is `<stateDir>/locks/<id>.lock`, beside the token. Options `cacheDir` / `stateDir`
+  inject exact directories (tests).
 - **`scheduler.ts`** — `startScheduler`: a backoff-retrying interval runner (the retry window
   doubles per consecutive failure, capped at the configured interval).
 - **`opencode-helpers.ts`** (exported from `./lib` only) — the **`ProviderEditor`** wiring a
@@ -266,13 +272,13 @@ OAuth-protected `modelsInfoUrl`. The coupling survives, relocated:
   oauth2-only. It skips entirely when the provider record already carries oauth2's
   `settings.oauth2` marker. The engine is pointed at the SAME cache
   segment/namespace `opencode-oauth2` uses (`"opencode-oauth2"` /
-  `"opencode-oauth2-model-sync"`) so a matching `id`/`issuer`/`clientId` shares its cache file (and
+  `"opencode-oauth2-model-sync"`) so a matching `id`/`issuer`/`clientId` shares its credential file (and
   therefore its login) with an oauth2-managed server of the same id — see
   [`docs/lightbridge.md`](lightbridge.md#register--provider-registration--model-discovery-adr-0017).
   No Responses-repair hook is injected (not needed for the gateways lightbridge currently targets).
   lightbridge's `LightbridgeRuntime` (the human-root/gateway-bearer wrapper, used whether or not
-  `register` is configured) also participates in that same cache file as a lightweight, engine-free
-  read/refresh-only `TokenRuntime` — see ADR-0017 for why a full second engine isn't needed for that
+  `register` is configured) also participates in that same credential file as a lightweight, engine-free
+  read/refresh-only `TokenRuntime` (it never touches the model record) — see ADR-0017 for why a full second engine isn't needed for that
   half.
 
 ## Scheduler ownership (ADR-0017)

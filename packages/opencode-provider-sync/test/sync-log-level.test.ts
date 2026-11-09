@@ -5,9 +5,9 @@ import { join } from "node:path";
 import type { LogFields, Logger, LogLevel } from "@vymalo/opencode-auth-core/lib";
 import { describe, expect, it } from "vitest";
 
-import { FileCacheStore } from "../src/cache.js";
+import { ServerStateStore } from "../src/cache.js";
 import { ProviderModelSyncEngine } from "../src/engine.js";
-import { createServerConfig } from "./helpers.js";
+import { createServerConfig, seedServerState } from "./helpers.js";
 
 interface LogRecord {
   level: LogLevel;
@@ -41,11 +41,13 @@ async function makeEngine(
   fetchImpl: typeof fetch,
   cachedToken: boolean
 ): Promise<ProviderModelSyncEngine> {
-  const cacheDir = await mkdtemp(join(tmpdir(), "opencode-provider-sync-loglevel-"));
+  const root = await mkdtemp(join(tmpdir(), "opencode-provider-sync-loglevel-"));
+  const cacheDir = join(root, "cache");
+  const stateDir = join(root, "state");
   if (cachedToken) {
-    const store = new FileCacheStore(cacheDir);
+    const store = new ServerStateStore(cacheDir, stateDir);
     await store.ensureReady();
-    await store.saveServerState({
+    await seedServerState(store, {
       serverId: SERVER_ID,
       updatedAt: Date.now(),
       token: {
@@ -60,7 +62,7 @@ async function makeEngine(
   }
   const engine = new ProviderModelSyncEngine(
     { servers: [createServerConfig({ authFlow: "device_code" })] },
-    { cacheDir, logger, fetchImpl }
+    { cacheDir, stateDir, logger, fetchImpl }
   );
   await engine.initialize();
   return engine;
