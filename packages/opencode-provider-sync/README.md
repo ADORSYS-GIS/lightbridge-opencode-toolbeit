@@ -21,8 +21,12 @@ share it instead of forking it.
   `@vymalo/opencode-auth-core`'s `TokenRuntime` for the actual token lifecycle.
 - `model-discovery` / `model-normalization` — fetch a provider's `/v1/models`
   and turn raw ids into readable display names + add/remove/rename diffs.
-- `cache.ts` — `resolveCacheDir(segment, namespace)` + `FileCacheStore`, the
-  fused model+token on-disk state, atomic-write via auth-core's generic store.
+- `cache.ts` — `resolveCacheDir` / `resolveStateDir(segment, namespace)` plus
+  `ServerCredentialStore` (the token, in the durable **state** root),
+  `ModelCacheStore` (the model list, in the disposable **cache** root) and
+  `ServerStateStore` (merges both), atomic-write via auth-core's generic store
+  ([ADR-0022](../../docs/adr/0022-credentials-in-state-dir.md): credentials
+  never live in the OS cache dir).
 - `scheduler.ts` — a backoff-retrying interval runner.
 - Provider-editor wiring helpers (`./lib` only) — `collectManagedProviders`,
   `upsertManagedProvider` (add-or-update-in-place of one provider, shared by both consumers),
@@ -103,8 +107,8 @@ safe to run concurrently. `stop()` releases whatever the instance holds.
 
 ## Cross-process token safety
 
-Several OpenCode processes can share one cache directory. `ensureAccessToken`
-/ `syncServer` re-read the persisted per-server state on every cached-token
+Several OpenCode processes can share one credential file. `ensureAccessToken`
+/ `syncServer` re-read the persisted per-server credential on every cached-token
 read (not the in-memory copy loaded at `initialize()`), so a refresh token
 rotated by one process is adopted by another rather than replayed — replaying
 an already-rotated refresh token against an IdP with reuse detection (RFC 6819

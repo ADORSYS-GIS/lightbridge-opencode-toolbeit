@@ -51,3 +51,11 @@ export function makeAuth(overrides: Partial<AuthServerConfigInput> = {}): AuthSe
     ...overrides
   };
 }
+
+/**
+ * The STATE root paired with a test's CACHE root (ADR-0022): a deterministic
+ * sibling, so call sites keep passing a single throwaway root.
+ */
+export function stateRootFor(cacheRoot: string): string {
+  return `${cacheRoot}-state`;
+}

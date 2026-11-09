@@ -50,7 +50,10 @@ export interface OpenCodePluginFactoryOptions {
   logger?: Logger;
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
+  /** Exact directory for the disposable discovered-model cache (tests). */
   cacheDir?: string;
+  /** Exact directory for credentials — the token and its refresh lock (tests). ADR-0022. */
+  stateDir?: string;
   /** Observe the background runtime (tests). */
   onRuntime?: (handle: OAuth2RuntimeHandle) => void;
 }
@@ -187,7 +190,8 @@ export function createOpencodeOauth2Plugin(
           logger,
           fetchImpl: factoryOptions.fetchImpl,
           onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
-          cacheDir: factoryOptions.cacheDir
+          cacheDir: factoryOptions.cacheDir,
+          stateDir: factoryOptions.stateDir
         });
         await next.initialize();
         runtime = next;

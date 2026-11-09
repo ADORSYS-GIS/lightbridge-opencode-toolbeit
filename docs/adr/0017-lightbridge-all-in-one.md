@@ -1,6 +1,8 @@
 # ADR-0017 — `@vymalo/opencode-lightbridge` becomes the all-in-one plugin: shared registration, shared cache, opt-in exchange
 
-- **Status:** Accepted
+- **Status:** Accepted — **amended by [ADR-0022](0022-credentials-in-state-dir.md)**: the shared root-token
+  file keeps its relative path but now lives under the state root, not the cache root, and the
+  old-format migration described below was removed.
 - **Date:** 2026-09-04
 - **Applies to:** `@vymalo/opencode-lightbridge` (`config.ts`, `plugin.ts`, `opencode.ts`, new
   `migration.ts`) and `@vymalo/opencode-provider-sync`'s `ProviderModelSyncEngine` (a new

@@ -9,12 +9,13 @@ export {
 export {
   LightbridgeRuntime,
   LIGHTBRIDGE_IDENTITY,
-  DEFAULT_CACHE_NAMESPACE,
+  EXCHANGE_STATE_NAMESPACE,
   DEFAULT_PROJECT_KEY,
   ROOT_CACHE_NAMESPACE,
   ROOT_CACHE_SEGMENT,
-  lightbridgeCacheDir,
+  lightbridgeStateDir,
   rootCacheDir,
+  rootStateDir,
   type LightbridgeRuntimeFactory,
   type LightbridgeRuntimeLike,
   type LightbridgeRuntimeOptions
@@ -30,5 +31,3 @@ export {
   type ParsedLightbridgeOptions,
   type ProviderLookup
 } from "./config.js";
-
-export { migrateRootTokenIfNeeded } from "./migration.js";

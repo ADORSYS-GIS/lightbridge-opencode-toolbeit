@@ -12,7 +12,7 @@ export {
   isProjectTokenUsable,
   HUMAN_IDENTITY,
   DEFAULT_CACHE_NAMESPACE,
-  repoAuthCacheDir,
+  repoAuthStateDir,
   type RepoAuthPluginOptions
 } from "./plugin.js";
 export {

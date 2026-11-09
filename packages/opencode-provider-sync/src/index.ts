@@ -10,7 +10,7 @@ export {
   type ProviderServerConfig,
   type ProviderSyncEngineConfigInput
 } from "./engine.js";
-export { FileCacheStore, resolveCacheDir } from "./cache.js";
+export { ServerStateStore, resolveCacheDir, resolveStateDir } from "./cache.js";
 export { buildModelsUrl, fetchModels } from "./model-discovery.js";
 export { diffModels, normalizeModelId, normalizeModelList } from "./model-normalization.js";
 export type { TokenSet } from "@vymalo/opencode-auth-core/lib";

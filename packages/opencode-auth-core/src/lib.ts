@@ -6,8 +6,10 @@ export {
 export {
   FileCacheStore,
   hashCacheKey,
-  resolveCacheDir,
-  resolveCacheRoot
+  resolveCacheRoot,
+  resolveStateDir,
+  resolveStateRoot,
+  type StateRootEnvironment
 } from "./cache.js";
 
 export {

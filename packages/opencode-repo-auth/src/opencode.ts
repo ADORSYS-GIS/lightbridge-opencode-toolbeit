@@ -56,7 +56,7 @@ export interface OpenCodePluginFactoryOptions {
   logger?: Logger;
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
-  cacheDir?: string;
+  stateDir?: string;
   /** Repo root to resolve git identity from (defaults to the plugin's location directory). */
   cwd?: string;
 }
@@ -300,7 +300,7 @@ export function createOpencodeRepoAuthPlugin(
                     logger: log,
                     fetchImpl: factoryOptions.fetchImpl,
                     onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
-                    cacheDir: factoryOptions.cacheDir
+                    stateDir: factoryOptions.stateDir
                   }
                 )
               );

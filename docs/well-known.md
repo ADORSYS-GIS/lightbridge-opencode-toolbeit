@@ -99,7 +99,7 @@ This also explains a sequencing quirk you may notice in the logs: a `config`-hoo
 | --- | --- | --- |
 | The well-known **pointer** | `auth.json` → `"<url>": { type: "wellknown", key, token }` | All that's persisted on the client. `token` is the placeholder, not a real secret here. |
 | The **provider + plugin** definition | The server's `.well-known/opencode` document | Re-fetched on launch; never written to a local `opencode.json`. |
-| The **OAuth2 access/refresh token** | The oauth2 plugin's own cache, e.g. `~/.cache/opencode-oauth2/<serverId>.json` (Linux) / `~/Library/Caches/opencode-oauth2/...` (macOS), `0o600` | Managed entirely by `@vymalo/opencode-oauth2`, **not** in `auth.json`. Absent until a login actually succeeds. See [architecture.md → Cache layout](./architecture.md#cache-layout). |
+| The **OAuth2 access/refresh token** | The oauth2 plugin's own state dir (ADR-0022), e.g. `~/.local/state/opencode-oauth2/<namespace>/<serverId>.json` (Linux) / `~/Library/Application Support/opencode-oauth2/<namespace>/<serverId>.json` (macOS), `0o600` | Managed entirely by `@vymalo/opencode-oauth2`, **not** in `auth.json`. Absent until a login actually succeeds. See [architecture.md → Cache layout](./architecture.md#cache-layout). |
 
 ## The CLI
 
@@ -125,7 +125,7 @@ These are the two traps we actually hit bringing this up.
 
 ### 2. "Logged in" instantly, with no device-code prompt
 
-On a `device_code` provider you expect a *"visit this URL, enter this code"* prompt. If `opencode auth login` finishes instantly having only run `sh -c echo plugin-managed`, **no OAuth happened** — only the well-known `auth.command` ran. That means the oauth2 plugin didn't pick up the provider on that invocation (commonly because the well-known `provider` block hadn't been merged into the config the plugin's hook saw yet). Re-run an OpenCode command (e.g. `opencode models`); on the next launch the merged provider reaches the plugin, the device-code flow runs for real, and you'll see `oauth_device_code_issued` with a verification URL. Confirm success with a `<serverId>.json` appearing in the oauth2 cache dir.
+On a `device_code` provider you expect a *"visit this URL, enter this code"* prompt. If `opencode auth login` finishes instantly having only run `sh -c echo plugin-managed`, **no OAuth happened** — only the well-known `auth.command` ran. That means the oauth2 plugin didn't pick up the provider on that invocation (commonly because the well-known `provider` block hadn't been merged into the config the plugin's hook saw yet). Re-run an OpenCode command (e.g. `opencode models`); on the next launch the merged provider reaches the plugin, the device-code flow runs for real, and you'll see `oauth_device_code_issued` with a verification URL. Confirm success with a `<serverId>.json` appearing in the oauth2 state dir (`~/Library/Application Support/opencode-oauth2/…` on macOS).
 
 > Keycloak device-code clients with PKCE enforced will 400 the first device request with `Missing parameter: code_challenge_method` — the plugin sends PKCE by default to satisfy that; see [troubleshooting.md](./troubleshooting.md#missing-parameter-code_challenge_method-http-400-on-login).
 

@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { FileCacheStore, hashCacheKey, resolveCacheDir } from "./cache.js";
+import { FileCacheStore, hashCacheKey, resolveStateDir } from "./cache.js";
 import type { AuthServerConfig } from "./config.js";
 import { validateAuthConfig } from "./config.js";
 import type { FileLock } from "./lock.js";
@@ -17,11 +17,16 @@ export interface TokenRuntimeOptions {
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
   tokenExpirySkewMs?: number;
   /**
-   * Cache namespace for the identity-keyed on-disk token cache. Default
-   * `"tokens"`. Ignored when `getCached` / `setCached` are supplied.
+   * Namespace for the identity-keyed on-disk token store under the durable
+   * STATE root (ADR-0022). Default `"tokens"`. Ignored when `stateDir` is set.
    */
-  cacheNamespace?: string;
-  cacheDir?: string;
+  stateNamespace?: string;
+  /**
+   * Directory holding this runtime's persisted tokens AND its `locks/` refresh
+   * lock files — the lock lives beside the credential it guards (ADR-0016,
+   * ADR-0022). Credentials never go in the OS cache dir.
+   */
+  stateDir?: string;
   /**
    * Override the cached-token read. When supplied, the runtime stores nothing
    * on disk itself; the caller owns persistence (e.g. oauth2's fused
@@ -99,8 +104,8 @@ export class TokenRuntime {
         ? options.lockStaleMs
         : DEFAULT_LOCK_STALE_MS;
 
-    const cacheDir = options.cacheDir ?? resolveCacheDir(options.cacheNamespace ?? "tokens");
-    this.cacheStore = new FileCacheStore(cacheDir, this.logger);
+    const stateDir = options.stateDir ?? resolveStateDir(options.stateNamespace ?? "tokens");
+    this.cacheStore = new FileCacheStore(stateDir, this.logger);
 
     this.client = new OAuthClient(this.config, {
       fetchImpl: options.fetchImpl,

@@ -111,7 +111,7 @@ The plugin's own `options` (next to `servers` and `logLevel`) also accept the tu
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `cacheNamespace` | `"opencode-oauth2-model-sync"` (OpenCode-hosted) / `"oauth2-model-sync"` (standalone) | Subdirectory under the OS cache root. See [architecture.md](../../docs/architecture.md#cache-layout) for the path table per OS. |
+| `cacheNamespace` | `"opencode-oauth2-model-sync"` (OpenCode-hosted) / `"oauth2-model-sync"` (standalone) | Subdirectory under both OS roots: the durable **state** root holds the OAuth token (ADR-0022), the **cache** root only the disposable model list. See [architecture.md](../../docs/architecture.md#cache-layout) for the path table per OS. |
 | `httpTimeoutMs` | `15000` | Timeout for token-endpoint / `/models` round trips. |
 | `tokenExpirySkewMs` | `30000` | Treat a token as expired this many ms before its real `expiresAt`. |
 
@@ -203,7 +203,7 @@ Refresh tokens are mandatory for the flows that issue them (`authorization_code`
 
 ### One rotating refresh token, several OpenCode processes
 
-The cached state lives in a single `<cacheNamespace>/<serverId>.json` that every OpenCode process on the machine shares, and a refresh token is single-use. So the plugin **re-reads that file before every refresh decision** (warmup, scheduler tick, and the per-request `model.request` path alike) instead of trusting the copy it loaded at startup: the persisted state wins unless the in-memory one is strictly newer, and it is adopted as a whole. Without this, a second process replays a refresh token the first has already rotated, and the IdP's reuse detection revokes the chain out from under both.
+The login lives in a single credential file `<cacheNamespace>/<serverId>.json` under the durable state dir ([ADR-0022](../../docs/adr/0022-credentials-in-state-dir.md)) that every OpenCode process on the machine shares, and a refresh token is single-use. So the plugin **re-reads that file before every refresh decision** (warmup, scheduler tick, and the per-request `model.request` path alike) instead of trusting the copy it loaded at startup: the persisted credential wins unless the in-memory one is strictly newer, and the model list is re-read with it. Without this, a second process replays a refresh token the first has already rotated, and the IdP's reuse detection revokes the chain out from under both.
 
 Coordinating the refresh itself — single-flight, the cross-process lock, and the retry when the IdP rejects a token another process just rotated — belongs to `TokenRuntime` in [`@vymalo/opencode-auth-core`](../opencode-auth-core), not to this plugin. Details: [architecture.md → Shared across processes](../../docs/architecture.md#shared-across-processes).
 
@@ -236,7 +236,7 @@ this plugin already manages (via `options.servers[].id` or a provider's own
 DIFFERENT purposes — e.g. this plugin owns one provider, lightbridge's `gateway`/`otel` ride the
 same IdP for a different provider), logging in through either one makes the human root token
 available to the other: lightbridge's root token lives in the exact same
-`<cacheNamespace>/<serverId>.json` file this plugin writes. See
+`<cacheNamespace>/<serverId>.json` credential file this plugin writes (state dir). See
 [`docs/lightbridge.md` → One login, shared cache with oauth2](../../docs/lightbridge.md#one-login-shared-cache-with-oauth2-adr-0017).
 
 ## Development
@@ -278,8 +278,8 @@ pnpm --filter @vymalo/opencode-oauth2 build
 | `fromOpenCodeLogLevel` | `resolveLogLevel` |
 
 The `oauth2` block's own fields (`issuer`, `clientId`, `authFlow`, `pkce`, `responseApi`, …), the five
-auth flows, the token cache layout and every `oauth2_*` event name are unchanged — an existing login
-survives the upgrade.
+auth flows, the token layout and every `oauth2_*` event name are unchanged. (The v1 → v2 move itself keeps an existing login; the separate
+[ADR-0022](../../docs/adr/0022-credentials-in-state-dir.md) change to the credential's **location** — cache dir → state dir — needs one re-login.)
 
 ### Behaviour changes in v2
 

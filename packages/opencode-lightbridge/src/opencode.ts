@@ -1,5 +1,4 @@
 import { hostname } from "node:os";
-import { join } from "node:path";
 
 import { Plugin } from "@opencode/plugin/effect";
 import { defaultTextMapSetter } from "@opentelemetry/api";
@@ -63,6 +62,8 @@ import {
   LightbridgeRuntime,
   ROOT_CACHE_NAMESPACE,
   ROOT_CACHE_SEGMENT,
+  rootCacheDir,
+  rootStateDir,
   type LightbridgeRuntimeFactory,
   type LightbridgeRuntimeLike,
   type LightbridgeRuntimeOptions
@@ -85,8 +86,10 @@ export interface LightbridgePluginFactoryOptions {
   /** Shared-runtime HTTP client (auth-core `TokenRuntime`). Tests only. */
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
-  /** Override the shared-runtime cache root (defaults to the OS cache dir). */
+  /** Override the CACHE root for the register module's disposable model list (defaults to the OS cache dir). */
   cacheDir?: string;
+  /** Override the STATE root for credentials — tokens + refresh locks (defaults to the OS state dir, ADR-0022). */
+  stateDir?: string;
   tokenExpirySkewMs?: number;
   /**
    * Build the shared `LightbridgeRuntimeLike` for `(auth, projectId)`.
@@ -430,7 +433,7 @@ export function createLightbridgePlugin(
             logger,
             fetchImpl: factoryOptions.fetchImpl,
             onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
-            cacheDir: factoryOptions.cacheDir,
+            stateDir: factoryOptions.stateDir,
             tokenExpirySkewMs: factoryOptions.tokenExpirySkewMs,
             exchange: parsed.gateway?.exchange ?? false
           })
@@ -469,9 +472,8 @@ export function createLightbridgePlugin(
             logger,
             fetchImpl: factoryOptions.fetchImpl,
             onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
-            cacheDir: factoryOptions.cacheDir
-              ? join(factoryOptions.cacheDir, ROOT_CACHE_SEGMENT, ROOT_CACHE_NAMESPACE)
-              : undefined,
+            cacheDir: factoryOptions.cacheDir ? rootCacheDir(factoryOptions.cacheDir) : undefined,
+            stateDir: factoryOptions.stateDir ? rootStateDir(factoryOptions.stateDir) : undefined,
             cacheNamespaceSegment: ROOT_CACHE_SEGMENT,
             serviceLabel: "opencode-lightbridge"
           }

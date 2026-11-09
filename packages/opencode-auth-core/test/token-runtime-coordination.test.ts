@@ -97,8 +97,8 @@ async function makeCacheDir(prefix: string): Promise<string> {
 
 describe("TokenRuntime refresh coordination", () => {
   it("adopts a token another process persisted instead of replaying its own refresh token", async () => {
-    const cacheDir = await makeCacheDir("auth-core-adopt-");
-    const store = new FileCacheStore(cacheDir);
+    const stateDir = await makeCacheDir("auth-core-adopt-");
+    const store = new FileCacheStore(stateDir);
     const idp = createFakeIdp(["rt-1"]);
     const stale = expiredToken();
     await store.save("shared-id", stale);
@@ -106,7 +106,7 @@ describe("TokenRuntime refresh coordination", () => {
     const runtimeA = new TokenRuntime("shared-id", createServerConfig(), {
       logger: createSilentLogger(),
       fetchImpl: idp.fetchImpl,
-      cacheDir
+      stateDir
     });
 
     const recording = createRecordingLogger();
@@ -116,7 +116,7 @@ describe("TokenRuntime refresh coordination", () => {
     const runtimeB = new TokenRuntime("shared-id", createServerConfig(), {
       logger: recording.logger,
       fetchImpl: idp.fetchImpl,
-      cacheDir,
+      stateDir,
       getCached: async () => {
         reads += 1;
         return reads === 1 ? stale : store.load<TokenSet>("shared-id");
@@ -137,8 +137,8 @@ describe("TokenRuntime refresh coordination", () => {
   });
 
   it("serializes two runtimes over one cache dir into a single refresh", async () => {
-    const cacheDir = await makeCacheDir("auth-core-two-proc-");
-    const store = new FileCacheStore(cacheDir);
+    const stateDir = await makeCacheDir("auth-core-two-proc-");
+    const store = new FileCacheStore(stateDir);
     const idp = createFakeIdp(["rt-1"]);
     await store.save("shared-id", expiredToken());
 
@@ -146,7 +146,7 @@ describe("TokenRuntime refresh coordination", () => {
       new TokenRuntime("shared-id", createServerConfig(), {
         logger: createSilentLogger(),
         fetchImpl: idp.fetchImpl,
-        cacheDir
+        stateDir
       });
 
     const [first, second] = await Promise.all([
@@ -160,8 +160,8 @@ describe("TokenRuntime refresh coordination", () => {
   });
 
   it("collapses ten concurrent ensure() calls in one runtime into a single refresh", async () => {
-    const cacheDir = await makeCacheDir("auth-core-single-flight-");
-    const store = new FileCacheStore(cacheDir);
+    const stateDir = await makeCacheDir("auth-core-single-flight-");
+    const store = new FileCacheStore(stateDir);
     const idp = createFakeIdp(["rt-1"]);
     await store.save("shared-id", expiredToken());
 
@@ -169,7 +169,7 @@ describe("TokenRuntime refresh coordination", () => {
     const runtime = new TokenRuntime("shared-id", createServerConfig(), {
       logger: recording.logger,
       fetchImpl: idp.fetchImpl,
-      cacheDir
+      stateDir
     });
 
     const tokens = await Promise.all(
@@ -191,7 +191,7 @@ describe("TokenRuntime refresh coordination", () => {
 
   it("never starts an interactive login when a newer valid token is already persisted", async () => {
     const idp = createFakeIdp([]);
-    const cacheDir = await makeCacheDir("auth-core-400-adopt-");
+    const stateDir = await makeCacheDir("auth-core-400-adopt-");
     const recording = createRecordingLogger();
     const newer = validToken();
     let reads = 0;
@@ -205,7 +205,7 @@ describe("TokenRuntime refresh coordination", () => {
       {
         logger: recording.logger,
         fetchImpl: idp.fetchImpl,
-        cacheDir,
+        stateDir,
         // Reads 1 and 2 (fast path + inside the lock) still see the stale
         // token; the other process persists only while our refresh is in
         // flight, so the post-failure re-read is the first to see it.
@@ -227,7 +227,7 @@ describe("TokenRuntime refresh coordination", () => {
 
   it("retries once with a newer persisted refresh token after a 4xx", async () => {
     const idp = createFakeIdp(["rt-newer"]);
-    const cacheDir = await makeCacheDir("auth-core-400-retry-");
+    const stateDir = await makeCacheDir("auth-core-400-retry-");
     const recording = createRecordingLogger();
     let reads = 0;
 
@@ -240,7 +240,7 @@ describe("TokenRuntime refresh coordination", () => {
       {
         logger: recording.logger,
         fetchImpl: idp.fetchImpl,
-        cacheDir,
+        stateDir,
         getCached: async () => {
           reads += 1;
           return reads <= 2
@@ -260,12 +260,12 @@ describe("TokenRuntime refresh coordination", () => {
   });
 
   it("breaks a stale lock file and proceeds", async () => {
-    const cacheDir = await makeCacheDir("auth-core-stale-lock-");
-    const store = new FileCacheStore(cacheDir);
+    const stateDir = await makeCacheDir("auth-core-stale-lock-");
+    const store = new FileCacheStore(stateDir);
     const idp = createFakeIdp(["rt-1"]);
     await store.save("shared-id", expiredToken());
 
-    const lockDir = join(cacheDir, "locks");
+    const lockDir = join(stateDir, "locks");
     const lockPath = join(lockDir, "shared-id.lock");
     await mkdir(lockDir, { recursive: true });
     await writeFile(
@@ -278,7 +278,7 @@ describe("TokenRuntime refresh coordination", () => {
     const runtime = new TokenRuntime("shared-id", createServerConfig(), {
       logger: recording.logger,
       fetchImpl: idp.fetchImpl,
-      cacheDir,
+      stateDir,
       lockStaleMs: 1_000
     });
 
@@ -291,12 +291,12 @@ describe("TokenRuntime refresh coordination", () => {
   });
 
   it("waits behind a live lock and adopts the token that holder persisted", async () => {
-    const cacheDir = await makeCacheDir("auth-core-live-lock-");
-    const store = new FileCacheStore(cacheDir);
+    const stateDir = await makeCacheDir("auth-core-live-lock-");
+    const store = new FileCacheStore(stateDir);
     const idp = createFakeIdp(["rt-1"]);
     await store.save("shared-id", expiredToken());
 
-    const lockDir = join(cacheDir, "locks");
+    const lockDir = join(stateDir, "locks");
     const lockPath = join(lockDir, "shared-id.lock");
     await mkdir(lockDir, { recursive: true });
     await writeFile(lockPath, JSON.stringify({ pid: 999_999, acquiredAt: Date.now() }), "utf8");
@@ -312,7 +312,7 @@ describe("TokenRuntime refresh coordination", () => {
     const runtime = new TokenRuntime("shared-id", createServerConfig(), {
       logger: recording.logger,
       fetchImpl: idp.fetchImpl,
-      cacheDir
+      stateDir
     });
 
     try {
@@ -326,19 +326,19 @@ describe("TokenRuntime refresh coordination", () => {
   });
 
   it("proceeds without the lock, warning once, when the lock dir cannot be created", async () => {
-    const cacheDir = await makeCacheDir("auth-core-lock-unwritable-");
-    const store = new FileCacheStore(cacheDir);
+    const stateDir = await makeCacheDir("auth-core-lock-unwritable-");
+    const store = new FileCacheStore(stateDir);
     const idp = createFakeIdp(["rt-1"]);
     await store.save("shared-id", expiredToken());
     // A plain file where the lock directory should go: mkdir fails ENOTDIR for
     // every user, root included.
-    await writeFile(join(cacheDir, "locks"), "not a directory", "utf8");
+    await writeFile(join(stateDir, "locks"), "not a directory", "utf8");
 
     const recording = createRecordingLogger();
     const runtime = new TokenRuntime("shared-id", createServerConfig(), {
       logger: recording.logger,
       fetchImpl: idp.fetchImpl,
-      cacheDir
+      stateDir
     });
 
     const token = await runtime.ensure({ interactive: false });

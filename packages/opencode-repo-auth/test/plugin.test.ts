@@ -34,12 +34,12 @@ function makeHumanToken(accessToken: string, expiresIn = 3600): TokenSet {
   };
 }
 
-async function seedHuman(cacheDir: string, token: TokenSet): Promise<void> {
-  await new FileCacheStore(cacheDir).save(HUMAN_IDENTITY, token);
+async function seedHuman(stateDir: string, token: TokenSet): Promise<void> {
+  await new FileCacheStore(stateDir).save(HUMAN_IDENTITY, token);
 }
 
-async function seedProject(cacheDir: string, token: TokenSet, projectId: string): Promise<void> {
-  await new FileCacheStore(cacheDir).save(
+async function seedProject(stateDir: string, token: TokenSet, projectId: string): Promise<void> {
+  await new FileCacheStore(stateDir).save(
     `${HUMAN_IDENTITY}-${hashCacheKey(`${HUMAN_IDENTITY}:${projectId}`)}`,
     token
   );
@@ -47,14 +47,14 @@ async function seedProject(cacheDir: string, token: TokenSet, projectId: string)
 
 describe("RepoAuthPlugin", () => {
   it("returns the cached project token without any network call when usable", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-hit-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "repo-auth-hit-"));
     const config = createRepoAuthConfig();
-    await seedHuman(cacheDir, makeHumanToken("human-token"));
-    await seedProject(cacheDir, makeProjectToken("cached-project-token"), config.projectId);
+    await seedHuman(stateDir, makeHumanToken("human-token"));
+    await seedProject(stateDir, makeProjectToken("cached-project-token"), config.projectId);
 
     const plugin = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () => {
         throw new Error("fetch should not be called for a valid cached token");
       }
@@ -65,11 +65,11 @@ describe("RepoAuthPlugin", () => {
   });
 
   it("re-exchanges when the cached project token is expired (model b), without an audience param", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-exch-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "repo-auth-exch-"));
     const config = createRepoAuthConfig();
-    await seedHuman(cacheDir, makeHumanToken("human-token"));
+    await seedHuman(stateDir, makeHumanToken("human-token"));
     await seedProject(
-      cacheDir,
+      stateDir,
       { accessToken: "stale", tokenType: "Bearer", expiresAt: Date.now() - 1000 },
       config.projectId
     );
@@ -77,7 +77,7 @@ describe("RepoAuthPlugin", () => {
     let captured: URLSearchParams | undefined;
     const plugin = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async (_input, init) => {
         captured = parseFormBody(init);
         return makeJsonResponse({
@@ -98,11 +98,11 @@ describe("RepoAuthPlugin", () => {
   });
 
   it("treats an undefined project-token expiry as expired (machine-flow policy)", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-noexp-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "repo-auth-noexp-"));
     const config = createRepoAuthConfig();
-    await seedHuman(cacheDir, makeHumanToken("human-token"));
+    await seedHuman(stateDir, makeHumanToken("human-token"));
     await seedProject(
-      cacheDir,
+      stateDir,
       { accessToken: "no-expiry", tokenType: "Bearer" },
       config.projectId
     );
@@ -110,7 +110,7 @@ describe("RepoAuthPlugin", () => {
     let called = 0;
     const plugin = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async (_input, init) => {
         called += 1;
         expect(parseFormBody(init).get("grant_type")).toBe(
@@ -130,9 +130,9 @@ describe("RepoAuthPlugin", () => {
   });
 
   it("refreshes the human root then re-exchanges (model-b automatic renewal)", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-refresh-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "repo-auth-refresh-"));
     const config = createRepoAuthConfig();
-    await seedHuman(cacheDir, {
+    await seedHuman(stateDir, {
       accessToken: "old-human",
       tokenType: "Bearer",
       refreshToken: "human-refresh",
@@ -142,7 +142,7 @@ describe("RepoAuthPlugin", () => {
     const grantTypes: string[] = [];
     const plugin = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async (_input, init) => {
         const body = parseFormBody(init);
         grantTypes.push(body.get("grant_type") ?? "");
@@ -171,22 +171,22 @@ describe("RepoAuthPlugin", () => {
   });
 
   it("persists the exchanged token so a second instance reads it from disk", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-persist-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "repo-auth-persist-"));
     const config = createRepoAuthConfig();
-    await seedHuman(cacheDir, makeHumanToken("human-token"));
+    await seedHuman(stateDir, makeHumanToken("human-token"));
 
     const plugin = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () =>
         makeJsonResponse({ access_token: "exchanged-once", token_type: "Bearer", expires_in: 300 })
     });
     expect((await plugin.resolveProjectToken()).accessToken).toBe("exchanged-once");
 
-    // A fresh plugin over the same cacheDir reuses the exchanged token offline.
+    // A fresh plugin over the same stateDir reuses the exchanged token offline.
     const second = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () => {
         throw new Error("fetch should not be called");
       }
@@ -195,13 +195,13 @@ describe("RepoAuthPlugin", () => {
   });
 
   it("fails closed on a failed exchange (non-member / resolver error)", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-fail-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "repo-auth-fail-"));
     const config = createRepoAuthConfig();
-    await seedHuman(cacheDir, makeHumanToken("human-token"));
+    await seedHuman(stateDir, makeHumanToken("human-token"));
 
     const plugin = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () =>
         new Response(JSON.stringify({ error: "invalid_grant" }), { status: 404 })
     });
@@ -210,14 +210,14 @@ describe("RepoAuthPlugin", () => {
   });
 
   it("deduplicates concurrent exchanges when the cached project token is unusable", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-dedup-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "repo-auth-dedup-"));
     const config = createRepoAuthConfig();
-    await seedHuman(cacheDir, makeHumanToken("human-token"));
+    await seedHuman(stateDir, makeHumanToken("human-token"));
 
     let exchanges = 0;
     const plugin = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () => {
         exchanges += 1;
         return makeJsonResponse({ access_token: "deduped", token_type: "Bearer", expires_in: 300 });
@@ -231,25 +231,25 @@ describe("RepoAuthPlugin", () => {
   });
 
   it("reset clears the human root and the exchanged project token from disk", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "repo-auth-reset-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "repo-auth-reset-"));
     const config = createRepoAuthConfig();
-    await seedHuman(cacheDir, makeHumanToken("human-token"));
-    await seedProject(cacheDir, makeProjectToken("project-token"), config.projectId);
+    await seedHuman(stateDir, makeHumanToken("human-token"));
+    await seedProject(stateDir, makeProjectToken("project-token"), config.projectId);
 
     const plugin = new RepoAuthPlugin(config, {
       logger: createSilentLogger(),
-      cacheDir,
+      stateDir,
       fetchImpl: async () => {
         throw new Error("unused");
       }
     });
     await plugin.reset();
 
-    await expect(readFile(join(cacheDir, `${HUMAN_IDENTITY}.json`))).rejects.toThrow();
+    await expect(readFile(join(stateDir, `${HUMAN_IDENTITY}.json`))).rejects.toThrow();
     await expect(
       readFile(
         join(
-          cacheDir,
+          stateDir,
           `${HUMAN_IDENTITY}-${hashCacheKey(`${HUMAN_IDENTITY}:${config.projectId}`)}.json`
         )
       )

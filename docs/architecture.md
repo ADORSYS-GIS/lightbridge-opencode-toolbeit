@@ -80,7 +80,7 @@ sequenceDiagram
     actor User
     participant OC as opencode
     participant Plugin as opencode-oauth2
-    participant Cache as ~/Library/Caches/opencode-oauth2
+    participant Cache as state + cache dirs (opencode-oauth2)
     participant IdP as OAuth server
     participant Upstream as Provider API
 
@@ -185,48 +185,79 @@ Override when you know better:
 
 ## Cache layout
 
-Source: [`src/cache.ts`](../packages/opencode-provider-sync/src/cache.ts) (the `FileCacheStore` implementation and `resolveCacheDir`, `@vymalo/opencode-provider-sync` since ADR-0016) — oauth2's own [`src/cache.ts`](../packages/opencode-oauth2/src/cache.ts) is now a thin wrapper binding the `"opencode-oauth2"` on-disk segment shown in the table below.
+> **[ADR-0022](adr/0022-credentials-in-state-dir.md) (2026-11-09) — credentials left the cache.**
+> macOS and cleanup tools purge `~/Library/Caches`, and a purged refresh token silently logged a
+> user out (the cache dir came back empty and every sync refused with "interactive authentication
+> required"). The OAuth token now lives in the durable **state** root; only the disposable
+> discovered-model list stays in the **cache** root. **There is no migration and no fallback read:
+> each user logs in once after upgrading.**
 
-### Directory
+Source: [`src/cache.ts`](../packages/opencode-provider-sync/src/cache.ts) (`ServerStateStore`,
+`ServerCredentialStore`, `ModelCacheStore`, `resolveCacheDir`, `resolveStateDir` — in
+`@vymalo/opencode-provider-sync` since ADR-0016) and auth-core's
+[`resolveStateRoot`](../packages/opencode-auth-core/src/cache.ts) — oauth2's own
+[`src/cache.ts`](../packages/opencode-oauth2/src/cache.ts) is a thin wrapper binding the
+`"opencode-oauth2"` on-disk segment shown in the tables below.
 
-| OS | Path |
-| --- | --- |
-| macOS | `~/Library/Caches/opencode-oauth2/<cacheNamespace>/` |
-| Linux | `${XDG_CACHE_HOME:-~/.cache}/opencode-oauth2/<cacheNamespace>/` |
-| Windows | `${LOCALAPPDATA:-~/AppData/Local}/opencode-oauth2/<cacheNamespace>/` |
+### Directories
+
+Two roots, the same relative path `opencode-oauth2/<cacheNamespace>/` under each:
+
+| OS | State root (credentials) | Cache root (model list) |
+| --- | --- | --- |
+| macOS | `~/Library/Application Support` | `~/Library/Caches` |
+| Linux | `${XDG_STATE_HOME:-~/.local/state}` (a relative `XDG_STATE_HOME` is ignored, per the XDG spec) | `${XDG_CACHE_HOME:-~/.cache}` |
+| Windows | `${LOCALAPPDATA:-~/AppData/Local}` | the same directory (Windows does not auto-purge it) |
 
 OpenCode-managed runtimes use `cacheNamespace = "opencode-oauth2-model-sync"` (hard-coded in `opencode.ts`); standalone embedders default to `"oauth2-model-sync"` (`validateConfig` default).
 
-Directories are created with `0o700`; cache files with `0o600`. Writes are atomic (write to `.tmp`, then `rename`).
+Directories are created with `0o700`; files with `0o600`. Writes are atomic (per-writer temp file, then `rename`, [ADR-0005](adr/0005-atomic-file-writes-per-writer-temp.md)).
 
-### File shape
+### File shapes
 
-One file per server, named `<serverId>.json`:
+Two files per server, **one per purpose**:
+
+`<stateRoot>/opencode-oauth2/<ns>/<serverId>.json` — the credential (shared with lightbridge, [ADR-0017](adr/0017-lightbridge-all-in-one.md)):
 
 ```json
 {
   "serverId": "miaou",
   "updatedAt": 1737000000000,
-  "lastSyncAt": 1737000000000,
   "token": {
     "accessToken": "eyJ...",
     "tokenType": "Bearer",
     "refreshToken": "eyJ...",
     "scope": "openid profile",
     "expiresAt": 1737003600000
-  },
+  }
+}
+```
+
+`<cacheRoot>/opencode-oauth2/<ns>/<serverId>.models.json` — disposable; rebuilt by the next sync:
+
+```json
+{
+  "serverId": "miaou",
+  "updatedAt": 1737000000000,
+  "lastSyncAt": 1737000000000,
   "rawModels": [{ "id": "glm-5", "object": "model" }],
   "models": [{ "id": "glm-5", "displayName": "GLM 5" }]
 }
 ```
 
-`token.refreshToken` is **optional** in the file shape — `client_credentials` doesn't issue one. `accessToken` and `tokenType` are required; anything missing those gets the entire `token` field evicted on load (see `hasValidTokenShape`). `models` / `rawModels` survive eviction so a stale-but-known model list stays in OpenCode while re-auth happens.
+(The `.models` suffix keeps the two apart on Windows, where both roots are one directory.) Before ADR-0022 these were one fused file in the cache root; the in-memory `CachedServerState` is unchanged.
+
+`token.refreshToken` is **optional** — `client_credentials` doesn't issue one. `accessToken` and `tokenType` are required; a credential file missing either is treated as no token (see `hasValidTokenShape`). The model list is independent: a stale-but-known list stays in OpenCode while re-auth happens, and a purged model cache leaves the login intact.
+
+### Refresh lock
+
+`TokenRuntime` takes its advisory cross-process refresh lock at `<stateRoot>/opencode-oauth2/<ns>/locks/<serverId>.lock` — **inside the credential directory, beside the token it guards**, and the very lock lightbridge takes for the same `auth.id`.
 
 ### Shared across processes
 
-Several OpenCode processes (several project windows, a CLI run alongside the desktop app) share **one** `<serverId>.json`, and a refresh token is single-use: after a rotation only the process that performed it holds a usable chain. So the state file — not the in-memory copy loaded at `initialize()` — is the source of truth, and `OAuth2ModelSyncPlugin.readCachedToken` **re-reads it on every cached-token read**, i.e. before every refresh decision, on the warmup path, the scheduler path and the per-request `model.request` path alike.
+Several OpenCode processes (several project windows, a CLI run alongside the desktop app) share **one** credential file `<serverId>.json`, and a refresh token is single-use: after a rotation only the process that performed it holds a usable chain. So the credential file — not the in-memory copy loaded at `initialize()` — is the source of truth, and `OAuth2ModelSyncPlugin.readCachedToken` **re-reads it on every cached-token read**, i.e. before every refresh decision, on the warmup path, the scheduler path and the per-request `model.request` path alike.
 
-The adoption rule, in one line: **the persisted state wins unless memory is strictly newer** (`persisted.updatedAt >= runtime.state.updatedAt`), and it is adopted *wholesale* — token, `models`, `rawModels`, `lastSyncAt` together, since the file is one consistent snapshot and a field-by-field merge would pair one process's token with another's model list. Memory is kept when the file is missing, unreadable, invalid, strictly older, or carries no `token` at all (a tokenless file can't be more authoritative about a token it doesn't have, and honouring it would force a needless interactive re-login). Writes are unchanged: `setCached` and `syncServer` both build the next snapshot from the *current* in-memory state, so a write never rolls back a snapshot just adopted from disk.
+The adoption rule, in one line: **the persisted credential wins unless memory is strictly newer** (`persisted.updatedAt >= runtime.state.updatedAt`). When it is adopted (a rotated token, or a newer stamp) the model record is re-read too, so the in-memory snapshot still moves as one; a missing or invalid model record keeps the in-memory models. Memory is kept when the credential file is missing, unreadable, invalid or strictly older (a missing file can't be more authoritative about a token it doesn't have, and honouring it would force a needless interactive re-login). Writes: `setCached` (a token rotation) persists **only** the credential; `syncServer` persists both records, credential first. Both build the next snapshot from the *current* in-memory state, so a write never rolls back a snapshot just adopted from disk.
 
 Without this, process B kept serving its boot-time copy, replayed a refresh token process A had already rotated, and the IdP's reuse detection revoked the whole chain — logging **both** processes out ([#104](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/104)).
 
@@ -234,27 +265,30 @@ Re-reading is all this plugin does. Coordinating the refresh itself — single-f
 
 Two `trace`/`debug` events make this visible in the log stream (never the token itself): `oauth2_token_adopted_from_cache` when a re-read yields a token different from memory, plus `oauth2_cache_reread_stale` / `oauth2_cache_reread_no_persisted_token` / `oauth2_cache_reread_failed` for the memory-wins branches.
 
-> **[ADR-0017](adr/0017-lightbridge-all-in-one.md) (2026-09-04):** `@vymalo/opencode-lightbridge`'s
-> human root token now lives in **this exact file** (`<serverId>.json`, keyed by `auth.id`) instead
+> **[ADR-0017](adr/0017-lightbridge-all-in-one.md) (2026-09-04), amended by [ADR-0022](adr/0022-credentials-in-state-dir.md):** `@vymalo/opencode-lightbridge`'s
+> human root token lives in **this exact credential file** (`<stateRoot>/…/<serverId>.json`, keyed by `auth.id`) instead
 > of its own bespoke store — so a developer who configures the same IdP (matching `id`/`issuer`/
 > `clientId`) in both `opencode-oauth2` and lightbridge's `auth`/`register` blocks logs in **once**.
-> lightbridge participates as a read/refresh-only client of the same `FileCacheStore` (via
+> lightbridge participates as a read/refresh-only client of the same `ServerCredentialStore` (via
 > `LightbridgeRuntime`'s own lightweight `TokenRuntime`, not a second `ProviderModelSyncEngine`
 > instance for that purpose) unless its `register` block is configured, in which case it runs a real
 > `ProviderModelSyncEngine` of its own — guarded against colliding with an oauth2-managed id by the
 > scheduler-ownership registry described in [Sync scheduler](#sync-scheduler) below. See
 > [`docs/lightbridge.md`](lightbridge.md#register-provider-registration--model-discovery-adr-0017)
-> for the consumer-facing contract and the mandatory old-cache migration.
+> for the consumer-facing contract. ADR-0022 removed ADR-0017's old-format migration.
 
 ### Eviction
 
-The plugin never rotates the cache file itself — it overwrites in place. To force re-auth:
+The plugin never rotates the files itself — it overwrites in place. To force re-auth, delete the **credential** (the model cache is optional):
 
 ```sh
-# remove just one server's cached state
-rm ~/Library/Caches/opencode-oauth2/opencode-oauth2-model-sync/miaou.json
+# macOS: remove just one server's login
+rm ~/Library/Application\ Support/opencode-oauth2/opencode-oauth2-model-sync/miaou.json
 
-# nuke everything (all servers, all namespaces)
+# macOS: nuke every oauth2 login and refresh lock (all servers, all namespaces)
+rm -rf ~/Library/Application\ Support/opencode-oauth2/
+
+# disposable model lists (safe to delete any time)
 rm -rf ~/Library/Caches/opencode-oauth2/
 ```
 

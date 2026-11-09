@@ -3,7 +3,7 @@ import { join } from "node:path";
 import {
   createJsonConsoleLogger,
   DEFAULT_TOKEN_EXPIRY_SKEW_MS,
-  resolveCacheRoot,
+  resolveStateRoot,
   TokenRuntime,
   validateAuthConfig,
   type Logger,
@@ -26,8 +26,8 @@ export interface RepoAuthPluginOptions {
   logger?: Logger;
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
-  /** Override the cache root (defaults to the OS cache dir convention). */
-  cacheDir?: string;
+  /** Override the STATE root for credentials (defaults to the OS state dir, ADR-0022). */
+  stateDir?: string;
   tokenExpirySkewMs?: number;
 }
 
@@ -55,12 +55,13 @@ export function isProjectTokenUsable(
 /**
  * Repo-auth runtime over `@vymalo/opencode-auth-core`'s `TokenRuntime`.
  * Owns two token kinds, both persisted by auth-core's `FileCacheStore` under
- * the plugin's cache namespace (OS cache dir, `0o600`, atomic rename):
+ * the plugin's namespace under the durable OS STATE dir (`0o600`, atomic rename;
+ * never the purgeable cache dir — ADR-0022):
  *
- *   - the **human root** (`<cacheDir>/human.json`) — what `ensure` /
+ *   - the **human root** (`<stateDir>/human.json`) — what `ensure` /
  *     `refresh` produces; carries the `offline_access` refresh token that makes
  *     re-exchange automatic ("model b"); never sent to the gateway.
- *   - the **project token** (`<cacheDir>/human-<hash(projectId)>.json`) — the
+ *   - the **project token** (`<stateDir>/human-<hash(projectId)>.json`) — the
  *     SPI-sealed RFC 8693 exchange result consumed by the gateway; short-lived,
  *     no refresh token, so renewal is always a fresh exchange from the human
  *     root, never a "refreshed" project token (which would lose the project
@@ -96,7 +97,7 @@ export class RepoAuthPlugin {
         logger: this.logger,
         fetchImpl: options.fetchImpl,
         onAuthorizationUrl: options.onAuthorizationUrl,
-        cacheDir: options.cacheDir ?? join(resolveCacheRoot(), DEFAULT_CACHE_NAMESPACE),
+        stateDir: options.stateDir ?? join(resolveStateRoot(), DEFAULT_CACHE_NAMESPACE),
         tokenExpirySkewMs: this.tokenExpirySkewMs,
         serviceLabel: "opencode-repo-auth"
       }
@@ -202,7 +203,7 @@ export class RepoAuthPlugin {
   }
 }
 
-/** Absolute path to the repo-auth cache directory (for diagnostics / tests). */
-export function repoAuthCacheDir(cacheRoot: string): string {
-  return join(cacheRoot, DEFAULT_CACHE_NAMESPACE);
+/** Absolute path to the repo-auth credential directory (for diagnostics / tests). */
+export function repoAuthStateDir(stateRoot: string): string {
+  return join(stateRoot, DEFAULT_CACHE_NAMESPACE);
 }

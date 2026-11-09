@@ -6,7 +6,7 @@ import type { Plugin } from "@opencode/plugin/effect";
 import { Effect, Exit, Scope } from "effect";
 import { vi } from "vitest";
 
-import { FileCacheStore } from "../src/cache.js";
+import { ServerStateStore } from "../src/cache.js";
 import {
   createOpencodeOauth2Plugin,
   type OAuth2RuntimeHandle,
@@ -102,10 +102,19 @@ export interface Harness {
   call(name: string, event: Record<string, unknown>): Promise<void>;
 }
 
+/**
+ * The credential directory paired with a test's model-cache dir (ADR-0022):
+ * a deterministic sibling, so call sites keep passing a single `cacheDir`.
+ */
+export function stateDirFor(cacheDir: string): string {
+  return `${cacheDir}-state`;
+}
+
 export interface StartOptions {
   options?: Record<string, unknown>;
   sources?: SourceProvider[];
   cacheDir?: string;
+  stateDir?: string;
   factory?: Partial<OpenCodePluginFactoryOptions>;
 }
 
@@ -114,6 +123,7 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
   let handle: OAuth2RuntimeHandle | undefined;
   const plugin = createOpencodeOauth2Plugin({
     cacheDir,
+    stateDir: start.stateDir ?? stateDirFor(cacheDir),
     logger: createSilentLogger(),
     fetchImpl: async () => {
       throw new Error("fetch is not expected in these hook tests");
@@ -190,7 +200,7 @@ export async function seedCache(
   cacheDir: string,
   overrides: { accessToken?: string; expiresAt?: number; serverId?: string } = {}
 ): Promise<void> {
-  const cache = new FileCacheStore(cacheDir);
+  const cache = new ServerStateStore(cacheDir, stateDirFor(cacheDir));
   await cache.ensureReady();
   await cache.saveServerState({
     serverId: overrides.serverId ?? "example-ai",

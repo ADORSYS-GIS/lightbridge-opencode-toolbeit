@@ -13,7 +13,7 @@ security-critical token machinery in **one place** so plugins like
   client_credentials, jwt_bearer, and **token exchange** (RFC 8693).
 - `TokenRuntime` — identity-keyed `ensure` / `refresh` / `exchangeToAudience` /
   `getCached` / `reset`, backed by a persistent file cache.
-- `cache.ts` — identity-keyed, atomic-write `FileCacheStore` + `resolveCacheDir`.
+- `cache.ts` — identity-keyed, atomic-write `FileCacheStore`, plus the two roots: `resolveStateRoot` / `resolveStateDir` (durable; **credentials and refresh locks**, [ADR-0022](../../docs/adr/0022-credentials-in-state-dir.md)) and `resolveCacheRoot` (disposable; never credentials).
 - `lock.ts` — `acquireFileLock`, the `O_EXCL` advisory lock the refresh path
   serializes on across processes.
 - `logging.ts` — structured logger with secret redaction.
@@ -50,8 +50,9 @@ both of them out. `TokenRuntime.ensure` therefore coordinates the refresh:
 - **Single-flight** — concurrent `ensure()` calls on one runtime share one
   in-flight refresh, so ten callers present the refresh token once.
 - **Cross-process lock** — the refresh runs under an advisory lock file
-  (`<cacheDir>/locks/<identity>.lock`, `open(path, "wx")`) so processes sharing
-  a cache directory take turns. The valid-cached-token fast path never touches
+  (`<stateDir>/locks/<identity>.lock`, `open(path, "wx")`) so processes sharing
+  a credential directory take turns — the lock sits beside the token it guards,
+  in the durable state dir (ADR-0022). The valid-cached-token fast path never touches
   it. A lock older than `lockStaleMs` is treated as abandoned and broken; if
   the lock directory cannot be created or written the runtime logs
   `token_lock_unavailable` once and proceeds **without** the lock — an

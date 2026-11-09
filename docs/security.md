@@ -16,9 +16,11 @@ you can reason about the blast radius before enabling one.
   flow and caches the resulting tokens; for federated flows (`jwt_bearer`, `token_exchange`) the
   platform's short-lived OIDC token is re-fetched on every expiry, so nothing long-lived is
   stored.
-- **Cache on disk** lives under the per-OS cache dir (`~/Library/Caches/opencode-oauth2/` on
-  macOS, `XDG_CACHE_HOME` on Linux, `LOCALAPPDATA` on Windows). Writes are **atomic-rename +
-  `0o600`** (owner read/write only).
+- **Credentials on disk** live under the per-OS durable **state** dir (`~/Library/Application Support/opencode-oauth2/`
+  on macOS, `XDG_STATE_HOME` or `~/.local/state` on Linux, `LOCALAPPDATA` on Windows), never the
+  purgeable cache dir ([ADR-0022](adr/0022-credentials-in-state-dir.md)); the cross-process refresh lock sits
+  beside them. The discovered-model list is the only oauth2 data in the cache dir. Writes are
+  **atomic-rename + `0o600`** (owner read/write only), directories `0o700`.
 - **Refresh-token policy.** User flows that issue refresh tokens are cached only if fully
   renewable; entries missing a refresh token are evicted on load (machine flows excepted, since
   they re-acquire). See [token policy in the root README](../README.md#token-policy).

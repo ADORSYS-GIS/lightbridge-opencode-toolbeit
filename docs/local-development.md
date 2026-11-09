@@ -127,16 +127,19 @@ export { default } from "/ABSOLUTE/PATH/TO/lightbridge-opencode-toolbeit/package
 TS
 
 # 3. Seed the human root so no interactive login is needed.
-node -e 'const fs=require("fs");const t={accessToken:"human-root-access-token",tokenType:"Bearer",refreshToken:"human-root-refresh-token",expiresAt:Date.now()+3600000};fs.mkdirSync(process.argv[1]+"/opencode-repo-auth",{recursive:true,mode:0o700});fs.writeFileSync(process.argv[1]+"/opencode-repo-auth/human.json",JSON.stringify(t,null,2),{mode:0o600})' "$SANDBOX/cache"
+node -e 'const fs=require("fs");const t={accessToken:"human-root-access-token",tokenType:"Bearer",refreshToken:"human-root-refresh-token",expiresAt:Date.now()+3600000};fs.mkdirSync(process.argv[1]+"/opencode-repo-auth",{recursive:true,mode:0o700});fs.writeFileSync(process.argv[1]+"/opencode-repo-auth/human.json",JSON.stringify(t,null,2),{mode:0o600})' "$SANDBOX/state"
 
 # 4. A git repo with an origin remote (log-only identity source).
 cd "$SANDBOX/repo" && git init -q && git remote add origin https://github.com/acme/enrolled-repo.git \
   && git config user.email e2e@example.com && git config user.name E2E \
   && echo hi > README.md && git add . && git commit -qm init
 
-# 5. Run the real host.
+# 5. Run the real host. (Credentials live in the STATE root, ADR-0022. On Linux
+#    XDG_STATE_HOME redirects it; on macOS it is ~/Library/Application Support and
+#    ignores XDG_*, so seed step 3 into "$HOME/Library/Application Support" instead
+#    - or run with a throwaway HOME - to keep your real login untouched.)
 curl -s -X DELETE http://127.0.0.1:18080/__admin/requests > /dev/null
-OPENCODE_CONFIG_DIR="$SANDBOX/config" XDG_CACHE_HOME="$SANDBOX/cache" \
+OPENCODE_CONFIG_DIR="$SANDBOX/config" XDG_CACHE_HOME="$SANDBOX/cache" XDG_STATE_HOME="$SANDBOX/state" \
   opencode run --model gateway/e2e-model "Reply with exactly: ok"
 
 # 6. Assert gateway-side: chat requests carry the sealed project bearer,
@@ -166,24 +169,27 @@ When in doubt, register a small range (e.g. ports 8765–8770) in the IdP and le
 
 ## Force re-auth
 
-Delete the cached state. The plugin's cache directory is laid out as `<root>/opencode-oauth2/<namespace>/<serverId>.json` — see [architecture.md](./architecture.md#cache-layout) for the full path table.
+Delete the stored login. Credentials live in the durable **state** directory (not the cache directory — [ADR-0022](./adr/0022-credentials-in-state-dir.md)), laid out as `<stateRoot>/opencode-oauth2/<namespace>/<serverId>.json`; the disposable model list is `<cacheRoot>/opencode-oauth2/<namespace>/<serverId>.models.json`. See [architecture.md](./architecture.md#cache-layout) for the full path table.
 
 macOS:
 
 ```sh
-# remove just one server's cached state
-rm ~/Library/Caches/opencode-oauth2/opencode-oauth2-model-sync/miaou.json
+# remove just one server's login
+rm ~/Library/Application\ Support/opencode-oauth2/opencode-oauth2-model-sync/miaou.json
 
-# nuke everything (all servers, all namespaces)
+# nuke every login and refresh lock (all servers, all namespaces)
+rm -rf ~/Library/Application\ Support/opencode-oauth2/
+
+# the disposable model list (optional)
 rm -rf ~/Library/Caches/opencode-oauth2/
 ```
 
 Linux:
 
 ```sh
-rm ~/.cache/opencode-oauth2/opencode-oauth2-model-sync/miaou.json
+rm "${XDG_STATE_HOME:-$HOME/.local/state}/opencode-oauth2/opencode-oauth2-model-sync/miaou.json"
 # or:
-rm -rf ~/.cache/opencode-oauth2/
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/opencode-oauth2/"
 ```
 
 Windows (PowerShell):
@@ -246,14 +252,14 @@ The `env` source is intentionally not documented for production — it bypasses 
 
 ## Useful one-liners
 
-Inspect the current cached state:
+Inspect the current stored login:
 
 ```sh
 # macOS
-cat ~/Library/Caches/opencode-oauth2/opencode-oauth2-model-sync/miaou.json | jq .
+cat ~/Library/Application\ Support/opencode-oauth2/opencode-oauth2-model-sync/miaou.json | jq .
 
 # Linux
-cat ~/.cache/opencode-oauth2/opencode-oauth2-model-sync/miaou.json | jq .
+cat "${XDG_STATE_HOME:-$HOME/.local/state}/opencode-oauth2/opencode-oauth2-model-sync/miaou.json" | jq .
 ```
 
 Read the plugin's structured logs. In v2 they go to the host's log (OpenCode's own log file), never the terminal ([ADR-0014](./adr/0014-suite-wide-no-terminal-mirror.md)), so redirecting stderr shows nothing. Raise verbosity with `OPENCODE_LOG_LEVEL=DEBUG` (or the plugin's `options.logLevel`) and look for the `oauth2_*` events in the host log.

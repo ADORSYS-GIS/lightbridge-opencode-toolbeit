@@ -83,8 +83,9 @@ Omitting `gateway`, `otel` and `register` is a valid, inert config — the plugi
 
 **One login, shared with oauth2.** Configure the same `id`/`issuer`/`clientId` as an
 `@vymalo/opencode-oauth2` server entry and logging in through either plugin makes the token
-available to both — no second device-code/browser flow. An existing pre-ADR-0017 install's cached
-login is migrated automatically on first use; no re-login is forced. See
+available to both — no second device-code/browser flow. The token lives in the durable OS **state**
+directory, not the cache directory ([ADR-0022](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/adr/0022-credentials-in-state-dir.md)).
+**Upgrading to that release needs one re-login** (no migration, no fallback read). See
 [`docs/lightbridge.md`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/blob/main/docs/lightbridge.md#one-login-shared-cache-with-oauth2-adr-0017).
 
 ## Scope: gateway + OTEL, not MCP

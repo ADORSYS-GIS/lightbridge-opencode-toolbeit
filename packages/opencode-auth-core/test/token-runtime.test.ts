@@ -18,7 +18,7 @@ function makeJsonResponse(body: unknown, _ok = true, status = 200): Response {
 
 describe("TokenRuntime", () => {
   it("returns a cached token when still valid, without any fetch", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "auth-core-token-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "auth-core-token-"));
     let fetched = 0;
     const fetchImpl = (async () => {
       fetched += 1;
@@ -28,7 +28,7 @@ describe("TokenRuntime", () => {
     const runtime = new TokenRuntime("id-1", createServerConfig(), {
       logger: createSilentLogger(),
       fetchImpl,
-      cacheDir
+      stateDir
     });
 
     const cached = {
@@ -36,7 +36,7 @@ describe("TokenRuntime", () => {
       tokenType: "Bearer",
       expiresAt: Date.now() + 60_000
     };
-    const store = new FileCacheStore(cacheDir);
+    const store = new FileCacheStore(stateDir);
     await store.save("id-1", cached);
 
     const token = await runtime.ensure();
@@ -45,7 +45,7 @@ describe("TokenRuntime", () => {
   });
 
   it("writes a fetched token to the identity-keyed cache", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "auth-core-token-write-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "auth-core-token-write-"));
     const fetchImpl = (async () =>
       makeJsonResponse({
         access_token: "fresh-access",
@@ -62,29 +62,29 @@ describe("TokenRuntime", () => {
       {
         logger: createSilentLogger(),
         fetchImpl,
-        cacheDir
+        stateDir
       }
     );
 
     const token = await runtime.ensure();
     expect(token.accessToken).toBe("fresh-access");
 
-    const persisted = await readFile(join(cacheDir, "write-id.json"), "utf8");
+    const persisted = await readFile(join(stateDir, "write-id.json"), "utf8");
     expect(persisted).toContain("fresh-access");
   });
 
   it("isolates caches between identities", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "auth-core-iso-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "auth-core-iso-"));
     const runtimeA = new TokenRuntime("alpha", createServerConfig(), {
       logger: createSilentLogger(),
-      cacheDir
+      stateDir
     });
     const runtimeB = new TokenRuntime("beta", createServerConfig(), {
       logger: createSilentLogger(),
-      cacheDir
+      stateDir
     });
 
-    await new FileCacheStore(cacheDir).save("alpha", {
+    await new FileCacheStore(stateDir).save("alpha", {
       accessToken: "alpha-token",
       tokenType: "Bearer"
     });
@@ -128,7 +128,7 @@ describe("TokenRuntime", () => {
   });
 
   it("exchangeToAudience persists under a derived audience key", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "auth-core-ex-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "auth-core-ex-"));
     const capturedBodies: string[] = [];
     const fetchImpl = (async (_url: string, init: RequestInit | undefined) => {
       capturedBodies.push(String(init?.body));
@@ -142,7 +142,7 @@ describe("TokenRuntime", () => {
     const runtime = new TokenRuntime("human-id", createServerConfig(), {
       logger: createSilentLogger(),
       fetchImpl,
-      cacheDir
+      stateDir
     });
 
     const token = await runtime.exchangeToAudience("/sources/src-123", "human.jwt");
@@ -157,7 +157,7 @@ describe("TokenRuntime", () => {
   });
 
   it("exchangeTo persists extraParams under a hashed identity key", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "auth-core-exto-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "auth-core-exto-"));
     const capturedBodies: string[] = [];
     const fetchImpl = (async (_url: string, init: RequestInit | undefined) => {
       capturedBodies.push(String(init?.body));
@@ -171,7 +171,7 @@ describe("TokenRuntime", () => {
     const runtime = new TokenRuntime("human-id", createServerConfig(), {
       logger: createSilentLogger(),
       fetchImpl,
-      cacheDir
+      stateDir
     });
 
     const token = await runtime.exchangeTo("proj-123", "human.jwt", { project_id: "proj-123" });
@@ -188,17 +188,17 @@ describe("TokenRuntime", () => {
     // the identity prefix is joined with `-`, and the *identity:key* pair is
     // hashed so two identities' exchanges for the same key cannot collide.
     const hashed = hashCacheKey("human-id:proj-123");
-    const raw = await new FileCacheStore(cacheDir).load<TokenSet>(`human-id-${hashed}`);
+    const raw = await new FileCacheStore(stateDir).load<TokenSet>(`human-id-${hashed}`);
     expect(raw?.accessToken).toBe("project-scoped-access");
 
-    const files = await import("node:fs/promises").then((fs) => fs.readdir(cacheDir));
+    const files = await import("node:fs/promises").then((fs) => fs.readdir(stateDir));
     for (const name of files) {
       expect(name).not.toMatch(/:/);
     }
   });
 
   it("exchangeToAudience persists under an identity-prefixed hashed key", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "auth-core-exaud-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "auth-core-exaud-"));
     const fetchImpl = (async () =>
       makeJsonResponse({
         access_token: "source-scoped-access",
@@ -209,23 +209,23 @@ describe("TokenRuntime", () => {
     const runtime = new TokenRuntime("human-id", createServerConfig(), {
       logger: createSilentLogger(),
       fetchImpl,
-      cacheDir
+      stateDir
     });
 
     await runtime.exchangeToAudience("/sources/src-123", "human.jwt");
 
     const hashed = hashCacheKey("human-id:/sources/src-123");
-    const raw = await new FileCacheStore(cacheDir).load<TokenSet>(`human-id-${hashed}`);
+    const raw = await new FileCacheStore(stateDir).load<TokenSet>(`human-id-${hashed}`);
     expect(raw?.accessToken).toBe("source-scoped-access");
   });
 
   it("reset clears the identity cache and leaves no temp files", async () => {
-    const cacheDir = await mkdtemp(join(tmpdir(), "auth-core-reset-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "auth-core-reset-"));
     const runtime = new TokenRuntime("reset-id", createServerConfig(), {
       logger: createSilentLogger(),
-      cacheDir
+      stateDir
     });
-    const store = new FileCacheStore(cacheDir);
+    const store = new FileCacheStore(stateDir);
     await store.save("reset-id", {
       accessToken: "x",
       tokenType: "Bearer"
@@ -247,7 +247,7 @@ describe("TokenRuntime", () => {
     expect(await store.load("reset-id-abc123")).toBeUndefined();
     expect(await store.load("other-id-def456")).toBeDefined();
 
-    const leftovers = (await readdir(cacheDir)).filter((name) => name.includes(".tmp"));
+    const leftovers = (await readdir(stateDir)).filter((name) => name.includes(".tmp"));
     expect(leftovers).toEqual([]);
   });
 });

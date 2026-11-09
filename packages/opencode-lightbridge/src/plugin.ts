@@ -3,41 +3,40 @@ import { join } from "node:path";
 import {
   createJsonConsoleLogger,
   DEFAULT_TOKEN_EXPIRY_SKEW_MS,
-  resolveCacheRoot,
+  resolveStateRoot,
   TokenRuntime,
   type AuthServerConfig,
   type Logger,
   type TokenSet
 } from "@vymalo/opencode-auth-core/lib";
-import {
-  FileCacheStore as SharedFileCacheStore,
-  type CachedServerState
-} from "@vymalo/opencode-provider-sync/lib";
-
-import { migrateRootTokenIfNeeded } from "./migration.js";
+import { ServerCredentialStore } from "@vymalo/opencode-provider-sync/lib";
 
 /**
- * Legacy identity for the exchanged project-token store (UNCHANGED by
- * ADR-0017 — see `migration.ts`'s module doc for why only the ROOT token
- * relocated). Kept as a constant, not `auth.id`, because the exchanged-token
- * cache key has always been derived from this literal, independent of the
- * configured IdP's `id`.
+ * Identity for the exchanged project-token store. Kept as a constant, not
+ * `auth.id`, because the exchanged-token key has always been derived from this
+ * literal, independent of the configured IdP's `id`.
  */
 export const LIGHTBRIDGE_IDENTITY = "lightbridge";
 
-/** Own cache namespace for the exchanged-token store — separate from oauth2/repo-auth/otel's. */
-export const DEFAULT_CACHE_NAMESPACE = "opencode-lightbridge";
+/**
+ * Own namespace for the exchanged-token store — separate from oauth2/repo-auth/
+ * otel's. It sits under the durable STATE root (ADR-0022): a project token is a
+ * credential, and is re-exchangeable only while the human root token survives.
+ */
+export const EXCHANGE_STATE_NAMESPACE = "opencode-lightbridge";
 
 /**
- * ADR-0017: the human ROOT token now lives in the SAME cache file
+ * ADR-0017: the human ROOT token lives in the SAME credential file
  * `@vymalo/opencode-oauth2` uses for a server of this id —
- * `<cacheRoot>/opencode-oauth2/opencode-oauth2-model-sync/<id>.json`, a fused
- * `CachedServerState` (token + discovered models). This is what lets a
- * developer who configures the same IdP (`auth.id` == an oauth2 `servers[].id`,
- * same issuer/clientId) log in ONCE and have both plugins read/write the same
- * on-disk state. The literals are pinned here (not imported from
- * `@vymalo/opencode-oauth2`, which lightbridge does not depend on) — see
- * `docs/adr/0017-lightbridge-all-in-one.md` for the shared-contract rationale.
+ * `<stateRoot>/opencode-oauth2/opencode-oauth2-model-sync/<id>.json`
+ * (ADR-0022 moved the root from the cache dir to the state dir; the relative
+ * path is unchanged). This is what lets a developer who configures the same
+ * IdP (`auth.id` == an oauth2 `servers[].id`, same issuer/clientId) log in ONCE
+ * and have both plugins read/write the same on-disk credential. The literals
+ * are pinned here (not imported from `@vymalo/opencode-oauth2`, which
+ * lightbridge does not depend on) — see `docs/adr/0017-lightbridge-all-in-one.md`
+ * for the shared-contract rationale. The discovered-model list for that server
+ * is a separate record in the CACHE root, owned by whichever engine syncs it.
  */
 export const ROOT_CACHE_SEGMENT = "opencode-oauth2";
 export const ROOT_CACHE_NAMESPACE = "opencode-oauth2-model-sync";
@@ -54,10 +53,10 @@ export interface LightbridgeRuntimeOptions {
   logger?: Logger;
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
-  /** Override the cache ROOT (defaults to the OS cache dir convention) — both
-   *  the shared root-token store and the exchange-only store are joined from
-   *  this. Test seam; production callers omit it. */
-  cacheDir?: string;
+  /** Override the STATE root (defaults to the OS state dir convention, ADR-0022) —
+   *  both the shared root-token store and the exchange-only store are joined
+   *  from this. Test seam; production callers omit it. */
+  stateDir?: string;
   tokenExpirySkewMs?: number;
   /**
    * Whether to perform the RFC 8693 exchange (ADR-0012) rather than use the
@@ -103,14 +102,19 @@ function isProjectTokenUsable(token: TokenSet | undefined, skewMs: number): toke
 
 /**
  * Build the ONE shared root `TokenRuntime` for `serverId`, persisting through
- * the SAME fused `CachedServerState` shape+location `ProviderModelSyncEngine`
- * uses (see `ROOT_CACHE_SEGMENT`/`ROOT_CACHE_NAMESPACE` above) — mirroring the
- * override pattern in `@vymalo/opencode-provider-sync`'s
- * `ProviderModelSyncEngine.buildTokenRuntime` (extract `.token`, preserve
- * `.models`/`.rawModels` on write) but WITHOUT running that engine's
- * scheduler/model-discovery — this is a read/refresh-only participant in the
- * shared cache file, not a second poller (see ADR-0017's double-scheduling
- * guard, enforced inside the engine itself for the `register` path).
+ * the SAME credential record `ProviderModelSyncEngine` uses (see
+ * `ROOT_CACHE_SEGMENT`/`ROOT_CACHE_NAMESPACE` above) — mirroring the override
+ * pattern in `@vymalo/opencode-provider-sync`'s
+ * `ProviderModelSyncEngine.buildTokenRuntime`, but WITHOUT running that
+ * engine's scheduler/model-discovery — this is a read/refresh-only participant
+ * in the shared credential file, not a second poller (see ADR-0017's
+ * double-scheduling guard, enforced inside the engine itself for the `register`
+ * path). It never touches the model-cache record, so a lightbridge-side write
+ * can no longer clobber oauth2's discovered models.
+ *
+ * `stateDir` is the credential store's directory, so the cross-process refresh
+ * lock (`<stateDir>/locks/<id>.lock`) sits beside the token it guards and is
+ * the very lock oauth2's engine takes for the same id.
  *
  * Unlike `ProviderModelSyncEngine`, this performs no cross-process
  * "adopt-if-newer" reconciliation — every `getCached()` call here reads disk
@@ -123,7 +127,7 @@ function isProjectTokenUsable(token: TokenSet | undefined, skewMs: number): toke
 function buildSharedRootTokenRuntime(
   serverId: string,
   auth: AuthServerConfig,
-  sharedStore: SharedFileCacheStore,
+  credentials: ServerCredentialStore,
   options: LightbridgeRuntimeOptions
 ): TokenRuntime {
   return new TokenRuntime(serverId, auth, {
@@ -132,21 +136,10 @@ function buildSharedRootTokenRuntime(
     onAuthorizationUrl: options.onAuthorizationUrl,
     tokenExpirySkewMs: options.tokenExpirySkewMs,
     serviceLabel: "opencode-lightbridge",
-    getCached: async () => {
-      const state = await sharedStore.loadServerState(serverId);
-      return state?.token;
-    },
+    stateDir: credentials.directory,
+    getCached: async () => (await credentials.load(serverId))?.token,
     setCached: async (token) => {
-      const existing = await sharedStore.loadServerState(serverId);
-      const next: CachedServerState = {
-        serverId,
-        updatedAt: Date.now(),
-        lastSyncAt: existing?.lastSyncAt,
-        models: existing?.models ?? [],
-        rawModels: existing?.rawModels ?? [],
-        token
-      };
-      await sharedStore.saveServerState(next);
+      await credentials.save(serverId, token, Date.now());
     }
   });
 }
@@ -159,26 +152,24 @@ function buildSharedRootTokenRuntime(
  * BOTH the gateway (`chat.headers`) and OTEL (`TokenSource.headers()`).
  *
  * The human root token itself is no longer lightbridge-exclusive storage: it
- * lives in the SAME cache file `@vymalo/opencode-oauth2` writes for a server
- * of this id (`ROOT_CACHE_SEGMENT`/`ROOT_CACHE_NAMESPACE`), so configuring
- * both plugins against the same IdP (`auth.id` matching an oauth2
- * `servers[].id`, same issuer/clientId) means logging in once. An upgrading
- * install's pre-existing root token is migrated in automatically — see
- * `migration.ts`.
+ * lives in the SAME credential file `@vymalo/opencode-oauth2` writes for a
+ * server of this id (`ROOT_CACHE_SEGMENT`/`ROOT_CACHE_NAMESPACE`, under the
+ * durable state root — ADR-0022), so configuring both plugins against the same
+ * IdP (`auth.id` matching an oauth2 `servers[].id`, same issuer/clientId) means
+ * logging in once.
  */
 export class LightbridgeRuntime implements LightbridgeRuntimeLike {
   private readonly rootRuntime: TokenRuntime;
-  private readonly sharedStore: SharedFileCacheStore;
+  private readonly sharedStore: ServerCredentialStore;
   private readonly exchangeRuntime: TokenRuntime;
   private readonly logger: Logger;
   private readonly tokenExpirySkewMs: number;
   private readonly exchange: boolean;
-  private readonly cacheRoot: string;
+  private readonly stateRoot: string;
   private readonly serverId: string;
   /** Token-cache key: the project id, or `DEFAULT_PROJECT_KEY` when unset. */
   private readonly projectKey: string;
   private inFlightExchange?: Promise<TokenSet>;
-  private migration?: Promise<void>;
 
   constructor(
     auth: AuthServerConfig,
@@ -189,7 +180,7 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
     this.projectKey = projectId ?? DEFAULT_PROJECT_KEY;
     this.logger = options.logger ?? createJsonConsoleLogger("info");
     this.exchange = options.exchange ?? false;
-    this.cacheRoot = options.cacheDir ?? resolveCacheRoot();
+    this.stateRoot = options.stateDir ?? resolveStateRoot();
     this.tokenExpirySkewMs =
       typeof options.tokenExpirySkewMs === "number" &&
       Number.isFinite(options.tokenExpirySkewMs) &&
@@ -197,10 +188,7 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
         ? options.tokenExpirySkewMs
         : DEFAULT_TOKEN_EXPIRY_SKEW_MS;
 
-    this.sharedStore = new SharedFileCacheStore(
-      join(this.cacheRoot, ROOT_CACHE_SEGMENT, ROOT_CACHE_NAMESPACE),
-      this.logger
-    );
+    this.sharedStore = new ServerCredentialStore(rootStateDir(this.stateRoot), this.logger);
     this.rootRuntime = buildSharedRootTokenRuntime(this.serverId, auth, this.sharedStore, options);
 
     // The exchange-only runtime keeps its OWN dedicated, lightbridge-exclusive
@@ -210,35 +198,10 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
       logger: this.logger,
       fetchImpl: options.fetchImpl,
       onAuthorizationUrl: options.onAuthorizationUrl,
-      cacheDir: join(this.cacheRoot, DEFAULT_CACHE_NAMESPACE),
+      stateDir: lightbridgeStateDir(this.stateRoot),
       tokenExpirySkewMs: this.tokenExpirySkewMs,
       serviceLabel: "opencode-lightbridge"
     });
-  }
-
-  /**
-   * One-time (per instance) migration of a pre-ADR-0017 root token into the
-   * shared cache file — see `migration.ts`. Idempotent and cheap on every
-   * call after the first (the underlying function also short-circuits once
-   * the new location has ANY state).
-   */
-  private ensureMigrated(): Promise<void> {
-    if (!this.migration) {
-      this.migration = migrateRootTokenIfNeeded(
-        this.cacheRoot,
-        ROOT_CACHE_SEGMENT,
-        ROOT_CACHE_NAMESPACE,
-        this.serverId,
-        this.logger
-      ).catch((error) => {
-        // Never fatal: worst case is a fresh login, same as a first-ever
-        // install. Swallow so a migration hiccup can't break normal auth.
-        this.logger.debug("lightbridge_root_migration_error", {
-          error: error instanceof Error ? error.message : String(error)
-        });
-      });
-    }
-    return this.migration;
   }
 
   /** Non-network read of the cached project token, if any. */
@@ -270,8 +233,6 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
    * fail closed (no header / empty `headers()`).
    */
   async getProjectToken(options: { interactive?: boolean } = {}): Promise<TokenSet> {
-    await this.ensureMigrated();
-
     if (!this.exchange) {
       return this.rootRuntime.ensure({ interactive: options.interactive });
     }
@@ -324,30 +285,27 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
 
   /**
    * Drop the cached tokens for this identity: the exchanged project token
-   * entirely (its own exclusive store), and the shared root token's `token`
-   * field only — NOT the whole shared cache file, which may also hold
-   * `@vymalo/opencode-oauth2`'s discovered models for this server id and must
-   * survive a lightbridge-side logout.
+   * entirely (its own exclusive store), and the shared root credential. The
+   * discovered-model record is a separate file in the cache root and is not
+   * touched, so oauth2's models survive a lightbridge-side logout.
    */
   async reset(): Promise<void> {
     await this.exchangeRuntime.reset();
-    const existing = await this.sharedStore.loadServerState(this.serverId);
-    if (existing?.token) {
-      await this.sharedStore.saveServerState({
-        ...existing,
-        updatedAt: Date.now(),
-        token: undefined
-      });
-    }
+    await this.sharedStore.remove(this.serverId);
   }
 }
 
-/** Absolute path to the lightbridge-exclusive (exchanged-token) cache directory. */
-export function lightbridgeCacheDir(cacheRoot: string): string {
-  return join(cacheRoot, DEFAULT_CACHE_NAMESPACE);
+/** Absolute path to the lightbridge-exclusive (exchanged-token) STATE directory. */
+export function lightbridgeStateDir(stateRoot: string): string {
+  return join(stateRoot, EXCHANGE_STATE_NAMESPACE);
 }
 
-/** Absolute path to the SHARED root-token cache directory (ADR-0017). */
+/** Absolute path to the SHARED root-credential STATE directory (ADR-0017, ADR-0022). */
+export function rootStateDir(stateRoot: string): string {
+  return join(stateRoot, ROOT_CACHE_SEGMENT, ROOT_CACHE_NAMESPACE);
+}
+
+/** Absolute path to the SHARED discovered-model CACHE directory (disposable; ADR-0022). */
 export function rootCacheDir(cacheRoot: string): string {
   return join(cacheRoot, ROOT_CACHE_SEGMENT, ROOT_CACHE_NAMESPACE);
 }

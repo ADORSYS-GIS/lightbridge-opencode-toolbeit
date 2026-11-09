@@ -14,7 +14,13 @@ import {
   type SubjectTokenSource,
   type TokenSet
 } from "@vymalo/opencode-auth-core/lib";
-import { FileCacheStore, resolveCacheDir } from "./cache.js";
+import {
+  ServerStateStore,
+  resolveCacheDir,
+  resolveStateDir,
+  type StoredCredential,
+  type StoredModels
+} from "./cache.js";
 import { fetchModels } from "./model-discovery.js";
 import { diffModels, normalizeModelList } from "./model-normalization.js";
 import { startScheduler, type SchedulerHandle } from "./scheduler.js";
@@ -94,13 +100,25 @@ export interface ProviderModelSyncEngineOptions {
   logger?: Logger;
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
+  /**
+   * Exact directory for the DISPOSABLE discovered-model cache. Defaults to
+   * `<cacheRoot>/<segment>/<cacheNamespace>`.
+   */
   cacheDir?: string;
   /**
-   * The on-disk cache segment (`<root>/<segment>/<cacheNamespace>`) this
-   * engine instance's servers are cached under. Identifies the *consuming
-   * plugin* (e.g. `"opencode-oauth2"`), not the engine itself — every real
-   * consumer should set this explicitly so its on-disk cache location is
-   * stable across the plugin's own history. Ignored when `cacheDir` is set.
+   * Exact directory for CREDENTIALS (the OAuth token and its `locks/` refresh
+   * lock) — the durable state dir, never the OS cache dir (ADR-0022). Defaults
+   * to `<stateRoot>/<segment>/<cacheNamespace>`.
+   */
+  stateDir?: string;
+  /**
+   * The on-disk segment (`<root>/<segment>/<cacheNamespace>`) this engine
+   * instance's servers are stored under, under BOTH the cache root (models)
+   * and the state root (credentials). Identifies the *consuming plugin* (e.g.
+   * `"opencode-oauth2"`), not the engine itself — every real consumer should
+   * set this explicitly so its on-disk location is stable across the plugin's
+   * own history, and so plugins sharing a login resolve the same credential
+   * file. Ignored for whichever of `cacheDir` / `stateDir` is set.
    */
   cacheNamespaceSegment?: string;
   /**
@@ -209,9 +227,10 @@ function resolveConfig(input: ProviderSyncEngineConfigInput): ResolvedEngineConf
 export class ProviderModelSyncEngine {
   private readonly logger: Logger;
   private readonly config: ResolvedEngineConfig;
-  private readonly cacheStore: FileCacheStore;
+  private readonly cacheStore: ServerStateStore;
   private readonly runtimeByServer = new Map<string, ServerRuntime>();
   private readonly cacheDirPath: string;
+  private readonly stateDirPath: string;
   /** Unique per-instance id for the scheduler-ownership registry (see above). */
   private readonly instanceId = randomUUID();
   private initialized = false;
@@ -229,31 +248,36 @@ export class ProviderModelSyncEngine {
         options.cacheNamespaceSegment ?? DEFAULT_CACHE_SEGMENT,
         this.config.cacheNamespace
       );
-    this.cacheStore = new FileCacheStore(this.cacheDirPath, this.logger);
+    this.stateDirPath =
+      options.stateDir ??
+      resolveStateDir(
+        options.cacheNamespaceSegment ?? DEFAULT_CACHE_SEGMENT,
+        this.config.cacheNamespace
+      );
+    this.cacheStore = new ServerStateStore(this.cacheDirPath, this.stateDirPath, this.logger);
   }
 
   /**
-   * Re-read the persisted per-server state and reconcile it with this
-   * process's in-memory copy, returning the token the next ensure/refresh
-   * decision must be made against.
+   * Re-read the persisted credential and reconcile it with this process's
+   * in-memory copy, returning the token the next ensure/refresh decision must
+   * be made against.
    *
    * Several OpenCode processes share one
-   * `<cache>/<segment>/<namespace>/<serverId>.json`, and a refresh token
+   * `<state>/<segment>/<namespace>/<serverId>.json`, and a refresh token
    * is single-use: whichever process refreshed last holds the only usable
    * chain. Serving the in-memory copy (loaded once in `initialize()` and never
    * re-read) made a second process replay an already-rotated refresh token,
    * which the IdP answers with reuse detection — revoking the chain and
-   * logging BOTH processes out. So the state file, not memory, is the source
-   * of truth and is re-read on every cached-token read.
+   * logging BOTH processes out. So the credential file, not memory, is the
+   * source of truth and is re-read on every cached-token read.
    *
-   * Adoption rule: the persisted state wins unless memory is strictly newer
-   * (`persisted.updatedAt >= runtime.state.updatedAt`), and it is adopted
-   * WHOLESALE — token, models, rawModels, lastSyncAt together. A field-by-field
-   * merge would pair one process's token with another's model list; the file is
-   * a single consistent snapshot and is taken as one. Memory is kept when the
-   * file is missing, unreadable, invalid, strictly older, or carries no token —
-   * a tokenless file cannot be more authoritative about a token it does not
-   * have, and honouring it would force a needless interactive re-login.
+   * Adoption rule: the persisted credential wins unless memory is strictly
+   * newer (`persisted.updatedAt >= runtime.state.updatedAt`). On adoption the
+   * model record is re-read too, so the in-memory snapshot moves as one (a
+   * missing or invalid model record keeps the in-memory models). Memory is kept
+   * when the credential is missing, unreadable, invalid or strictly older — a
+   * file without a token cannot be more authoritative about a token it does
+   * not have, and honouring it would force a needless interactive re-login.
    *
    * Refresh coordination itself (single-flight, the cross-process lock, the
    * retry after a rotated-token 400) is `TokenRuntime`'s job in auth-core; this
@@ -265,9 +289,9 @@ export class ProviderModelSyncEngine {
       return undefined;
     }
 
-    let persisted: CachedServerState | undefined;
+    let persisted: StoredCredential | undefined;
     try {
-      persisted = await this.cacheStore.loadServerState(serverId);
+      persisted = await this.cacheStore.credentials.load(serverId);
     } catch (error) {
       this.logger.debug("oauth2_cache_reread_failed", {
         serverId,
@@ -276,10 +300,10 @@ export class ProviderModelSyncEngine {
       return runtime.state.token;
     }
 
-    if (!persisted?.token) {
+    if (!persisted) {
       this.logger.trace("oauth2_cache_reread_no_persisted_token", {
         serverId,
-        hit: Boolean(persisted),
+        hit: false,
         hasInMemoryToken: Boolean(runtime.state.token)
       });
       return runtime.state.token;
@@ -300,7 +324,25 @@ export class ProviderModelSyncEngine {
       persisted.token.accessToken !== previousToken?.accessToken ||
       persisted.token.refreshToken !== previousToken?.refreshToken;
 
-    runtime.state = persisted;
+    // Same stamp and same token: nothing new to adopt, skip the model re-read.
+    const changed = rotated || persisted.updatedAt > memoryUpdatedAt;
+    let models: StoredModels | undefined;
+    if (changed) {
+      try {
+        models = await this.cacheStore.models.load(serverId);
+      } catch {
+        models = undefined;
+      }
+    }
+
+    runtime.state = {
+      ...runtime.state,
+      updatedAt: persisted.updatedAt,
+      token: persisted.token,
+      ...(models
+        ? { lastSyncAt: models.lastSyncAt, models: models.models, rawModels: models.rawModels }
+        : {})
+    };
 
     if (rotated) {
       // Never log token material — only whether one was present, and when the
@@ -310,7 +352,7 @@ export class ProviderModelSyncEngine {
         hadInMemoryToken: Boolean(previousToken),
         persistedUpdatedAt: persisted.updatedAt,
         memoryUpdatedAt,
-        modelCount: persisted.models.length
+        modelCount: runtime.state.models.length
       });
     }
 
@@ -343,11 +385,14 @@ export class ProviderModelSyncEngine {
       onAuthorizationUrl: this.options.onAuthorizationUrl,
       tokenExpirySkewMs: this.config.tokenExpirySkewMs,
       serviceLabel: this.options.serviceLabel ?? DEFAULT_SERVICE_LABEL,
-      // Delegate the token cache to the consumer's fused CachedServerState so
-      // the on-disk location and shape are preserved (tests + existing
-      // installs). The read goes to DISK every time, not to the in-memory
-      // snapshot: see `readCachedToken` for why (single-use refresh tokens
-      // shared across processes).
+      // The refresh lock (`<stateDir>/locks/<id>.lock`) must sit beside the
+      // credential it guards, in the durable state dir (ADR-0016, ADR-0022) —
+      // never in the OS cache dir the model list lives in.
+      stateDir: this.stateDirPath,
+      // Delegate the token persistence to the credential store. The read goes
+      // to DISK every time, not to the in-memory snapshot: see
+      // `readCachedToken` for why (single-use refresh tokens shared across
+      // processes).
       getCached: () => this.readCachedToken(serverId),
       setCached: async (token) => {
         const runtime = this.runtimeByServer.get(serverId);
@@ -362,7 +407,10 @@ export class ProviderModelSyncEngine {
           updatedAt: Date.now(),
           token
         };
-        await this.cacheStore.saveServerState(next);
+        // Credential only: a token rotation must not rewrite the (disposable)
+        // model cache, and the credential is the one record that cannot be
+        // rebuilt from the network.
+        await this.cacheStore.credentials.save(serverId, token, next.updatedAt);
         runtime.state = next;
       }
     });

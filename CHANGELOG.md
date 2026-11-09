@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [Unreleased]
+
+> **⚠️ One-time re-login required after upgrading.** OAuth credentials moved from the OS **cache** directory to the durable **state** directory, and there is **no migration and no fallback read** of the old location ([ADR-0022](docs/adr/0022-credentials-in-state-dir.md)). Every user of `oauth2`, `lightbridge` and `repo-auth` signs in **once** after the upgrade. The old files left under `~/Library/Caches/opencode-oauth2` (and `opencode-lightbridge`, `opencode-repo-auth`, `opencode-auth-core`) are inert and can be deleted.
+
+### Changed
+
+- **auth-core, provider-sync, oauth2, lightbridge, repo-auth:** Every persisted OAuth token (the human/IdP root token shared by oauth2 and lightbridge, lightbridge's exchanged project token, repo-auth's human and project tokens, and `TokenRuntime`'s default store) is now stored under the **state root** instead of the cache root: `~/Library/Application Support` on macOS, `$XDG_STATE_HOME` (else `~/.local/state`; a relative value is ignored per the XDG spec) on Linux, `%LOCALAPPDATA%` on Windows (unchanged there). The relative path under the root is unchanged, so oauth2 and lightbridge still resolve the same file for the same `auth.id` and one login still serves both. Cause: on a real Mac the OS had purged `~/Library/Caches/opencode-oauth2`, the refresh token vanished, and every sync since refused with "interactive authentication required".
+- **provider-sync:** The fused per-server record is **split**. The token is a credential file in the state root (`<id>.json`); the discovered-model list stays in the cache root (`<id>.models.json`, the suffix keeps the two apart on Windows where the roots coincide). A token rotation no longer rewrites the model list, and a purged model cache no longer costs the login. `FileCacheStore` is replaced by `ServerStateStore` / `ServerCredentialStore` / `ModelCacheStore`; `resolveStateDir` is added.
+- **auth-core, provider-sync, lightbridge:** The cross-process refresh lock now lives in `locks/` **inside the credential directory**, beside the token it guards (it previously fell back to a shared directory in the cache root). `TokenRuntimeOptions.cacheDir` / `cacheNamespace` are renamed `stateDir` / `stateNamespace`; `resolveCacheDir` is replaced by `resolveStateDir`, and `resolveStateRoot` is added. repo-auth's `cacheDir` option and `repoAuthCacheDir` become `stateDir` / `repoAuthStateDir`; lightbridge's `lightbridgeCacheDir` becomes `lightbridgeStateDir` (new `rootStateDir`), and its `cacheDir` factory option now means only the disposable register model list, with `stateDir` for credentials. models-info keeps its cache (it holds no credential). Unchanged: atomic per-writer temp + rename ([ADR-0005](docs/adr/0005-atomic-file-writes-per-writer-temp.md)), `0o600` files / `0o700` directories, the advisory refresh lock ([ADR-0016](docs/adr/0016-provider-sync-extraction.md)).
+- **auth-core, provider-sync, oauth2, lightbridge, repo-auth (tests):** The five packages' vitest configs run under a throwaway `HOME` (`scripts/vitest-isolated-home.mjs`) so no test can write to a developer's real login state.
+
+### Removed
+
+- **lightbridge:** ADR-0017's one-time migration of a pre-0.17 root token (`<cacheRoot>/opencode-lightbridge/lightbridge.json`) and its `migrateRootTokenIfNeeded` export. It read a credential from the cache directory, which this release declares unfit for credentials; the install it served is two layouts old.
+
+### Documentation
+
+- **docs (ADR):** [ADR-0022](docs/adr/0022-credentials-in-state-dir.md) records the decision, the evidence, and the alternatives rejected (marking files non-purgeable, the OS keychain, a fallback read). It amends [ADR-0017](docs/adr/0017-lightbridge-all-in-one.md).
+- **docs:** Every stated credential path updated (`architecture.md` cache layout, `lightbridge.md`, `repo-auth.md`, `provider-sync.md`, `security.md`, `troubleshooting.md`, `local-development.md`, `well-known.md`, the package READMEs, and the Cache-layout and lightbridge rows in `CLAUDE.md` / `AGENTS.md`).
+
 ## [0.18.1] — 2026-11-09
 
 ### Added
