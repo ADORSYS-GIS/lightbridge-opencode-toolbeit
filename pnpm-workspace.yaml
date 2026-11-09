@@ -91,16 +91,17 @@ minimumReleaseAgeExclude:
 # express paths.
 # zod: memory exhaustion validating oversized constrained collections
 # (GHSA-mrhx-c7xc-m3w5, vulnerable <4.6.6, fixed in 4.6.6). Reached via
-# sdk > zod and sdk > zod-to-json-schema > zod. zod is only a PEER dependency
-# of the SDK, and an override on a peer range rewrites the range but does not
-# re-resolve a version already locked (verified: the lockfile kept zod@4.4.3
-# with the override in place). So browser-mcp and devtools-mcp also declare
-# `zod: ^4.6.6` directly, which is what actually moves the resolution; the
-# override below stays as a floor for any other path.
+# sdk > zod and sdk > zod-to-json-schema > zod.
 #
-# vite / source-map-js reach the PROD tree through `@opencode/plugin` (a
-# dependency of every runtime plugin), which pins vite exactly; only an
-# override can move them.
+# vite / source-map-js are NOT production dependencies of this suite. vite is a
+# devDependency of the workspace packages, and `@opencode/plugin@2.2.6` lists
+# it only as an OPTIONAL peer (peerDependenciesMeta), with no vite in its
+# `dependencies`. pnpm resolves that optional peer from the workspace's
+# devDependency and records `@opencode/plugin` peer variants in the graph, so
+# `pnpm audit --prod` still reports vite and, through postcss, source-map-js
+# (path printed: @opencode/plugin>vite>postcss>source-map-js) even though no
+# published tarball installs them. These overrides exist because the release
+# gate reads that output and must pass, not because the plugin API pins vite.
 # vite: launch-editor `fs.existsSync()` existence check can be bypassed on
 # Windows (GHSA-587h-7wmj-h5pm, vulnerable >=8.3.0 <=8.3.2, fixed in 8.3.3).
 # The range selector stops at the 8.x line so no other vite major is dragged up.

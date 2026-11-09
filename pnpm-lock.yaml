@@ -130,9 +130,6 @@ importers:
       '@vymalo/opencode-browser':
         specifier: workspace:*
         version: link:../opencode-browser
-      zod:
-        specifier: ^4.6.6
-        version: 4.6.7
     devDependencies:
       vite:
         specifier: ^8.3.3
@@ -235,9 +232,6 @@ importers:
       '@vymalo/opencode-devtools':
         specifier: workspace:*
         version: link:../opencode-devtools
-      zod:
-        specifier: ^4.6.6
-        version: 4.6.7
     devDependencies:
       vite:
         specifier: ^8.3.3

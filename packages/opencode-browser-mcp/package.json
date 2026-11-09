@@ -54,8 +54,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@vymalo/opencode-browser": "workspace:*",
-    "zod": "^4.6.6"
+    "@vymalo/opencode-browser": "workspace:*"
   },
   "devDependencies": {
     "vite": "^8.3.0",
