@@ -3,7 +3,7 @@
 **Status**: **done.** Every runtime plugin package is on the v2 API; `@vymalo/opencode-code-index`
 was dropped instead of ported. `@vymalo/opencode-ratelimit` was ported first and established the
 pattern the other ports copied. This document is kept as the record of the pattern, the per-package
-mapping and the order the work landed in; the release PR (step 8) is the only item still open.
+mapping and the order the work landed in; step 8's user-facing migration guide ([`docs/migration-v2.md`](../docs/migration-v2.md)) has landed. The version bump and changelog entry are the ordinary release mechanics, not migration work.
 
 Decision record: [ADR-0019](../docs/adr/0019-opencode-v2-cutover.md). Read it first — it holds the
 *why* (v2-only, no dual export; the Effect surface; `effect` as a peer dep; ADR-0014's mechanism
@@ -114,7 +114,7 @@ the host-instance sharing that logging depends on.
 ## PR sequence
 
 One PR per concern, per `CLAUDE.md`. Implementation and docs landed together. Steps 1 to 7 are merged
-(PR numbers from `git log` on `main`); step 8 is open.
+(PR numbers from `git log` on `main`); step 8's migration guide has landed.
 
 1. ✅ **ratelimit + ADR-0019 + this plan** — the reference port. #128 (the commit message cites the
    ADR as 0018; it was renumbered to 0019 on merge).
@@ -132,10 +132,11 @@ One PR per concern, per `CLAUDE.md`. Implementation and docs landed together. St
    `command.executed` paths) and #141 (provider-sync, lightbridge: export `upsertManagedProvider`).
    `plugin-bundle`'s externals (it still externalises only `@opencode-ai/plugin`, so `@opencode/plugin`
    and `effect` would be inlined) are being fixed in a separate PR.
-8. ⏳ **Release PR**: one version line across all sixteen packages (the next line is `0.18.0`; `0.17.1`
-   was the last v1 release), the consolidated `CHANGELOG.md` entry, and a top-level migration guide
-   for users (config renames, per-plugin `options`, `settings.<key>` opt-ins). Per-package READMEs
-   already carry a "Migrating from v1" table.
+8. ✅ **Migration guide and release**: the user-facing guide is [`docs/migration-v2.md`](../docs/migration-v2.md)
+   (config renames, per-plugin `options`, `settings.<key>` opt-ins, `effect` peer dependency, plugin
+   ordering, removals). The remaining release mechanics are the ordinary ones: one version line
+   across all sixteen packages (the next line is `0.18.0`; `0.17.1` was the last v1 release) and the
+   consolidated `CHANGELOG.md` entry. Per-package READMEs already carry a "Migrating from v1" table.
 
 ## Open questions — resolved
 
