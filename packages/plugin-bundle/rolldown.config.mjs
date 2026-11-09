@@ -10,10 +10,18 @@ import builtins from "builtin-modules";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-// Externalize: every Node built-in (with and without the `node:` prefix) and
-// the opencode plugin host SDK. Anything else is bundled into the artifact.
+// Externalize: every Node built-in (with and without the `node:` prefix), the
+// v2 plugin host SDK (`@opencode/plugin`, incl. its `/effect` subpath) and
+// `effect`. Anything else is bundled into the artifact.
+//
+// `effect` MUST stay external (ADR-0019): it is a peerDependency, the OpenCode
+// host supplies the instance, and a second copy cannot reach the host's log
+// sink (Effect carries loggers as fiber-level references). The workspace
+// packages (`@vymalo/opencode-auth-core`, `@vymalo/opencode-provider-sync`)
+// are deliberately bundled — they are private-to-the-artifact implementation.
+// `scripts/check-artifact.mjs` fails the build if any of these gets inlined.
 const nodeBuiltins = new Set([...builtinModules, ...builtins]);
-const externalPackages = new Set(["@opencode-ai/plugin"]);
+const externalPackages = new Set(["@opencode/plugin", "effect"]);
 
 /**
  * @param {string} id

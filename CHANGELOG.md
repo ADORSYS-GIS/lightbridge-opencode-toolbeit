@@ -8,6 +8,10 @@ All sixteen workspace packages move on **one version line** and are released tog
 
 ## [Unreleased]
 
+### Fixed
+
+- **oauth2-bundle:** The bundled oauth2 artifact (`dist/index.mjs`) was shipping its own copy of `effect` (plus `@opencode/plugin` and `@opencode/schema`). The Rolldown externals list still named the v1 package `@opencode-ai/plugin`, so none of the v2 dependencies were external; the artifact was 807 KB instead of 125 KB, and a second `effect` copy cannot reach the host's log sink (ADR-0019, ADR-0014). `@opencode/plugin` (including `/effect`) and `effect` are now external, and `build` fails if either is ever inlined again. Docs and `pnpm-workspace.yaml` comments no longer cite `@opencode-ai/plugin`. The `toml: ^4.2.0` override is kept but is now inert: the v2 cutover removed the path it guarded (`@opencode-ai/plugin` → `effect@4.0.0-beta.83` → `toml`), so the 0.17.1 note that the advisory "cannot be designed away" no longer applies. ([#143](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/143))
+
 ### Removed
 
 - **core-otel, otel:** Deleted the now-unreachable `session.diff`, `todo.updated` and `command.executed` paths from `@vymalo/opencode-core-otel`. The v2 port of `otel` already stopped feeding them; the engine still carried the recorder handlers, the `opencode.lines_of_code.count` and `opencode.command.executed.count` instruments, and the `opencode.file_edited`, `opencode.todo_updated` and `opencode.command_executed` log emitters. All gone, along with their `RecorderEvent` variants, the `FileDiff` and `TodoInfo` types, the `detectLanguage` helper (its only caller was the diff recorder) and the `diffs` key of `TelemetryRecorder.pendingStateSize()`. **Breaking for direct `./lib` consumers** of those exports; the `otel` and `lightbridge` plugins are unaffected, since neither emitted them after the v2 port. ([#140](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/140))
