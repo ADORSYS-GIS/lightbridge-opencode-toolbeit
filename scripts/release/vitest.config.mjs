@@ -8,7 +8,7 @@ export default defineConfig({
     restoreMocks: true,
     coverage: {
       provider: "v8",
-      include: ["publish-guard.mjs"],
+      include: ["publish-guard.mjs", "dist-tag.mjs"],
       reporter: ["text-summary"],
       thresholds: { statements: 88, branches: 85, functions: 65, lines: 88 }
     }

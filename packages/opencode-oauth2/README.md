@@ -258,6 +258,8 @@ pnpm --filter @vymalo/opencode-oauth2 build
 `0.18.0` targets the OpenCode **v2** plugin API; `0.17.x` was the last v1 release. See
 [ADR-0019](../../docs/adr/0019-opencode-v2-cutover.md) for why there is no dual-support build.
 
+**Staying on v1:** `0.17.0` is the last v1-compatible release and stays on npm; install it with `@0.17.0` (or the `opencode-v1` dist-tag, once published). It is frozen: no fixes are backported, so this defers the upgrade, it does not avoid it. See [Staying on v1](../../docs/migration-v2.md#staying-on-v1).
+
 | v1 | v2 |
 | --- | --- |
 | `"plugin": ["@vymalo/opencode-oauth2"]` | `"plugins": [{ "package": "@vymalo/opencode-oauth2" }]` |

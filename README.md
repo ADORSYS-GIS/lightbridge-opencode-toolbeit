@@ -365,6 +365,8 @@ For end-to-end usage against a local OpenCode install, see [GETTING_STARTED.md](
 
 Early but functional, and used in anger. All thirteen packages are published and on the same version line; the browser extension ships alongside as a Release asset and on the Chrome Web Store / Firefox AMO. Public API may still shift before `1.0` — roadmap in [`plans/prd.md`](plans/prd.md).
 
+**Still on OpenCode v1?** `0.18.0` and later need an OpenCode v2 host. `0.17.0` is the last v1-compatible release; install it with `@0.17.0` (or the `opencode-v1` dist-tag once published). It is frozen, with no backported fixes, so it defers the upgrade rather than avoiding it. See [Staying on v1](docs/migration-v2.md#staying-on-v1). The six packages without a per-package migration note (`auth-core`, `core-otel`, `provider-sync`, `browser`, `browser-mcp`, `devtools-mcp`) are covered here only, since their READMEs have no "Migrating from v1" section to extend.
+
 ## 🤝 Contributing
 
 Issues and PRs are welcome — please open an issue first for substantial changes so we can align on scope. See [CONTRIBUTING.md](CONTRIBUTING.md) for bootstrap, the pre-push gate, conventions, package layout, and the release process.
