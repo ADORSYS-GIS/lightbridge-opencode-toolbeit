@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
-## [Unreleased]
+## [0.19.0] — 2026-11-09
 
 > **⚠️ One-time re-login required after upgrading.** OAuth credentials moved from the OS **cache** directory to the durable **state** directory, and there is **no migration and no fallback read** of the old location ([ADR-0022](docs/adr/0022-credentials-in-state-dir.md)). Every user of `oauth2`, `lightbridge` and `repo-auth` signs in **once** after the upgrade. The old files left under `~/Library/Caches/opencode-oauth2` (and `opencode-lightbridge`, `opencode-repo-auth`, `opencode-auth-core`) are inert and can be deleted.
 

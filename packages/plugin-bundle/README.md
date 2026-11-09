@@ -28,7 +28,7 @@ pnpm --filter @vymalo/opencode-oauth2-bundle clean    # rm -rf dist
 
 ## Versioning
 
-Kept on the **same version line** as the rest of the workspace (currently `0.18.1`) and bumped together in the release PR, even though it isn't published. It depends on `@vymalo/opencode-oauth2` via `workspace:*`, so a version bump touches only `version` fields — no lockfile change. See the root [CLAUDE.md](../../CLAUDE.md) "Releasing" section.
+Kept on the **same version line** as the rest of the workspace (currently `0.19.0`) and bumped together in the release PR, even though it isn't published. It depends on `@vymalo/opencode-oauth2` via `workspace:*`, so a version bump touches only `version` fields — no lockfile change. See the root [CLAUDE.md](../../CLAUDE.md) "Releasing" section.
 
 ## License
 
