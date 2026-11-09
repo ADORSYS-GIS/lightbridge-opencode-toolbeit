@@ -188,4 +188,16 @@ host does with a hook defect is unverified (below).
   models-info has not enriched (see [`docs/provider-sync.md`](../provider-sync.md)).
 - **`remote_config`.** Its exact schema and load order are taken from the port brief, not from the
   type definitions, which do not describe the manifest.
-- **TTY availability** for interactive warmup inside a v2 plugin host.
+
+## Verified since: TTY availability for interactive warmup
+
+*Previously listed above as unverified: "TTY availability for interactive warmup inside a v2 plugin
+host."* A real user's `opencode.log` settles it. TTY is verified **absent**: 405 non-interactive
+refusals across 0.17.0 and 0.18.0, one per cold start and scheduler tick, with an empty token cache at
+`<cacheRoot>/opencode-oauth2/opencode-oauth2-model-sync/<auth.id>.json`. The documented fallback is
+verified **working** under v2: the first request ran interactively and issued a device code
+(`oauth_device_code_issued`, 2026-11-09T08:26 on 0.18.0, a minute after a refusal). The accepted
+trade-off holds ("slower and less visible than a host-driven flow"); the residual cost is that the
+prompt is only discoverable in the host log, and the code expires after 600s if not completed. The
+refusal is now logged as `sync_skipped_needs_login` at `warn`
+([#149](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/149)).

@@ -5,6 +5,7 @@ import {
   DEFAULT_HTTP_TIMEOUT_MS,
   DEFAULT_LOG_LEVEL,
   DEFAULT_TOKEN_EXPIRY_SKEW_MS,
+  isInteractiveAuthRequiredError,
   TokenRuntime,
   type AuthServerConfig,
   type Logger,
@@ -590,10 +591,21 @@ export class ProviderModelSyncEngine {
         lastSyncAt: nextState.lastSyncAt
       };
     } catch (error) {
-      this.logger.error("sync_failed", {
-        serverId,
-        error: error instanceof Error ? error.message : String(error)
-      });
+      if (isInteractiveAuthRequiredError(error)) {
+        // Expected, not a fault: non-interactive warmup (no TTY under
+        // `--stdio`) refuses to open a login, so the provider's models stay
+        // empty until the user logs in. A distinct event at `warn` keeps it
+        // visible (the provider has no models) without filing it as an error.
+        this.logger.warn("sync_skipped_needs_login", {
+          serverId,
+          error: error.message
+        });
+      } else {
+        this.logger.error("sync_failed", {
+          serverId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
 
       // Keep last-known-good state by not mutating runtime state.
       return {

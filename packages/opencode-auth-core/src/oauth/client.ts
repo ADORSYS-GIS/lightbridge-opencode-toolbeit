@@ -56,6 +56,49 @@ const MACHINE_FLOWS: ReadonlyArray<OAuthAuthFlow> = [
   "token_exchange"
 ];
 
+/** Stable discriminator carried by {@link InteractiveAuthRequiredError}. */
+export const INTERACTIVE_AUTH_REQUIRED_CODE = "interactive_auth_required";
+
+/**
+ * A token could not be obtained without a human (browser / device-code login)
+ * and the caller passed `interactive: false`. This is an expected condition,
+ * not a fault: non-interactive warmup (the OpenCode server runs with
+ * `--stdio`, so there is never a TTY) refuses rather than block, and the
+ * provider's models stay empty until an interactive login happens. Callers
+ * classify it with {@link isInteractiveAuthRequiredError} instead of matching
+ * the message, which is free to be reworded.
+ */
+export class InteractiveAuthRequiredError extends Error {
+  readonly code: typeof INTERACTIVE_AUTH_REQUIRED_CODE = INTERACTIVE_AUTH_REQUIRED_CODE;
+  readonly serverId: string;
+  readonly authFlow: string;
+
+  constructor(serverId: string, authFlow: string) {
+    super(
+      `interactive authentication required for server "${serverId}" (authFlow=${authFlow}) but called non-interactively; its models stay empty until an interactive login completes (see docs/troubleshooting.md)`
+    );
+    this.name = "InteractiveAuthRequiredError";
+    this.serverId = serverId;
+    this.authFlow = authFlow;
+  }
+}
+
+/**
+ * True for {@link InteractiveAuthRequiredError}. Checks the `code` tag as well
+ * as `instanceof`, so it still holds when two copies of this package are
+ * loaded (a bundled plugin next to a separately installed one) and the class
+ * identities differ.
+ */
+export function isInteractiveAuthRequiredError(
+  error: unknown
+): error is InteractiveAuthRequiredError {
+  return (
+    error instanceof InteractiveAuthRequiredError ||
+    (error instanceof Error &&
+      (error as { code?: unknown }).code === INTERACTIVE_AUTH_REQUIRED_CODE)
+  );
+}
+
 /**
  * Refresh-token exchange rejected by the token endpoint. Carries the HTTP
  * status so a caller can tell a 4xx (this refresh token is gone — rotated
@@ -241,9 +284,7 @@ export class OAuthClient {
     // stay empty in OpenCode until the user actually attempts a chat (which
     // calls ensureToken with the default interactive=true).
     if (options.interactive === false) {
-      throw new Error(
-        `interactive authentication required for server "${this.server.id}" (authFlow=${this.server.authFlow}) but called non-interactively`
-      );
+      throw new InteractiveAuthRequiredError(this.server.id, this.server.authFlow);
     }
 
     if (this.server.authFlow === "device_code") {
