@@ -331,7 +331,7 @@ Anywhere the plugin logs a URL it ran (`tokenEndpoint`, `modelsUrl`), it goes th
 | `sync_start` | every scheduler tick or warmup | `serverId`, `interactive` |
 | `sync_success` | model fetch succeeded | `modelCount`, `added`, `removed`, `renamed` |
 | `sync_failed` | a genuine error during sync (network, 5xx, malformed payload, failed refresh) — `error` level | `serverId`, `error` (string) |
-| `sync_skipped_needs_login` | non-interactive warmup/tick needed a browser or device-code login — expected, `warn` level, models stay empty until an interactive `opencode auth login` | `serverId`, `error` (string, includes the remedy) |
+| `sync_skipped_needs_login` | non-interactive warmup/tick needed a browser or device-code login — expected, `warn` level, models stay empty until an interactive login completes (see [troubleshooting](troubleshooting.md)) | `serverId`, `error` (string, includes the remedy) |
 | `sync_startup_failed` | warmup failed | `serverId`, `error` |
 | `oauth_login_started` | `authorization_code` PKCE began | `issuer`, `authorizationEndpoint` |
 | `oauth_login_success` / `oauth_login_failed` | PKCE result | |

@@ -86,7 +86,7 @@ describe("syncServer log level by cause (ADR-0014: severity is asserted, not ass
     expect(skipped).toHaveLength(1);
     expect(skipped[0]?.level).toBe("warn");
     expect(skipped[0]?.fields?.serverId).toBe(SERVER_ID);
-    expect(String(skipped[0]?.fields?.error)).toContain("opencode auth login");
+    expect(String(skipped[0]?.fields?.error)).toContain(SERVER_ID);
   });
 
   it("still logs a genuine sync failure (5xx from the models endpoint) at error", async () => {

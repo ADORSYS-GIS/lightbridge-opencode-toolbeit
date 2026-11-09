@@ -17,16 +17,14 @@ The plugin writes structured log records through the host's Effect logger into O
 **Look for.**
 
 - `plugin_initialized` — confirms the plugin loaded.
-- `sync_skipped_needs_login` (`warn`) with `error: "interactive authentication required for server ... run \`opencode auth login\` interactively"` — confirms warmup gave up non-interactively. Older releases (<= 0.18.0) logged this as `ERROR sync_failed` on every cold start and scheduler tick; it was never a fault. A *different* `sync_failed` (still `error`) is a real failure.
+- `sync_skipped_needs_login` (`warn`) with `error: "interactive authentication required for server ..."` — confirms warmup gave up non-interactively. Older releases (<= 0.18.0) logged this as `ERROR sync_failed` on every cold start and scheduler tick; it was never a fault. A *different* `sync_failed` (still `error`) is a real failure.
 - Absence of `sync_success` and `model_discovery_*`.
 
-**Fix.** Log in once interactively with `opencode auth login` (or trigger auth via an actual `opencode run`) (the chat path calls `ensureToken` with `interactive: true` by default), or override warmup interactivity at start time. There's no plugin `options` knob for this — if you're embedding the runtime yourself, pass `interactive: true` to `start()`. From the OpenCode-hosted path, you can't override; just run a one-shot to bootstrap.
+**Fix.** There is currently no clean one. Per [ADR-0020](adr/0020-oauth2-integration-domain.md) ("Consequences"), there is **no host-visible sign-in** for an oauth2 server: no `opencode auth login`-style entry exists for it, and `opencode auth list` does not show it.
 
-```sh
-# Bootstrap auth interactively — completes the PKCE browser dance once,
-# leaves a refresh token in cache for subsequent non-interactive runs.
-opencode run --model "miaou/glm-5" "hello"
-```
+Login can only happen two ways: interactive warmup when a TTY is attached, or lazily on the first request, where `ensureToken` defaults to `interactive: true`. **In a v2 host neither is reachable in practice.** The OpenCode server is spawned with `--stdio`, so warmup is never interactive, and the first-request device-code prompt is written to that server process's `process.stderr`, which the user does not see. ADR-0020 accepted this; a real user log then confirmed it (405 refusals and an empty token cache).
+
+The nearest workaround is to trigger the request path so `ensureToken` runs interactively, e.g. `opencode run --model "miaou/glm-5" "hello"`. Whether the stderr prompt surfaces to you is **unverified**; do not rely on it. There's no plugin `options` knob to override warmup interactivity (embedders of the runtime can pass `interactive: true` to `start()`). A dedicated login CLI is the tracked remedy; no package in the suite ships a `bin` for it today.
 
 After that, the model list should populate within one scheduler tick (default 60 minutes) or on the next `opencode` restart (warmup picks up the cached refresh token and refreshes silently).
 

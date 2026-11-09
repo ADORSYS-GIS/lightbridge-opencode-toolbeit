@@ -188,4 +188,15 @@ host does with a hook defect is unverified (below).
   models-info has not enriched (see [`docs/provider-sync.md`](../provider-sync.md)).
 - **`remote_config`.** Its exact schema and load order are taken from the port brief, not from the
   type definitions, which do not describe the manifest.
-- **TTY availability** for interactive warmup inside a v2 plugin host.
+
+## Verified since: TTY availability for interactive warmup
+
+*Previously listed above as unverified: "TTY availability for interactive warmup inside a v2 plugin
+host."* Answered negatively by a real user's `opencode.log`: **405** non-interactive refusals
+(`interactive authentication required ... called non-interactively`) across 0.17.0 and 0.18.0, one on
+every cold start and scheduler tick, with an **empty token cache** at
+`<cacheRoot>/opencode-oauth2/opencode-oauth2-model-sync/<auth.id>.json`. The host spawns the server
+with `--stdio`, so warmup is never interactive. This accepted risk ("No host-visible sign-in") has
+materialised. The refusal is now logged as `sync_skipped_needs_login` at `warn`, not `error`
+([#149](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/149)); the remedy remains
+open (a dedicated login CLI).

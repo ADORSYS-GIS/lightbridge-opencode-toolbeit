@@ -75,7 +75,7 @@ export class InteractiveAuthRequiredError extends Error {
 
   constructor(serverId: string, authFlow: string) {
     super(
-      `interactive authentication required for server "${serverId}" (authFlow=${authFlow}) but called non-interactively; its models stay empty until you log in, run \`opencode auth login\` interactively`
+      `interactive authentication required for server "${serverId}" (authFlow=${authFlow}) but called non-interactively; its models stay empty until an interactive login completes (see docs/troubleshooting.md)`
     );
     this.name = "InteractiveAuthRequiredError";
     this.serverId = serverId;

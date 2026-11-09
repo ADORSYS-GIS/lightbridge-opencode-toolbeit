@@ -594,7 +594,7 @@ describe("OAuthClient token lifecycle", () => {
     expect(fetchCalls).toBe(0);
   });
 
-  it("throws a structurally identifiable InteractiveAuthRequiredError carrying the login remedy", async () => {
+  it("throws a structurally identifiable InteractiveAuthRequiredError carrying the server id and flow", async () => {
     const client = new OAuthClient(createServerConfig({ authFlow: "device_code" }), {
       logger: createSilentLogger(),
       timeoutMs: 5000,
@@ -609,7 +609,8 @@ describe("OAuthClient token lifecycle", () => {
     expect(isInteractiveAuthRequiredError(error)).toBe(true);
     expect(error.code).toBe("interactive_auth_required");
     expect(error.authFlow).toBe("device_code");
-    expect(error.message).toContain("opencode auth login");
+    expect(error.message).toContain(createServerConfig({ authFlow: "device_code" }).id);
+    expect(error.message).toContain("authFlow=device_code");
   });
 
   it("isInteractiveAuthRequiredError is false for look-alikes and true for a cross-copy tagged error", () => {
