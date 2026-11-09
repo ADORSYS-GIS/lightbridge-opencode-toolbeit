@@ -75,9 +75,50 @@ minimumReleaseAgeExclude:
 # `effect@4.0.0-beta.83` → `toml`) was removed by the v2 cutover (ADR-0019);
 # `effect@4.1.0` has no dependencies and `toml` is absent from the lockfile.
 # Kept as a floor in case a future dependency reintroduces `toml`.
+#
+# Round three — the release audit gate failed again after the v2 cutover, with
+# 1 critical + 8 high. The direct `@modelcontextprotocol/sdk` bump to ^1.32.2
+# (browser-mcp, devtools-mcp) clears the SDK's own four advisories (floors
+# 1.30.1, 1.31.0, 1.32.0, 1.32.0 — the HIGHEST, 1.32.0, binds), but the SDK's
+# express / zod ranges still resolve below the following fixes, so these are
+# pinned here. All are version-scoped to lift only the vulnerable range.
+#
+# proxy-addr: CRITICAL, IP spoofing via IPv4-mapped IPv6
+# (GHSA-jqcg-44mw-7w3h, vulnerable >=1.1.0 <2.0.8, fixed in 2.0.8). Reached via
+# sdk > express > proxy-addr and sdk > express-rate-limit > express > proxy-addr.
+# body-parser: DoS via trailing bytes after a compressed request body
+# (GHSA-27r3-jxmh-p828, vulnerable >=2.0.0 <2.4.0, fixed in 2.4.0). Same two
+# express paths.
+# zod: memory exhaustion validating oversized constrained collections
+# (GHSA-mrhx-c7xc-m3w5, vulnerable <4.6.6, fixed in 4.6.6). Reached via
+# sdk > zod and sdk > zod-to-json-schema > zod.
+#
+# vite / source-map-js are NOT production dependencies of this suite. vite is a
+# devDependency of the workspace packages, and `@opencode/plugin@2.2.6` lists
+# it only as an OPTIONAL peer (peerDependenciesMeta), with no vite in its
+# `dependencies`. pnpm resolves that optional peer from the workspace's
+# devDependency and records `@opencode/plugin` peer variants in the graph, so
+# `pnpm audit --prod` still reports vite and, through postcss, source-map-js
+# (path printed: @opencode/plugin>vite>postcss>source-map-js) even though no
+# published tarball installs them. These overrides exist because the release
+# gate reads that output and must pass, not because the plugin API pins vite.
+# vite: launch-editor `fs.existsSync()` existence check can be bypassed on
+# Windows (GHSA-587h-7wmj-h5pm, vulnerable >=8.3.0 <=8.3.2, fixed in 8.3.3).
+# The range selector stops at the 8.x line so no other vite major is dragged up.
+# source-map-js (via @opencode/plugin > vite > postcss): event-loop DoS through
+# indexed source-map section offsets (GHSA-68fv-2mgg-jv7q, vulnerable
+# >=1.0.0 <1.2.2, fixed in 1.2.2).
+# Each advisory has a single fixed version today, so each floor is that fixed
+# version; if a second advisory lands on one of these, raise to the HIGHER floor
+# (see fast-uri / toml above) rather than adding a parallel entry.
 overrides:
   fast-uri: ^3.1.6
   toml: ^4.2.0
   ip-address: ^10.3.1
   postcss@<8.5.18: ^8.5.18
   nanoid@<3.3.18: ^3.3.18
+  proxy-addr@<2.0.8: ^2.0.8
+  body-parser@<2.4.0: ^2.4.0
+  zod: ^4.6.6
+  vite@>=8.3.0 <8.3.3: ^8.3.3
+  source-map-js@<1.2.2: ^1.2.2

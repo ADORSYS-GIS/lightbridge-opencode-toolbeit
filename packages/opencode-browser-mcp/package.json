@@ -53,7 +53,7 @@
     "format:check": "biome format ."
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@vymalo/opencode-browser": "workspace:*"
   },
   "devDependencies": {
