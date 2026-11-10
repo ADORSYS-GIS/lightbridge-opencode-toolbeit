@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
-## [Unreleased]
+## [0.20.0] — 2026-11-10
+
+> **Sign-in moved into the host's Connect dialog.** lightbridge no longer prints a device code to the terminal; sign in from Settings → Providers → Show more providers → search the provider name → Sign in. Existing signed-in users keep working. Shipped in [#155](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/155).
 
 ### Changed
 
