@@ -55,7 +55,7 @@ sequenceDiagram
   participant T as IdP token endpoint
   participant S as State file (single writer)
 
-  U->>H: Settings → Providers → Show more providers → name → Sign in
+  U->>H: Settings → Providers → Show more providers → (Integrations dialog) name → Sign in
   H->>P: authorize(answer)
   P->>R: beginDeviceSignIn()
   R->>I: POST device_authorization (client_id, scope, [PKCE challenge])
@@ -73,9 +73,9 @@ sequenceDiagram
   T-->>R: access_token + refresh_token
   R->>S: setCached(token) under the refresh lock (the one writer)
   R-->>P: TokenSet
-  P->>P: best effort: engine.syncServer(), provider.reload()
   P-->>H: Credential.OAuth {access, refresh: "", expires, metadata.label}
   H->>H: stores the PROJECTION in its own credential DB
+  P--)P: detached, best effort: engine.syncServer(), provider.reload()
 ```
 
 ```mermaid
@@ -87,6 +87,7 @@ stateDiagram-v2
   PendingCode --> SignedOut: dialog closed / host interrupts, polling aborted, nothing stored
   PendingCode --> SignedOut: expires_in exhausted or access_denied, nothing stored
   SignedIn --> SignedIn: silent refresh (refresh token, our file) or host refresh handler
+  SignedIn --> SignedOut: user clicks Disconnect in the host (connection seen, then gone): runtime reset, state file cleared, engine dropped, notice re-armed
   SignedIn --> RefreshFailed: IdP refuses the refresh (400 invalid_grant / revoked)
   RefreshFailed --> SignedOut: credential cleared (compare-and-clear), lightbridge_sign_in_required warned once
   SignedOut --> PendingCode: user signs in again
@@ -101,9 +102,12 @@ stateDiagram-v2
    itself, exactly as before (`gateway` / `register`). This is what answers the objection that ADR-0020
    and ADR-0021 both raised against an `oauth` method — *dual custody of a rotating refresh token* —
    there is no second copy to rotate.
-2. **Our `refresh` handler ignores the host's credential.** It returns the same projection from the
-   runtime's current token via a **non-interactive** ensure. If the root was revoked or cleared it
-   *fails the Effect*; it never starts a flow.
+2. **Our `refresh` handler ignores the host's credential.** The host calls it within 5 minutes of
+   `expires`, wider than our own 30-second expiry skew, so the handler forces a **real**
+   non-interactive refresh (through the single writer) whenever the stored token has less than 5
+   minutes left; otherwise the host would be handed the same token for four and a half minutes. If the
+   root was revoked or cleared it *fails the Effect*, logs `lightbridge_sign_in_refresh_failed` and
+   re-arms the notice; it never starts a flow.
 3. **Register on `auth.id`, never on the well-known integration** (fact 6). An `oauth` credential on
    the well-known integration would be `credentials.at(-1)` and, not being `type: "key"`, would make
    the host stop loading the manifest and freeze it to its cache. A new integration named after
@@ -112,23 +116,53 @@ stateDiagram-v2
 4. **The single writer stays single.** `TokenRuntime.beginDeviceSignIn().complete()` polls and then
    stores through the existing `persist` → `setCached`, under the cross-process refresh lock
    ([ADR-0022](0022-credentials-in-state-dir.md)). An abort checked inside the lock means a late
-   cancellation stores nothing.
+   cancellation stores nothing. The follow-up work (engine sync, `provider.reload()`) runs **after**
+   the projection has been returned, detached: the dialog closes immediately, and a failure or a late
+   interrupt in the follow-up can neither fail the sign-in nor leave us signed in with no host
+   credential. The one remaining window is an interrupt landing between "state file written" and
+   "host stores the projection"; it leaves a working token and no host marker, which is the same
+   state as every user who signed in before this change, and is harmless.
 5. **Hard cutover: nothing else starts an interactive flow.** `LightbridgeRuntime.getProjectToken`
    lost its `interactive` option and is always refresh-only; the register module's
    `ProviderModelSyncEngine` is built with `neverInteractive: true` (warmup, scheduler,
    `syncServer`, `ensureAccessToken`); the OTEL `TokenSource` was already non-interactive. When no
-   usable token exists the plugin logs **one** `warn`, `lightbridge_sign_in_required`, naming
-   *Settings → Providers → Show more providers → \<name\> → Sign in*. There is no flag to turn the
-   old behaviour back on.
+   usable token exists the plugin logs `lightbridge_sign_in_required` at `warn`, **once until
+   re-armed** (a successful sign-in or a host disconnect re-arms it), naming *Settings → Providers →
+   Show more providers → (Integrations dialog) search the provider name → Sign in*. It fires only for
+   the "interactive authentication required" error class (not for a network or IdP outage) and only
+   when the sign-in method is actually registered (`device_code`). That is *one notice*, not one log
+   line: while signed out, other events still repeat by design — the register engine's
+   `sync_skipped_needs_login` on each scheduled tick (provider-sync, shared with oauth2), and the
+   gateway's `lightbridge_gateway_no_bearer`, which is `debug` while the notice covers it. There is no
+   flag to turn the old behaviour back on.
 6. **Abort is real.** The callback is `Effect.tryPromise((signal) => complete(signal))`; the host
    closing the attempt interrupts the fiber, which aborts `signal`, which stops the sleep, the
    in-flight token request and the loop, and stores nothing.
 
+### Sign-out: the host's Disconnect
+
+Disconnecting the integration in the host removes the marker credential; it must also sign
+lightbridge out, or "Disconnect" would leave a working token behind. The plugin watches the host's
+`credential.updated` / `credential.switched` / `integration.updated` events
+(`ctx.event.subscribe`, `@opencode/plugin` `dist/effect/event.d.ts`; event shapes in
+`@opencode/schema` `dist/event-manifest.d.ts` — `credential.updated` carries no ids, so the event is
+only a trigger) and, on each, re-reads `ctx.integration.connection.active(auth.id)`
+(`dist/effect/integration.d.ts`); the gateway hook re-checks it with a 5-second cache.
+
+It is **transition-based**: only a connection observed *present in this process* and then *gone*
+signs out (runtime `reset()` clears the state file and the exchanged token, the register engine is
+stopped and rebuilt signed-out, the notice is re-armed and fires). A host that simply has no
+credential at startup is **not** a sign-out: users who signed in before sign-in moved into the dialog
+have a token and no host credential, and must keep working.
+
 ### Discoverability and the browser
 
 The host opens `url` itself when the user clicks *Sign in* (it prefers `verification_uri_complete`,
-so the code is pre-filled; the dialog still shows the code for the case where it is not). The path
-to the button is *Settings → Providers → Show more providers → search for the integration name*.
+so the code is pre-filled; the dialog still shows the code for the case where it is not). The URL is
+validated first: `https:` only (`http:` for a loopback IdP); an unsafe `verification_uri_complete` is
+dropped in favour of `verification_uri`, and an unsafe `verification_uri` fails `authorize`. The
+device code's `expires_in` is clamped to 30 minutes. The path to the button is *Settings → Providers
+→ Show more providers → (Integrations dialog) search the provider name → Sign in*.
 That path is the string in the `lightbridge_sign_in_required` warning, so the log line is a complete
 instruction, unlike the stderr prompt it replaces.
 

@@ -98,6 +98,8 @@ export interface Harness {
   setSources(sources: SourceProvider[]): void;
   /** Push a host event into the plugin's `event.subscribe` stream. */
   emit(event: Record<string, unknown>): Promise<void>;
+  /** Make the host report (or stop reporting) an active connection for the integration. */
+  setConnection(present: boolean): void;
   /** Wait for the `register` module's queued build. */
   settle(): Promise<void>;
   engine: LightbridgeRegisterHandle["engine"];
@@ -139,7 +141,9 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
   let reloads = 0;
   let integrationCb: ((editor: unknown) => void) | undefined;
   const registration = Effect.succeed({ dispose: Effect.void });
-  const events = await Effect.runPromise(Queue.unbounded<Record<string, unknown>>());
+  // One queue per subscriber, as a real event stream would fan out.
+  const queues: Array<Queue.Queue<Record<string, unknown>>> = [];
+  let connectionPresent = false;
 
   const runTransform = () => {
     last = createEditor(sources);
@@ -166,12 +170,21 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
         })
     },
     integration: {
+      connection: {
+        active: () => Effect.sync(() => (connectionPresent ? { id: "conn" } : undefined))
+      },
       transform: (cb: (editor: unknown) => void) => {
         integrationCb = cb;
         return registration;
       }
     },
-    event: { subscribe: () => Stream.fromQueue(events) },
+    event: {
+      subscribe: () => {
+        const queue = Effect.runSync(Queue.unbounded<Record<string, unknown>>());
+        queues.push(queue);
+        return Stream.fromQueue(queue);
+      }
+    },
     session: { hook: hookOf("session") },
     tool: { hook: hookOf("tool") },
     permission: { hook: hookOf("permission") }
@@ -190,9 +203,14 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
       sources = next;
     },
     async emit(event) {
-      await Effect.runPromise(Queue.offer(events, event));
+      for (const queue of queues) {
+        await Effect.runPromise(Queue.offer(queue, event));
+      }
       // Let the forked subscriber drain.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    },
+    setConnection(present) {
+      connectionPresent = present;
     },
     async settle() {
       await handle?.settled();

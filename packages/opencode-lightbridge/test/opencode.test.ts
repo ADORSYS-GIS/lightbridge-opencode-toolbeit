@@ -26,29 +26,26 @@ function makeToken(overrides: Partial<TokenSet> = {}): TokenSet {
 }
 
 interface SpyRuntime extends LightbridgeRuntimeLike {
-  /** One entry per `getProjectToken()` call (the type has no `interactive` option any more). */
-  calls: unknown[][];
-  rootCalls: number;
+  /** Number of `getProjectToken()` calls. */
+  calls: number;
+  /** Number of `beginDeviceSignIn()` calls: only the Connect dialog may make one. */
   beginCalls: number;
 }
 
 function makeSpyRuntime(impl?: () => Promise<TokenSet>): SpyRuntime {
   const spy: SpyRuntime = {
-    calls: [],
-    rootCalls: 0,
+    calls: 0,
     beginCalls: 0,
-    getProjectToken: async (...args: unknown[]) => {
-      spy.calls.push(args);
+    getProjectToken: async () => {
+      spy.calls += 1;
       return impl ? impl() : makeToken();
     },
-    ensureRootToken: async () => {
-      spy.rootCalls += 1;
-      return impl ? impl() : makeToken();
-    },
+    ensureRootToken: async () => (impl ? impl() : makeToken()),
     beginDeviceSignIn: async () => {
       spy.beginCalls += 1;
       throw new Error("no device flow in this spy");
-    }
+    },
+    reset: async () => {}
   };
   return spy;
 }
@@ -122,7 +119,8 @@ describe("createLightbridgePlugin — gateway module", () => {
     const event = requestEvent("gateway", { authorization: "Bearer stale", "x-keep": "1" });
     await harness.call("session.model.request", event);
     expect(event.headers).toEqual({ "x-keep": "1", Authorization: "Bearer shared-project-token" });
-    expect(runtime.calls).toEqual([[]]);
+    expect(runtime.calls).toBe(1);
+    expect(runtime.beginCalls).toBe(0);
   });
 
   it("leaves an unmanaged provider untouched", async () => {
@@ -133,7 +131,7 @@ describe("createLightbridgePlugin — gateway module", () => {
     const event = requestEvent("some-other", { Authorization: "Bearer theirs" });
     await harness.call("session.model.request", event);
     expect(event.headers.Authorization).toBe("Bearer theirs");
-    expect(runtime.calls).toEqual([]);
+    expect(runtime.calls).toBe(0);
   });
 
   it("fails closed: the request dies when the shared token cannot be produced", async () => {
@@ -257,7 +255,8 @@ describe("createLightbridgePlugin — otel module", () => {
     const runtime = makeSpyRuntime(async () => makeToken({ accessToken: "otel-token" }));
     const { tokenSource } = await loadOtel({ runtime });
     await expect(tokenSource()?.headers()).resolves.toEqual({ Authorization: "Bearer otel-token" });
-    expect(runtime.calls).toEqual([[]]);
+    expect(runtime.calls).toBe(1);
+    expect(runtime.beginCalls).toBe(0);
   });
 
   it("TokenSource.headers() degrades to undefined on an exchange failure (ADR-0015)", async () => {
@@ -485,7 +484,8 @@ describe("createLightbridgePlugin — one shared runtime across both modules", (
     expect(built).toHaveLength(1);
 
     await harness.call("session.model.request", requestEvent("gateway"));
-    expect(runtime.calls).toEqual([[]]);
+    expect(runtime.calls).toBe(1);
+    expect(runtime.beginCalls).toBe(0);
   });
 });
 

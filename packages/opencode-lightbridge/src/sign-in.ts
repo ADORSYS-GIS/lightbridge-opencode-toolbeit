@@ -1,5 +1,5 @@
 import type { Credential, Integration, Plugin } from "@opencode/plugin/effect";
-import type { TokenSet } from "@vymalo/opencode-auth-core/lib";
+import { isInteractiveAuthRequiredError, type TokenSet } from "@vymalo/opencode-auth-core/lib";
 import { Effect } from "effect";
 
 import type { Logger } from "./logging.js";
@@ -24,9 +24,12 @@ const FALLBACK_LIFETIME_MS = 60 * 60 * 1000;
 
 const MAX_LABEL_CHARS = 80;
 
+/** The host calls a method's `refresh` once the credential is within this of `expires`. */
+export const HOST_REFRESH_WINDOW_MS: number = 5 * 60 * 1000;
+
 /** The exact path a user follows to sign in, for the `lightbridge_sign_in_required` hint. */
 export function signInPath(name: string): string {
-  return `Settings → Providers → Show more providers → ${name} → Sign in`;
+  return `Settings → Providers → Show more providers → (Integrations dialog) search "${name}" → Sign in`;
 }
 
 /**
@@ -80,11 +83,15 @@ export interface SignInDependencies {
   runtime: LightbridgeRuntimeLike;
   logger: Logger;
   /**
-   * Runs after a successful sign-in (kick the model sync, reload the host's
-   * providers). Best effort: it must not throw, and a failure never fails the
-   * sign-in itself — this wrapper additionally swallows anything that escapes.
+   * Runs after the projection was handed back (kick the model sync, reload the
+   * host's providers). Detached: the dialog closes without waiting for it, and
+   * a failure or a late interrupt cannot undo the sign-in.
    */
   afterSignIn: () => Promise<void>;
+  /** Called synchronously on a successful sign-in (re-arms the sign-in notice). */
+  onSignedIn?: () => void;
+  /** Called when a sign-in-related call finds no usable token (refresh-only failure). */
+  onSignInRequired?: (source: string) => void;
 }
 
 /**
@@ -102,7 +109,9 @@ export function createSignInRegistration(
     method: { id: SIGN_IN_METHOD_ID, type: "oauth", label: SIGN_IN_METHOD_LABEL },
     authorize: () =>
       Effect.tryPromise({
-        try: () => runtime.beginDeviceSignIn(),
+        // The effect's signal aborts when the host abandons the attempt, which
+        // also cancels the device-authorization request.
+        try: (signal: AbortSignal) => runtime.beginDeviceSignIn(signal),
         catch: (error) => error
       }).pipe(
         Effect.tapError((error) =>
@@ -120,30 +129,58 @@ export function createSignInRegistration(
             Effect.tapError((error) =>
               Effect.sync(() => logger.warn("lightbridge_sign_in_failed", errorFields(error)))
             ),
-            Effect.tap(() =>
-              Effect.promise(async () => {
+            Effect.onInterrupt(() =>
+              Effect.sync(() => logger.info("lightbridge_sign_in_cancelled", { integrationID }))
+            ),
+            Effect.map((token) => {
+              logger.info("lightbridge_sign_in_completed", { integrationID });
+              deps.onSignedIn?.();
+              // Detached on purpose (see `afterSignIn`).
+              void (async () => {
                 try {
                   await deps.afterSignIn();
                 } catch (error) {
                   logger.warn("lightbridge_sign_in_followup_failed", errorFields(error));
                 }
-              })
-            ),
-            Effect.map((token) => {
-              logger.info("lightbridge_sign_in_completed", { integrationID });
+              })();
               return projectCredential(token);
             })
           )
         }))
       ),
-    // The host calls this only within 5 minutes of `expires`. Whatever it holds is
-    // ignored (it has no refresh token): the truth is our own runtime, refreshed
-    // non-interactively. A revoked/cleared root fails here — it never starts a flow.
+    // The host calls this within HOST_REFRESH_WINDOW_MS of `expires`. Whatever it
+    // holds is ignored (it has no refresh token): the truth is our own runtime,
+    // forced to a real, non-interactive refresh through the single writer. A
+    // revoked/cleared root fails here - it never starts a flow.
     refresh: () =>
       Effect.tryPromise({
-        try: () => runtime.ensureRootToken(),
+        try: () => runtime.ensureRootToken({ minValidityMs: HOST_REFRESH_WINDOW_MS }),
         catch: (error) => error
-      }).pipe(Effect.map((token) => projectCredential(token))),
+      }).pipe(
+        Effect.tapError((error) =>
+          Effect.sync(() => {
+            logger.warn("lightbridge_sign_in_refresh_failed", errorFields(error));
+            if (isInteractiveAuthRequiredError(error)) {
+              deps.onSignInRequired?.("refresh");
+            }
+          })
+        ),
+        Effect.tap((token) =>
+          Effect.sync(() => {
+            // A refresh that "succeeds" with a token still inside the window means
+            // the refresh itself failed and we served what was left.
+            if (
+              token.expiresAt !== undefined &&
+              token.expiresAt - Date.now() <= HOST_REFRESH_WINDOW_MS
+            ) {
+              logger.warn("lightbridge_sign_in_refresh_failed", {
+                error: "refresh returned a token still inside the host refresh window"
+              });
+            }
+          })
+        ),
+        Effect.map((token) => projectCredential(token))
+      ),
     label: (credential) => {
       const label = credential.metadata?.label;
       return typeof label === "string" ? label : undefined;
@@ -155,25 +192,36 @@ function errorFields(error: unknown): { error: string } {
   return { error: error instanceof Error ? error.message : String(error) };
 }
 
+export interface SignInNotice {
+  /** Warn (once until re-armed) that sign-in is needed; always records the source at debug. */
+  notify(source: string): void;
+  /** Re-arm: the next `notify` warns again (after a sign-in, or a host disconnect). */
+  reset(): void;
+}
+
 /**
- * Emit `lightbridge_sign_in_required` at most once per plugin instance, naming
- * the exact path to sign in. Every non-interactive caller that finds no usable
- * token (startup check, gateway header, OTEL token source, the register sync)
- * reports through this one latch.
+ * Emit `lightbridge_sign_in_required` at most once per arming, naming the exact
+ * path to sign in. Every non-interactive caller that finds no usable token
+ * (startup check, gateway header, OTEL token source, the register sync) reports
+ * through this one latch; each call is also recorded at `debug` as
+ * `lightbridge_sign_in_required_seen` so the sources stay observable.
  */
-export function createSignInRequiredNotifier(
-  logger: Logger,
-  name: string
-): (source: string) => void {
+export function createSignInRequiredNotifier(logger: Logger, name: string): SignInNotice {
   let notified = false;
-  return (source) => {
-    if (notified) {
-      return;
+  return {
+    notify(source) {
+      logger.debug("lightbridge_sign_in_required_seen", { source });
+      if (notified) {
+        return;
+      }
+      notified = true;
+      logger.warn("lightbridge_sign_in_required", {
+        source,
+        message: `lightbridge is not signed in: open ${signInPath(name)}`
+      });
+    },
+    reset() {
+      notified = false;
     }
-    notified = true;
-    logger.warn("lightbridge_sign_in_required", {
-      source,
-      message: `lightbridge is not signed in: open ${signInPath(name)}`
-    });
   };
 }

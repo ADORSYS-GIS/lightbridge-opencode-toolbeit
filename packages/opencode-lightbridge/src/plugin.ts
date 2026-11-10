@@ -79,11 +79,19 @@ export interface LightbridgeRuntimeLike {
    * from the host's Connect dialog.
    */
   getProjectToken(): Promise<TokenSet>;
-  /** The shared human/IdP root token, refresh-only (never interactive). */
-  ensureRootToken(): Promise<TokenSet>;
-  /** Request a device code for the Connect dialog; `complete` polls and stores. */
-  beginDeviceSignIn(): Promise<DeviceSignIn>;
-  reset?(): Promise<void>;
+  /**
+   * The shared human/IdP root token, refresh-only (never interactive).
+   * `minValidityMs` forces a real refresh when the cached token has less than
+   * that left (the host's 5-minute refresh window is wider than our skew).
+   */
+  ensureRootToken(options?: { minValidityMs?: number }): Promise<TokenSet>;
+  /**
+   * Request a device code for the Connect dialog; `complete` polls and stores.
+   * `signal` cancels the device-authorization request.
+   */
+  beginDeviceSignIn(signal?: AbortSignal): Promise<DeviceSignIn>;
+  /** Drop every stored token for this identity (the host disconnected it). */
+  reset(): Promise<void>;
 }
 
 /**
@@ -300,8 +308,8 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
   }
 
   /** See {@link LightbridgeRuntimeLike.ensureRootToken}. */
-  async ensureRootToken(): Promise<TokenSet> {
-    return this.rootRuntime.ensure({ interactive: false });
+  async ensureRootToken(options: { minValidityMs?: number } = {}): Promise<TokenSet> {
+    return this.rootRuntime.ensure({ interactive: false, minValidityMs: options.minValidityMs });
   }
 
   /**
@@ -309,8 +317,8 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
    * device code and, on `complete`, stores the result through the shared
    * credential file's single writer (`setCached` under the refresh lock).
    */
-  async beginDeviceSignIn(): Promise<DeviceSignIn> {
-    return this.rootRuntime.beginDeviceSignIn();
+  async beginDeviceSignIn(signal?: AbortSignal): Promise<DeviceSignIn> {
+    return this.rootRuntime.beginDeviceSignIn(signal);
   }
 
   /**

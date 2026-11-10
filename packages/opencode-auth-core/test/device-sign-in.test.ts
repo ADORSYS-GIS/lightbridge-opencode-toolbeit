@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { beginDeviceCodeFlow } from "../src/oauth/device-code.js";
 import { TokenRuntime } from "../src/token-runtime.js";
 import type { TokenSet } from "../src/types.js";
 import { createServerConfig, createSilentLogger } from "./helpers.js";
@@ -46,8 +47,8 @@ interface Harness {
 }
 
 async function makeHarness(
-  device: () => Response | Promise<Response>,
-  token: () => Response | Promise<Response>
+  device: (init?: RequestInit) => Response | Promise<Response>,
+  token: (init?: RequestInit) => Response | Promise<Response>
 ): Promise<Harness> {
   const stateDir = await mkdtemp(join(tmpdir(), "device-sign-in-"));
   const fetchUrls: string[] = [];
@@ -65,14 +66,14 @@ async function makeHarness(
       stateDir,
       getCached: async () => undefined,
       setCached,
-      fetchImpl: (async (input: RequestInfo | URL) => {
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         fetchUrls.push(url);
         if (url === DEVICE_URL) {
-          return device();
+          return device(init);
         }
         if (url === TOKEN_URL) {
-          return token();
+          return token(init);
         }
         throw new Error(`unexpected fetch ${url}`);
       }) as typeof fetch
@@ -188,6 +189,127 @@ describe("TokenRuntime.beginDeviceSignIn", () => {
 
     expect(await done).toBe("AbortError");
     expect(h.setCached).not.toHaveBeenCalled();
+  });
+
+  it("clamps a hostile expires_in to 30 minutes", async () => {
+    const h = await makeHarness(() => deviceOk({ expires_in: 1e9 }), tokenOk);
+
+    const session = await h.runtime.beginDeviceSignIn();
+
+    expect(session.expiresIn).toBe(1800);
+    expect(session.expiresAt - Date.now()).toBeLessThanOrEqual(30 * 60 * 1000);
+  });
+
+  it("drops an unsafe verification_uri_complete and falls back to verification_uri", async () => {
+    const h = await makeHarness(
+      () => deviceOk({ verification_uri_complete: "javascript:alert(1)" }),
+      tokenOk
+    );
+
+    const session = await h.runtime.beginDeviceSignIn();
+
+    expect(session.verificationUriComplete).toBeUndefined();
+    expect(session.verificationUri).toBe("https://idp.example.com/activate");
+  });
+
+  it.each([
+    "javascript:alert(1)",
+    "http://idp.example.com/activate",
+    "file:///etc/passwd",
+    "ftp://idp.example.com/activate",
+    "not a url"
+  ])("fails authorize when verification_uri itself is unsafe (%s)", async (uri) => {
+    const h = await makeHarness(
+      () => deviceOk({ verification_uri: uri, verification_uri_complete: undefined }),
+      tokenOk
+    );
+
+    await expect(h.runtime.beginDeviceSignIn()).rejects.toThrow(/unsafe verification_uri/);
+    expect(h.setCached).not.toHaveBeenCalled();
+  });
+
+  it("allows plain http for a loopback IdP", async () => {
+    const h = await makeHarness(
+      () => deviceOk({ verification_uri: "http://127.0.0.1:8080/activate" }),
+      tokenOk
+    );
+
+    const session = await h.runtime.beginDeviceSignIn();
+
+    expect(session.verificationUri).toBe("http://127.0.0.1:8080/activate");
+  });
+
+  it("the signal aborts the device-authorization request itself", async () => {
+    const controller = new AbortController();
+    const h = await makeHarness(
+      (init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          if (init?.signal?.aborted) {
+            abort();
+          }
+          init?.signal?.addEventListener("abort", abort);
+        }),
+      tokenOk
+    );
+
+    const begun = h.runtime.beginDeviceSignIn(controller.signal).then(
+      () => "resolved",
+      (error: Error) => error.name
+    );
+    controller.abort();
+
+    expect(await begun).toBe("AbortError");
+  });
+
+  it("the signal aborts an in-flight token request (not just the next loop turn)", async () => {
+    const controller = new AbortController();
+    const h = await makeHarness(deviceOk, (init) => {
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" }))
+        );
+      });
+    });
+
+    const session = await h.runtime.beginDeviceSignIn();
+    const done = session.complete(controller.signal).then(
+      () => "resolved",
+      (error: Error) => error.name
+    );
+    // Past the 1s poll interval, so the token request is now hanging.
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(h.fetchUrls).toEqual([DEVICE_URL, TOKEN_URL]);
+    controller.abort();
+
+    expect(await done).toBe("AbortError");
+    expect(h.setCached).not.toHaveBeenCalled();
+  });
+
+  it("hands the signal to the sleep between polls", async () => {
+    const controller = new AbortController();
+    const sleeps: Array<AbortSignal | undefined> = [];
+    const responses = [deviceOk, tokenOk];
+    let index = 0;
+    const flow = await beginDeviceCodeFlow({
+      deviceAuthorizationEndpoint: DEVICE_URL,
+      tokenEndpoint: TOKEN_URL,
+      clientId: "client",
+      scopes: ["openid"],
+      serverId: "example-ai",
+      logger: createSilentLogger(),
+      timeoutMs: 1_000,
+      pkce: false,
+      sleep: async (_ms, signal) => {
+        sleeps.push(signal);
+      },
+      fetchImpl: (async () => responses[index++]?.()) as typeof fetch
+    });
+
+    await flow.poll(controller.signal);
+
+    expect(sleeps).toHaveLength(1);
+    expect(sleeps[0]).toBe(controller.signal);
   });
 
   it.each([

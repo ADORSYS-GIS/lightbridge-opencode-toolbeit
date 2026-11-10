@@ -619,13 +619,13 @@ export class OAuthClient {
    * the terminal. The caller shows the code and decides when (and whether) to
    * `poll`; storage is the caller's job (see `TokenRuntime.beginDeviceSignIn`).
    */
-  async beginDeviceLogin(): Promise<DeviceCodeFlow> {
+  async beginDeviceLogin(signal?: AbortSignal): Promise<DeviceCodeFlow> {
     if (this.server.authFlow !== "device_code") {
       throw new Error(
         `beginDeviceLogin requires authFlow "device_code" (got ${this.server.authFlow})`
       );
     }
-    return beginDeviceCodeFlow(await this.deviceCodeOptions());
+    return beginDeviceCodeFlow({ ...(await this.deviceCodeOptions()), signal });
   }
 
   private async loginDeviceCode(): Promise<TokenSet> {

@@ -207,9 +207,9 @@ export class TokenRuntime {
    *
    * The valid-cached-token fast path takes no lock at all.
    */
-  async ensure(options: { interactive?: boolean } = {}): Promise<TokenSet> {
+  async ensure(options: { interactive?: boolean; minValidityMs?: number } = {}): Promise<TokenSet> {
     const cached = await this.getCached();
-    if (this.client.isTokenValid(cached)) {
+    if (this.usable(cached, options.minValidityMs)) {
       return cached as TokenSet;
     }
 
@@ -219,7 +219,11 @@ export class TokenRuntime {
       return existing;
     }
 
-    const pending = this.acquireCoordinated(cached, options.interactive).finally(() => {
+    const pending = this.acquireCoordinated(
+      cached,
+      options.interactive,
+      options.minValidityMs
+    ).finally(() => {
       if (this.inFlight === pending) {
         this.inFlight = undefined;
       }
@@ -274,12 +278,13 @@ export class TokenRuntime {
    */
   private async acquireCoordinated(
     snapshot: TokenSet | undefined,
-    interactive?: boolean
+    interactive?: boolean,
+    minValidityMs?: number
   ): Promise<TokenSet> {
     const lock = await this.acquireRefreshLock();
     try {
       const reread = await this.getCached();
-      if (this.client.isTokenValid(reread)) {
+      if (this.usable(reread, minValidityMs)) {
         this.logger.info("token_refresh_adopted_persisted", {
           identity: this.identity,
           stage: "lock_entry"
@@ -291,6 +296,23 @@ export class TokenRuntime {
     } finally {
       await lock.release();
     }
+  }
+
+  /**
+   * Whether `token` can be served as-is: valid by the client's own (skewed)
+   * rule AND, when the caller asks for it, still good for `minValidityMs` more.
+   * The second clause lets a caller whose consumer refreshes earlier than our
+   * skew (the host's 5-minute window) force a real refresh instead of being
+   * handed the same token until the skew finally trips.
+   */
+  private usable(token: TokenSet | undefined, minValidityMs?: number): boolean {
+    if (!this.client.isTokenValid(token)) {
+      return false;
+    }
+    if (minValidityMs === undefined || token?.expiresAt === undefined) {
+      return true;
+    }
+    return token.expiresAt - Date.now() > minValidityMs;
   }
 
   private async refreshOrLogin(
@@ -419,8 +441,8 @@ export class TokenRuntime {
    * path uses — under the cross-process refresh lock, and only if the attempt
    * has not been aborted by then.
    */
-  async beginDeviceSignIn(): Promise<DeviceSignIn> {
-    const flow = await this.client.beginDeviceLogin();
+  async beginDeviceSignIn(signal?: AbortSignal): Promise<DeviceSignIn> {
+    const flow = await this.client.beginDeviceLogin(signal);
     return {
       ...flow.info,
       complete: async (signal) => {

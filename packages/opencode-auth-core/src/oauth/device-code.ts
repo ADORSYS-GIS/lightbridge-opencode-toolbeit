@@ -18,6 +18,32 @@ const ERROR_BODY_PREVIEW_CHARS = 500;
 // deadline bounds the overall wait. The cap keeps the interval from growing
 // without bound while we wait for transient conditions to clear.
 const MAX_POLL_INTERVAL_SECONDS = 60;
+// An IdP-supplied `expires_in` is untrusted input: a hostile or buggy one (1e9)
+// would keep a poll loop, and a "waiting" dialog, alive for decades. RFC 8628
+// codes live minutes; 30 is generous.
+export const MAX_DEVICE_CODE_LIFETIME_SECONDS: number = 30 * 60;
+
+/**
+ * Whether `value` is safe to hand to a browser: `https:`, or `http:` only for a
+ * loopback host (local IdPs and tests). Anything else (`javascript:`, `file:`,
+ * `data:`, plain-http remote hosts) is refused.
+ */
+export function isSafeVerificationUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol === "https:") {
+    return true;
+  }
+  if (url.protocol === "http:") {
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  }
+  return false;
+}
 
 export interface AcquireTokenViaDeviceCodeOptions {
   deviceAuthorizationEndpoint: string;
@@ -51,6 +77,11 @@ export interface AcquireTokenViaDeviceCodeOptions {
    * Defaults to the neutral `"opencode"`.
    */
   serviceLabel?: string;
+  /**
+   * Cancels the whole flow: the device-authorization request, the sleeps and the
+   * in-flight token requests. `poll(signal)` takes its own signal as well.
+   */
+  signal?: AbortSignal;
 }
 
 /** What a device-code flow shows the user: where to go and what to type. */
@@ -140,13 +171,18 @@ function parseDeviceAuthorizationResponse(payload: unknown): DeviceAuthorization
   if (typeof verificationUri !== "string" || verificationUri.length === 0) {
     throw new Error("device authorization response is missing verification_uri");
   }
+  if (!isSafeVerificationUrl(verificationUri)) {
+    throw new Error("device authorization response has an unsafe verification_uri");
+  }
   if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0) {
     throw new Error("device authorization response is missing a valid expires_in");
   }
 
+  // An unsafe `verification_uri_complete` is dropped, not fatal: the plain
+  // `verification_uri` (validated above) is the fallback.
   const verificationUriComplete =
     typeof record.verification_uri_complete === "string" &&
-    record.verification_uri_complete.length > 0
+    isSafeVerificationUrl(record.verification_uri_complete)
       ? record.verification_uri_complete
       : undefined;
 
@@ -160,7 +196,7 @@ function parseDeviceAuthorizationResponse(payload: unknown): DeviceAuthorization
     user_code: userCode,
     verification_uri: verificationUri,
     verification_uri_complete: verificationUriComplete,
-    expires_in: expiresIn,
+    expires_in: Math.min(expiresIn, MAX_DEVICE_CODE_LIFETIME_SECONDS),
     interval
   };
 }
@@ -205,6 +241,11 @@ export async function beginDeviceCodeFlow(
 
   const deviceAuthController = new AbortController();
   const deviceAuthTimeout = setTimeout(() => deviceAuthController.abort(), options.timeoutMs);
+  const abortDeviceAuth = (): void => deviceAuthController.abort();
+  if (options.signal?.aborted) {
+    abortDeviceAuth();
+  }
+  options.signal?.addEventListener("abort", abortDeviceAuth, { once: true });
 
   let deviceAuthResponse: Response;
   try {
@@ -219,6 +260,7 @@ export async function beginDeviceCodeFlow(
     });
   } finally {
     clearTimeout(deviceAuthTimeout);
+    options.signal?.removeEventListener("abort", abortDeviceAuth);
   }
 
   if (!deviceAuthResponse.ok) {

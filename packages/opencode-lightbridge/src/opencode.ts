@@ -457,7 +457,15 @@ export function createLightbridgePlugin(
       const reloadProviders = (): Promise<void> => runInHost(hostContext, ctx.provider.reload());
 
       const signInName = parsed.register?.name ?? parsed.auth.id;
-      const notifySignInRequired = createSignInRequiredNotifier(logger, signInName);
+      const signInNotice = createSignInRequiredNotifier(logger, signInName);
+      // Only meaningful when the Connect dialog can actually be used to fix it.
+      const notifySignInRequired = (source: string): void => {
+        if (signInEnabled) {
+          signInNotice.notify(source);
+        }
+      };
+      // Set below when sign-in is registered; the gateway hook calls it (cached).
+      let observeConnectionCached: () => Promise<void> = async () => {};
 
       // ---- register module (ADR-0017 requirement 1) ----
       let engine: ProviderModelSyncEngine | undefined;
@@ -511,8 +519,16 @@ export function createLightbridgePlugin(
         }
         engine = next;
         registerBearer = await resolveCachedBearer(parsed.auth.id, next, logger);
-        if (registerBearer === undefined) {
-          notifySignInRequired("register");
+        if (registerBearer === undefined && sharedRuntime) {
+          // resolveCachedBearer swallows why; ask the runtime so only a genuine
+          // "needs sign-in" (not a network/IdP outage) raises the notice.
+          try {
+            await sharedRuntime.ensureRootToken();
+          } catch (error) {
+            if (isInteractiveAuthRequiredError(error)) {
+              notifySignInRequired("register");
+            }
+          }
         }
         // Models and bearer are now known: ask the host to re-run transforms.
         await reloadProviders();
@@ -599,7 +615,9 @@ export function createLightbridgePlugin(
           integrationID: parsed.auth.id,
           runtime,
           logger,
-          afterSignIn
+          afterSignIn,
+          onSignedIn: () => signInNotice.reset(),
+          onSignInRequired: notifySignInRequired
         });
         // The integration id is `auth.id`, never the well-known URL's: the host
         // loads the well-known manifest with `credentials.at(-1)` of ITS
@@ -610,6 +628,81 @@ export function createLightbridgePlugin(
           });
           editor.method.update(registration);
         });
+
+        // ---- host disconnect => sign out (ADR-0023) ----
+        // TRANSITION-based: only a connection we saw present in THIS process and
+        // that is then gone signs us out. A host with no credential at startup is
+        // normal (users who signed in before sign-in moved into the dialog have a
+        // token and no host credential) and must keep working.
+        let connectionSeen = false;
+        let signingOut = false;
+        let lastObservedAt = 0;
+        const OBSERVE_CACHE_MS = 5_000;
+        const signOut = async (): Promise<void> => {
+          logger.info("lightbridge_signed_out_by_host", { integrationID: parsed.auth.id });
+          try {
+            await runtime.reset();
+          } catch (error) {
+            logger.warn("lightbridge_sign_out_reset_failed", { error: errorMessage(error) });
+          }
+          // The engine keeps its token in memory even when the file is gone:
+          // drop it, and let the next transform build a fresh (signed-out) one.
+          stopEngine();
+          registerQueued = false;
+          signInNotice.reset();
+          notifySignInRequired("disconnect");
+          try {
+            await reloadProviders();
+          } catch (error) {
+            logger.warn("lightbridge_sign_out_reload_failed", { error: errorMessage(error) });
+          }
+        };
+        const onConnection = async (present: boolean): Promise<void> => {
+          if (present) {
+            connectionSeen = true;
+            return;
+          }
+          if (!connectionSeen || signingOut) {
+            return;
+          }
+          connectionSeen = false;
+          signingOut = true;
+          try {
+            await signOut();
+          } finally {
+            signingOut = false;
+          }
+        };
+        const observeConnection = (force: boolean): Promise<void> => {
+          if (!force && Date.now() - lastObservedAt < OBSERVE_CACHE_MS) {
+            return Promise.resolve();
+          }
+          lastObservedAt = Date.now();
+          return runInHost(
+            hostContext,
+            ctx.integration.connection.active(parsed.auth.id).pipe(
+              Effect.flatMap((info) => Effect.promise(() => onConnection(info !== undefined))),
+              Effect.ignore
+            )
+          );
+        };
+        observeConnectionCached = () => observeConnection(false);
+        yield* Effect.forkScoped(
+          Stream.runForEach(
+            ctx.event.subscribe({
+              types: ["credential.updated", "credential.switched", "integration.updated"]
+            }),
+            () => Effect.promise(() => observeConnection(true))
+          ).pipe(
+            Effect.tapError((error) =>
+              Effect.sync(() =>
+                logger.warn("lightbridge_connection_watch_failed", { error: errorMessage(error) })
+              )
+            ),
+            Effect.ignore
+          )
+        );
+        void observeConnection(true);
 
         // Report a missing sign-in once, up front, without any network on the
         // signed-out path (a stored token may refresh, which is fine).
@@ -648,6 +741,7 @@ export function createLightbridgePlugin(
           }
           return Effect.tryPromise({
             try: async () => {
+              await observeConnectionCached();
               const token = await runtime.getProjectToken();
               // Header names are case-insensitive: drop any variant already set
               // (a stamped record header, the placeholder key's, a lowercase copy).
@@ -663,11 +757,14 @@ export function createLightbridgePlugin(
           }).pipe(
             Effect.tapError((error) =>
               Effect.sync(() => {
-                logger.warn("lightbridge_gateway_no_bearer", {
-                  providerId,
-                  error: errorMessage(error)
-                });
-                if (isInteractiveAuthRequiredError(error)) {
+                const needsSignIn = isInteractiveAuthRequiredError(error);
+                // While signed out every request repeats this; the one-time
+                // lightbridge_sign_in_required warning already says what to do.
+                logger[needsSignIn && signInEnabled ? "debug" : "warn"](
+                  "lightbridge_gateway_no_bearer",
+                  { providerId, error: errorMessage(error) }
+                );
+                if (needsSignIn) {
                   notifySignInRequired("gateway");
                 }
               })
