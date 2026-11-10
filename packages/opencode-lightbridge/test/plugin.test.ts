@@ -248,11 +248,11 @@ describe("LightbridgeRuntime — exchange: false (default, ADR-0017)", () => {
       }
     });
 
-    await runtime.getProjectToken({ interactive: false }).catch(() => undefined);
+    await runtime.getProjectToken().catch(() => undefined);
     expect(refreshPosts).toBe(1);
     expect(await readSharedCredential(stateRoot)).toBeUndefined();
 
-    await runtime.getProjectToken({ interactive: false }).catch(() => undefined);
+    await runtime.getProjectToken().catch(() => undefined);
     expect(refreshPosts).toBe(1);
   });
 

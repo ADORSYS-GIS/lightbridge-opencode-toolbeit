@@ -1,6 +1,6 @@
 # ADR-0021 — a needed sign-in is reported with `connection.status`; credential custody stays with the plugin
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0023](0023-sign-in-via-integration-oauth-method.md) (2026-11-10)
 - **Date:** 2026-11-09
 - **Applies to:** `@vymalo/opencode-oauth2`, the `gateway`/`register` modules of
   `@vymalo/opencode-lightbridge`, and `@vymalo/opencode-provider-sync`'s

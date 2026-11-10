@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [Unreleased]
+
+### Changed
+
+- **lightbridge (breaking):** Sign-in is now an `oauth` Integration method registered on an integration named after `auth.id`, shown in the host's native *Connect* dialog (Settings → Providers → Show more providers → name → Sign in) with the confirmation code and the verification URL the host opens. It is the **only** thing that starts an interactive login: `LightbridgeRuntime.getProjectToken` lost its `interactive` option and is always refresh-only; the gateway hook, the OTEL token source, the register sync (warmup and scheduled) and the new startup check never start a device flow. With no usable token the plugin logs one `lightbridge_sign_in_required` warning naming that path. The host credential is a marker/projection: `refresh` is always `""` and the refresh token never leaves lightbridge's state file. `authFlow: "authorization_code"` no longer has a sign-in surface (`lightbridge_sign_in_unsupported_flow`); use `device_code`. ([ADR-0023](docs/adr/0023-sign-in-via-integration-oauth-method.md))
+- **provider-sync:** New `ProviderModelSyncEngineOptions.neverInteractive` forces warmup, the scheduler, `syncServer` and `ensureAccessToken` to be refresh-only. Default off, so oauth2 is unchanged.
+
+### Added
+
+- **auth-core:** `TokenRuntime.beginDeviceSignIn()` returns the device code for display and a `complete(signal)` that polls and stores through the single `setCached` writer under the refresh lock; abort or expiry stores nothing. Underneath, `beginDeviceCodeFlow` / `DeviceCodeFlow` / `DeviceCodeAbortedError` split the RFC 8628 request from the poll, and `device-code` polling honours an `AbortSignal`.
+
+### Fixed
+
+- **auth-core:** The device-code stderr prompt can no longer raise an unhandled `EPIPE` under a host whose stderr is a closed pipe (`writeTerminalPrompt`, logged once at `debug`). Salvaged from the withdrawn `needs-auth-notice` work.
+
+### Documentation
+
+- **docs (ADR):** [ADR-0023](docs/adr/0023-sign-in-via-integration-oauth-method.md) supersedes [ADR-0020](docs/adr/0020-oauth2-integration-domain.md) and [ADR-0021](docs/adr/0021-needs-auth-via-connection-status.md). `lightbridge.md`, `troubleshooting.md` and `architecture.md` updated.
+
 ## [0.19.0] — 2026-11-09
 
 > **⚠️ One-time re-login required after upgrading.** OAuth credentials moved from the OS **cache** directory to the durable **state** directory, and there is **no migration and no fallback read** of the old location ([ADR-0022](docs/adr/0022-credentials-in-state-dir.md)). Every user of `oauth2`, `lightbridge` and `repo-auth` signs in **once** after the upgrade. The old files left under `~/Library/Caches/opencode-oauth2` (and `opencode-lightbridge`, `opencode-repo-auth`, `opencode-auth-core`) are inert and can be deleted.

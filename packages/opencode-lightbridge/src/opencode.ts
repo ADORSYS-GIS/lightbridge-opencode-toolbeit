@@ -3,7 +3,10 @@ import { hostname } from "node:os";
 import { Plugin } from "@opencode/plugin/effect";
 import { defaultTextMapSetter } from "@opentelemetry/api";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
-import type { AuthServerConfig } from "@vymalo/opencode-auth-core/lib";
+import {
+  isInteractiveAuthRequiredError,
+  type AuthServerConfig
+} from "@vymalo/opencode-auth-core/lib";
 import {
   buildResource,
   createProviders,
@@ -68,6 +71,7 @@ import {
   type LightbridgeRuntimeLike,
   type LightbridgeRuntimeOptions
 } from "./plugin.js";
+import { createSignInRegistration, createSignInRequiredNotifier, signInPath } from "./sign-in.js";
 
 /** Stable plugin id. v2 requires one and keys storage/registrations by it. */
 export const PLUGIN_ID = "vymalo.lightbridge";
@@ -142,13 +146,19 @@ function safeHostname(): string | undefined {
  * every export attempt, a later successful login resumes exporting on the
  * next flush with nothing to restart.
  */
-function createRuntimeTokenSource(runtime: LightbridgeRuntimeLike): TokenSource {
+function createRuntimeTokenSource(
+  runtime: LightbridgeRuntimeLike,
+  onSignInRequired: (source: string) => void
+): TokenSource {
   return {
     headers: async (): Promise<Record<string, string> | undefined> => {
       try {
-        const token = await runtime.getProjectToken({ interactive: false });
+        const token = await runtime.getProjectToken();
         return { Authorization: `${token.tokenType || "Bearer"} ${token.accessToken}` };
-      } catch {
+      } catch (error) {
+        if (isInteractiveAuthRequiredError(error)) {
+          onSignInRequired("otel");
+        }
         return undefined;
       }
     },
@@ -279,7 +289,8 @@ async function buildOtelModule(
   otelConfig: ResolvedOtelConfig,
   logger: Logger,
   factoryOptions: LightbridgePluginFactoryOptions,
-  runtime: LightbridgeRuntimeLike | undefined
+  runtime: LightbridgeRuntimeLike | undefined,
+  onSignInRequired: (source: string) => void
 ): Promise<OtelModule & { version: ReturnType<typeof deferredAttribute> }> {
   const version = deferredAttribute(factoryOptions.deferredTimeoutMs);
   const branch = deferredAttribute(factoryOptions.deferredTimeoutMs);
@@ -304,7 +315,7 @@ async function buildOtelModule(
     vcs
   });
 
-  const tokenSource = runtime ? createRuntimeTokenSource(runtime) : undefined;
+  const tokenSource = runtime ? createRuntimeTokenSource(runtime, onSignInRequired) : undefined;
   const providers = createProviders(
     otelConfig,
     resource,
@@ -428,18 +439,25 @@ export function createLightbridgePlugin(
         factoryOptions.runtimeFactory ??
         ((auth: AuthServerConfig, pid: string | undefined, options: LightbridgeRuntimeOptions) =>
           new LightbridgeRuntime(auth, pid, options));
-      const sharedRuntime: LightbridgeRuntimeLike | undefined = wantsProjectToken
-        ? buildRuntime(parsed.auth, parsed.projectId, {
-            logger,
-            fetchImpl: factoryOptions.fetchImpl,
-            onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
-            stateDir: factoryOptions.stateDir,
-            tokenExpirySkewMs: factoryOptions.tokenExpirySkewMs,
-            exchange: parsed.gateway?.exchange ?? false
-          })
-        : undefined;
+      // Built whenever a module needs a token OR the user must be able to sign in
+      // (device_code, ADR-0023): the sign-in method drives this same runtime.
+      const signInEnabled = parsed.auth.authFlow === "device_code";
+      const sharedRuntime: LightbridgeRuntimeLike | undefined =
+        wantsProjectToken || signInEnabled
+          ? buildRuntime(parsed.auth, parsed.projectId, {
+              logger,
+              fetchImpl: factoryOptions.fetchImpl,
+              onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
+              stateDir: factoryOptions.stateDir,
+              tokenExpirySkewMs: factoryOptions.tokenExpirySkewMs,
+              exchange: parsed.gateway?.exchange ?? false
+            })
+          : undefined;
 
       const reloadProviders = (): Promise<void> => runInHost(hostContext, ctx.provider.reload());
+
+      const signInName = parsed.register?.name ?? parsed.auth.id;
+      const notifySignInRequired = createSignInRequiredNotifier(logger, signInName);
 
       // ---- register module (ADR-0017 requirement 1) ----
       let engine: ProviderModelSyncEngine | undefined;
@@ -469,6 +487,9 @@ export function createLightbridgePlugin(
             cacheNamespace: ROOT_CACHE_NAMESPACE
           },
           {
+            // Sign-in happens only in the host's Connect dialog (ADR-0023): the
+            // engine's warmup, scheduler and token reads are refresh-only.
+            neverInteractive: true,
             logger,
             fetchImpl: factoryOptions.fetchImpl,
             onAuthorizationUrl: factoryOptions.onAuthorizationUrl,
@@ -490,6 +511,9 @@ export function createLightbridgePlugin(
         }
         engine = next;
         registerBearer = await resolveCachedBearer(parsed.auth.id, next, logger);
+        if (registerBearer === undefined) {
+          notifySignInRequired("register");
+        }
         // Models and bearer are now known: ask the host to re-run transforms.
         await reloadProviders();
       };
@@ -551,6 +575,58 @@ export function createLightbridgePlugin(
         });
       }
 
+      // ---- sign-in (ADR-0023): the ONLY place an interactive login can start ----
+      if (signInEnabled && sharedRuntime) {
+        const runtime = sharedRuntime;
+        const afterSignIn = async (): Promise<void> => {
+          try {
+            // Pick up the new credential in the register module's engine and
+            // refresh the stamped bearer, then ask the host to re-run transforms.
+            if (engine) {
+              await engine.syncServer(parsed.auth.id);
+              registerBearer = await resolveCachedBearer(parsed.auth.id, engine, logger);
+            }
+          } catch (error) {
+            logger.warn("lightbridge_sign_in_sync_failed", { error: errorMessage(error) });
+          }
+          try {
+            await reloadProviders();
+          } catch (error) {
+            logger.warn("lightbridge_sign_in_reload_failed", { error: errorMessage(error) });
+          }
+        };
+        const registration = createSignInRegistration({
+          integrationID: parsed.auth.id,
+          runtime,
+          logger,
+          afterSignIn
+        });
+        // The integration id is `auth.id`, never the well-known URL's: the host
+        // loads the well-known manifest with `credentials.at(-1)` of ITS
+        // integration, and an oauth credential there would freeze it (ADR-0023).
+        yield* ctx.integration.transform((editor) => {
+          editor.update(parsed.auth.id, (integration) => {
+            integration.name = signInName;
+          });
+          editor.method.update(registration);
+        });
+
+        // Report a missing sign-in once, up front, without any network on the
+        // signed-out path (a stored token may refresh, which is fine).
+        void runtime.ensureRootToken().catch((error: unknown) => {
+          if (isInteractiveAuthRequiredError(error)) {
+            notifySignInRequired("startup");
+          } else {
+            logger.debug("lightbridge_startup_token_check_failed", { error: errorMessage(error) });
+          }
+        });
+      } else if (parsed.auth.authFlow === "authorization_code") {
+        logger.warn("lightbridge_sign_in_unsupported_flow", {
+          authFlow: parsed.auth.authFlow,
+          message: `lightbridge signs in through the host's Connect dialog (${signInPath(signInName)}), which needs authFlow "device_code"`
+        });
+      }
+
       // ---- gateway module ----
       // `sharedRuntime` is always defined here: it is built whenever `gateway`
       // or `otel` is configured (`wantsProjectToken`).
@@ -572,7 +648,7 @@ export function createLightbridgePlugin(
           }
           return Effect.tryPromise({
             try: async () => {
-              const token = await runtime.getProjectToken({ interactive: true });
+              const token = await runtime.getProjectToken();
               // Header names are case-insensitive: drop any variant already set
               // (a stamped record header, the placeholder key's, a lowercase copy).
               for (const key of Object.keys(event.headers)) {
@@ -586,12 +662,15 @@ export function createLightbridgePlugin(
             catch: (error) => error
           }).pipe(
             Effect.tapError((error) =>
-              Effect.sync(() =>
+              Effect.sync(() => {
                 logger.warn("lightbridge_gateway_no_bearer", {
                   providerId,
                   error: errorMessage(error)
-                })
-              )
+                });
+                if (isInteractiveAuthRequiredError(error)) {
+                  notifySignInRequired("gateway");
+                }
+              })
             ),
             Effect.orDie
           );
@@ -611,7 +690,8 @@ export function createLightbridgePlugin(
               otelConfig,
               logger,
               factoryOptions,
-              sharedRuntime
+              sharedRuntime,
+              notifySignInRequired
             )
           );
           otel = built;

@@ -133,7 +133,7 @@ What each flow re-acquires:
 | Flow | Re-acquire path | Interactive? | Refresh token expected? |
 | --- | --- | --- | --- |
 | `authorization_code` | PKCE: browser → loopback callback → code exchange | yes | **yes** (rejected without one — see [Token Policy](#tokenpolicy)) |
-| `device_code` | RFC 8628: request device code → poll token endpoint | yes (user enters code in a browser; the process polls) | **yes** |
+| `device_code` | RFC 8628: request device code → poll token endpoint | yes (user enters code in a browser; the process polls). oauth2: stderr prompt. **lightbridge: only from the host's Connect dialog** — `TokenRuntime.beginDeviceSignIn()` returns the code, `complete(signal)` polls and stores through the single `setCached` writer; every other lightbridge path is refresh-only ([ADR-0023](adr/0023-sign-in-via-integration-oauth-method.md)) | **yes** |
 | `client_credentials` | POST `grant_type=client_credentials` with `client_secret` | no | no (not requested, not stored) |
 | `jwt_bearer` | Resolve subject JWT → POST `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer` | no | no |
 | `token_exchange` | Resolve subject JWT → POST `grant_type=urn:ietf:params:oauth:grant-type:token-exchange` (+ optional `audience`) | no | no |
@@ -175,6 +175,8 @@ const interactiveWarmup =
 Why: warmup at startup attempts a `syncServer` on every configured server. For uncached `authorization_code` / `device_code` providers, that would try to open a browser or block on device-code polling. In CI or a daemonized run, both stdin and stdout aren't TTYs — so the default falls back to non-interactive, the warmup throws "interactive authentication required", `syncServer` catches the error and preserves cached state. The provider stays in the OpenCode config with whatever models were cached previously (none on cold start).
 
 When a chat request arrives later, the `model.request` hook calls `ensureAccessToken` (with no `interactive` option, so it defaults to interactive in `OAuthClient.ensureToken`), and on-demand auth runs.
+
+> **lightbridge is not TTY-aware.** Its register engine is built with `neverInteractive: true` (`ProviderModelSyncEngineOptions`), so warmup, the scheduler, `syncServer` and `ensureAccessToken` are refresh-only whatever the terminal looks like; sign-in happens in the host's Connect dialog ([ADR-0023](adr/0023-sign-in-via-integration-oauth-method.md)). The TTY logic above is oauth2's.
 
 Override when you know better:
 
@@ -351,7 +353,7 @@ otherwise-universal no-terminal-output rule. Both bypass the structured logger a
 forwarding:
 
 1. **Browser-open failure during `authorization_code`.** When `openExternalUrl` throws (no display, missing handler), the plugin writes the authorization URL — which contains the `state` nonce — straight to stderr. Logging it through the logger would land the nonce in shared aggregation, which could enable login-CSRF via a forged callback.
-2. **Device-code user code + verification URL.** The user needs to read these out of their terminal to complete the flow. They are *also* logged (`oauth_device_code_issued`) — `user_code` is intentionally not redacted because it's an ephemeral single-use code with no value outside the active flow (RFC 8628 §3.2). But stderr is the reliable channel.
+2. **Device-code user code + verification URL (oauth2 only).** (lightbridge shows these in the host's Connect dialog instead, [ADR-0023](adr/0023-sign-in-via-integration-oauth-method.md).) The write is guarded against `EPIPE` (`writeTerminalPrompt`): a closed stderr is skipped and logged once at `debug`, never an unhandled rejection. The user needs to read these out of their terminal to complete the flow. They are *also* logged (`oauth_device_code_issued`) — `user_code` is intentionally not redacted because it's an ephemeral single-use code with no value outside the active flow (RFC 8628 §3.2). But stderr is the reliable channel.
 
 ### URL redaction (`redactUrl`)
 

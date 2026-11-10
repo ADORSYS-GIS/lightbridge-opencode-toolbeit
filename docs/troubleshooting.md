@@ -10,6 +10,12 @@ The plugin writes structured log records through the host's Effect logger into O
 > [ratelimit.md](./ratelimit.md#failure-modes) (rate-limit throttling), and
 > [otel.md](./otel.md#troubleshooting) (the full otel failure-mode list).
 
+## Lightbridge: no device code shown / "nothing happens" when I try to sign in
+
+**What's happening.** Lightbridge ([ADR-0023](adr/0023-sign-in-via-integration-oauth-method.md)) no longer prints a device code to the terminal or starts a login from a chat request or from startup. Under the v2 host stderr is closed, so those prompts were never visible. Signing in is a button in the host.
+
+**Fix.** Open **Settings → Providers → Show more providers**, search for your provider's name (`register.name`, else `auth.id`), and click **Sign in**. The dialog shows the confirmation code and opens the verification page; approve it there. Look for `lightbridge_sign_in_required` (`warn`) in the host log — it names the same path and is emitted once per run when no usable token exists. If the dialog reports a failure, `lightbridge_sign_in_begin_failed` (IdP refused or returned a malformed device response) or `lightbridge_sign_in_failed` (expired / denied / aborted) has the reason. If the integration is missing from the list, the plugin is not configured with `authFlow: "device_code"` (`lightbridge_sign_in_unsupported_flow`).
+
 ## `/models` doesn't list my provider after install
 
 **What's happening.** The plugin loaded fine, but the background warmup ran non-interactively (CI, no TTY, or `interactive: false`) and the cache was empty. `ensureToken` threw `interactive authentication required`; `syncServer` caught it, logged `sync_skipped_needs_login` (`warn`), and preserved the empty cache. The provider stays registered but with no models attached, so the model list is empty.
@@ -20,7 +26,7 @@ The plugin writes structured log records through the host's Effect logger into O
 - `sync_skipped_needs_login` (`warn`) with `error: "interactive authentication required for server ..."` — confirms warmup gave up non-interactively. Older releases (<= 0.18.0) logged this as `ERROR sync_failed` on every cold start and scheduler tick; it was never a fault. A *different* `sync_failed` (still `error`) is a real failure.
 - Absence of `sync_success` and `model_discovery_*`.
 
-**Fix.** Complete the device-code login, which the first request starts. In a v2 host warmup is never interactive (the OpenCode server runs `--stdio`, so there is no TTY), and the login happens on the **first request**, where `ensureToken` defaults to `interactive: true`; that path works and issues a real device code. (Per [ADR-0020](adr/0020-oauth2-integration-domain.md) an oauth2 server has no Integration registration, so there is no host-driven sign-in or connection status for it.)
+**Fix.** *(oauth2 only — for lightbridge see the entry above and [ADR-0023](adr/0023-sign-in-via-integration-oauth-method.md).)* Complete the device-code login, which the first request starts. In a v2 host warmup is never interactive (the OpenCode server runs `--stdio`, so there is no TTY), and the login happens on the **first request**, where `ensureToken` defaults to `interactive: true`; that path works and issues a real device code. (Per [ADR-0020](adr/0020-oauth2-integration-domain.md) an oauth2 server has no Integration registration, so there is no host-driven sign-in or connection status for it.)
 
 The cost is **visibility**: the prompt goes to the server process's stderr, which you do not see. Read the `verificationUri` and `userCode` from the host log (`~/.local/share/opencode/log/opencode.log`, event `oauth_device_code_issued`) and complete the login in a browser **within `expiresIn` (600s)**: an uncompleted code simply expires and the next request issues a new one. A stale or expired login looks the same way (`oauth_refresh_failed`, then a new device code). See the "Logged in" instantly gotcha in [`well-known.md`](well-known.md#2-logged-in-instantly-with-no-device-code-prompt) rather than restated here. There's no plugin `options` knob to override warmup interactivity (embedders of the runtime can pass `interactive: true` to `start()`). A dedicated login CLI would make this easier to discover; it is an ergonomics improvement, not a defect fix, and no package in the suite ships a `bin` for it today.
 

@@ -8,6 +8,7 @@ import { DEFAULT_LOCK_STALE_MS, acquireFileLock } from "./lock.js";
 import type { Logger } from "./logging.js";
 import { createJsonConsoleLogger } from "./logging.js";
 import { OAuthClient, RefreshTokenError } from "./oauth/client.js";
+import { DeviceCodeAbortedError, type DeviceCodeInfo } from "./oauth/device-code.js";
 import type { TokenSet } from "./types.js";
 
 export interface TokenRuntimeOptions {
@@ -73,6 +74,19 @@ export interface TokenRuntimeOptions {
    * `"opencode"`.
    */
   serviceLabel?: string;
+}
+
+/**
+ * A device code that has been issued but not redeemed: show the code fields to
+ * the user, then `complete` to wait for their approval.
+ */
+export interface DeviceSignIn extends DeviceCodeInfo {
+  /**
+   * Poll the IdP until the user approves, the code expires, or `signal` aborts,
+   * then store the tokens through this runtime's single credential writer under
+   * the refresh lock. An abort (or an expired code) stores nothing and rejects.
+   */
+  complete(signal: AbortSignal): Promise<TokenSet>;
 }
 
 /**
@@ -393,6 +407,37 @@ export class TokenRuntime {
   private async persisted(token: TokenSet): Promise<TokenSet> {
     await this.persist(token);
     return token;
+  }
+
+  /**
+   * Begin an interactive device-code sign-in WITHOUT blocking on it: request the
+   * code and return it for display, with a `complete` that does the polling.
+   * This is the host-surface counterpart of `ensure({ interactive: true })` for
+   * callers that render the code themselves (no stderr prompt is written).
+   *
+   * `complete` persists through `persist` — the same single writer every other
+   * path uses — under the cross-process refresh lock, and only if the attempt
+   * has not been aborted by then.
+   */
+  async beginDeviceSignIn(): Promise<DeviceSignIn> {
+    const flow = await this.client.beginDeviceLogin();
+    return {
+      ...flow.info,
+      complete: async (signal) => {
+        const token = await flow.poll(signal);
+        const lock = await this.acquireRefreshLock();
+        try {
+          if (signal.aborted) {
+            throw new DeviceCodeAbortedError();
+          }
+          await this.persist(token);
+        } finally {
+          await lock.release();
+        }
+        this.logger.info("device_sign_in_stored", { identity: this.identity });
+        return token;
+      }
+    };
   }
 
   /**

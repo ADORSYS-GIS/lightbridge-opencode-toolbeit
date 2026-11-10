@@ -76,6 +76,15 @@ export function createEditor(sources: SourceProvider[]) {
   return { editor, records };
 }
 
+/** What the plugin registered on the host's integration domain. */
+export interface RegisteredIntegrations {
+  /** Integration id -> display name. */
+  names: Map<string, string>;
+  /** Every oauth method registration, in registration order. */
+  // biome-ignore lint/suspicious/noExplicitAny: a duck-typed host registration
+  methods: Array<Record<string, any>>;
+}
+
 type AnyHook = (event: Record<string, unknown>) => Effect.Effect<void>;
 
 export interface Harness {
@@ -96,6 +105,8 @@ export interface Harness {
   /** Invoke a hook and wait for it; rejects with the hook's defect, if any. */
   call(key: string, event: Record<string, unknown>): Promise<void>;
   hasHook(key: string): boolean;
+  /** Run the registered integration transform on a fresh in-memory editor. */
+  integrations(): RegisteredIntegrations;
 }
 
 export interface StartOptions {
@@ -126,6 +137,7 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
   let sources = start.sources ?? [];
   let last: ReturnType<typeof createEditor> | undefined;
   let reloads = 0;
+  let integrationCb: ((editor: unknown) => void) | undefined;
   const registration = Effect.succeed({ dispose: Effect.void });
   const events = await Effect.runPromise(Queue.unbounded<Record<string, unknown>>());
 
@@ -152,6 +164,12 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
           reloads += 1;
           runTransform();
         })
+    },
+    integration: {
+      transform: (cb: (editor: unknown) => void) => {
+        integrationCb = cb;
+        return registration;
+      }
     },
     event: { subscribe: () => Stream.fromQueue(events) },
     session: { hook: hookOf("session") },
@@ -190,6 +208,32 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
       }
       await Effect.runPromise(hook(event));
     },
-    hasHook: (key) => hooks.has(key)
+    hasHook: (key) => hooks.has(key),
+    integrations() {
+      const names = new Map<string, string>();
+      const methods: RegisteredIntegrations["methods"] = [];
+      integrationCb?.({
+        list: () => [],
+        get: () => undefined,
+        remove: () => {},
+        update: (id: string, fn: (ref: { id: string; name: string }) => void) => {
+          const ref = { id, name: id };
+          fn(ref);
+          names.set(id, ref.name);
+        },
+        method: {
+          list: () => [],
+          remove: () => {},
+          // biome-ignore lint/suspicious/noExplicitAny: a duck-typed host registration
+          update: (registration: Record<string, any>) => {
+            methods.push(registration);
+            if (!names.has(String(registration.integrationID))) {
+              names.set(String(registration.integrationID), String(registration.integrationID));
+            }
+          }
+        }
+      });
+      return { names, methods };
+    }
   };
 }
