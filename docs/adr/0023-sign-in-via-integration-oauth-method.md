@@ -166,6 +166,14 @@ device code's `expires_in` is clamped to 30 minutes. The path to the button is *
 That path is the string in the `lightbridge_sign_in_required` warning, so the log line is a complete
 instruction, unlike the stderr prompt it replaces.
 
+The host's CLI renders the same registered method: `opencode auth login <auth.id>` prints the code
+and URL in the terminal and reports `Connected to <name>`, which covers TUI-only and SSH users
+without the plugin writing to a terminal itself. Each sign-in adds a host credential rather than
+replacing the last one, so repeated sign-ins list duplicates; they share the single token file and
+are removed with `opencode auth logout <auth.id>`. The well-known integration's API-key credential
+is separate and must stay (Context, fact 6). User-facing reference:
+[`lightbridge.md` → Signing in and out](../lightbridge.md#signing-in-and-out).
+
 ### Side change: the stderr prompt can no longer raise EPIPE
 
 oauth2 still uses the stderr device prompt (ADR-0014's carve-out). Under a v2 host stderr is a
