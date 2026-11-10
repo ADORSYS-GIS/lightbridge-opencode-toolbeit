@@ -34,9 +34,19 @@ flowchart LR
   GW & COL -.->|"both validate the same issuer + aud=lightbridge-api-key"| AZ["lightbridge-authz JWKS"]
 ```
 
-1. **Login once** — `ensure()` runs the configured OAuth flow (`authorization_code` with PKCE, or
-   `device_code` for headless) against `auth.issuer`, producing the human root token
-   (`offline_access` scope → silent refresh via its refresh token).
+1. **Login once, in the host's Connect dialog** ([ADR-0023](adr/0023-sign-in-via-integration-oauth-method.md)) —
+   with `authFlow: "device_code"` the plugin registers an `oauth` method on an integration named
+   after `auth.id`. Open **Settings → Providers → Show more providers**, search the provider
+   name in the Integrations dialog and click **Sign in**: the host shows a confirmation code, opens the verification URL, and the plugin polls
+   the IdP, producing the human root token (`offline_access` scope → silent refresh via its refresh
+   token, which **never leaves the plugin's own state file** — the host only stores a marker
+   credential with `refresh: ""`). This is the **only** place an interactive login can start: the
+   gateway hook, the OTEL token source, the `register` sync (warmup and scheduled) and the startup
+   check are all refresh-only. When there is no usable token the plugin logs one
+   `lightbridge_sign_in_required` warning that names this exact path. `authorization_code` has no
+   sign-in surface any more (`lightbridge_sign_in_unsupported_flow`); use `device_code`.
+   Disconnecting the integration in the host signs lightbridge out too (the state file is cleared);
+   a host with no credential at startup does **not** — existing logins keep working.
 2. **Exchange once per project — OPT-IN since ADR-0017 (`gateway.exchange: true`).**
    `exchangeTo(projectKey, humanToken, projectId ? { project_id } : {})`, an RFC 8693 token exchange
    presenting `project_id` as a form param when configured (no `audience`, no mint step — same

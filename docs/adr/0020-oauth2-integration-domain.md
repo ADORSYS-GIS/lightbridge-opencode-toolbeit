@@ -1,8 +1,9 @@
 # ADR-0020 — oauth2 on v2: none of the five auth flows becomes an Integration method
 
-- **Status:** Accepted. The *"No host-visible sign-in"* consequence is amended by
-  [ADR-0021](0021-needs-auth-via-connection-status.md) (2026-11-09), which reports a needed
-  sign-in to the host without moving credential custody; the Decision below is unchanged.
+- **Status:** Superseded by [ADR-0023](0023-sign-in-via-integration-oauth-method.md) (2026-11-10).
+  Previously: Accepted; the *"No host-visible sign-in"* consequence was amended by
+  [ADR-0021](0021-needs-auth-via-connection-status.md) (2026-11-09). Superseded for
+  `@vymalo/opencode-lightbridge`; oauth2 itself is not ported yet and still behaves as described here.
 - **Date:** 2026-11-08
 - **Applies to:** `@vymalo/opencode-oauth2` (and, by the same reasoning, the `gateway`/`register`
   modules of `@vymalo/opencode-lightbridge`); the `.well-known/opencode` distribution channel

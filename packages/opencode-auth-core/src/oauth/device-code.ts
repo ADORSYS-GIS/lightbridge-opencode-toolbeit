@@ -5,6 +5,7 @@ import {
   readResponseBodyPreview as readResponsePreviewShared,
   scrubSecrets
 } from "./http-utils.js";
+import { writeTerminalPrompt } from "../terminal-prompt.js";
 import { generatePkcePair } from "./pkce.js";
 
 const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
@@ -17,6 +18,32 @@ const ERROR_BODY_PREVIEW_CHARS = 500;
 // deadline bounds the overall wait. The cap keeps the interval from growing
 // without bound while we wait for transient conditions to clear.
 const MAX_POLL_INTERVAL_SECONDS = 60;
+// An IdP-supplied `expires_in` is untrusted input: a hostile or buggy one (1e9)
+// would keep a poll loop, and a "waiting" dialog, alive for decades. RFC 8628
+// codes live minutes; 30 is generous.
+export const MAX_DEVICE_CODE_LIFETIME_SECONDS: number = 30 * 60;
+
+/**
+ * Whether `value` is safe to hand to a browser: `https:`, or `http:` only for a
+ * loopback host (local IdPs and tests). Anything else (`javascript:`, `file:`,
+ * `data:`, plain-http remote hosts) is refused.
+ */
+export function isSafeVerificationUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.protocol === "https:") {
+    return true;
+  }
+  if (url.protocol === "http:") {
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  }
+  return false;
+}
 
 export interface AcquireTokenViaDeviceCodeOptions {
   deviceAuthorizationEndpoint: string;
@@ -37,7 +64,7 @@ export interface AcquireTokenViaDeviceCodeOptions {
   /**
    * Sleep function used between polls. Overridable for tests.
    */
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /**
    * Clock used to measure elapsed time. Overridable for tests.
    */
@@ -50,6 +77,42 @@ export interface AcquireTokenViaDeviceCodeOptions {
    * Defaults to the neutral `"opencode"`.
    */
   serviceLabel?: string;
+  /**
+   * Cancels the whole flow: the device-authorization request, the sleeps and the
+   * in-flight token requests. `poll(signal)` takes its own signal as well.
+   */
+  signal?: AbortSignal;
+}
+
+/** What a device-code flow shows the user: where to go and what to type. */
+export interface DeviceCodeInfo {
+  serverId: string;
+  verificationUri: string;
+  verificationUriComplete?: string;
+  userCode: string;
+  /** Epoch milliseconds at which the code stops working. */
+  expiresAt: number;
+  /** Seconds the IdP gave the code to live. */
+  expiresIn: number;
+}
+
+/**
+ * An issued device code that has not been redeemed yet (RFC 8628 §3.2 done,
+ * §3.4 pending). `poll` runs the token-endpoint loop until the user approves,
+ * the code expires, or `signal` aborts; it is the ONLY thing that can turn the
+ * code into tokens and it never persists them — the caller owns storage.
+ */
+export interface DeviceCodeFlow {
+  info: DeviceCodeInfo;
+  poll(signal?: AbortSignal): Promise<TokenSet>;
+}
+
+/** Thrown by {@link DeviceCodeFlow.poll} when its `signal` aborted. */
+export class DeviceCodeAbortedError extends Error {
+  constructor() {
+    super("device-code sign-in was aborted");
+    this.name = "AbortError";
+  }
 }
 
 interface DeviceAuthorizationResponse {
@@ -66,9 +129,21 @@ interface TokenErrorPayload {
   error_description?: string;
 }
 
-function defaultSleep(ms: number): Promise<void> {
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -96,13 +171,18 @@ function parseDeviceAuthorizationResponse(payload: unknown): DeviceAuthorization
   if (typeof verificationUri !== "string" || verificationUri.length === 0) {
     throw new Error("device authorization response is missing verification_uri");
   }
+  if (!isSafeVerificationUrl(verificationUri)) {
+    throw new Error("device authorization response has an unsafe verification_uri");
+  }
   if (typeof expiresIn !== "number" || !Number.isFinite(expiresIn) || expiresIn <= 0) {
     throw new Error("device authorization response is missing a valid expires_in");
   }
 
+  // An unsafe `verification_uri_complete` is dropped, not fatal: the plain
+  // `verification_uri` (validated above) is the fallback.
   const verificationUriComplete =
     typeof record.verification_uri_complete === "string" &&
-    record.verification_uri_complete.length > 0
+    isSafeVerificationUrl(record.verification_uri_complete)
       ? record.verification_uri_complete
       : undefined;
 
@@ -116,14 +196,20 @@ function parseDeviceAuthorizationResponse(payload: unknown): DeviceAuthorization
     user_code: userCode,
     verification_uri: verificationUri,
     verification_uri_complete: verificationUriComplete,
-    expires_in: expiresIn,
+    expires_in: Math.min(expiresIn, MAX_DEVICE_CODE_LIFETIME_SECONDS),
     interval
   };
 }
 
-export async function acquireTokenViaDeviceCode(
+/**
+ * Step 1 of RFC 8628: ask the IdP for a device code and return the not-yet-
+ * redeemed flow. Nothing is written to the terminal and nothing is polled until
+ * the caller calls `poll`. Throws on a failed request or a malformed response
+ * (missing `device_code` / `user_code` / `verification_uri` / `expires_in`).
+ */
+export async function beginDeviceCodeFlow(
   options: AcquireTokenViaDeviceCodeOptions
-): Promise<TokenSet> {
+): Promise<DeviceCodeFlow> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const sleep = options.sleep ?? defaultSleep;
   const now = options.now ?? Date.now;
@@ -139,7 +225,6 @@ export async function acquireTokenViaDeviceCode(
   const usePkce = options.pkce !== false;
   const pkce = usePkce ? generatePkcePair() : undefined;
 
-  // Step 1: request a device code.
   const deviceAuthBody = new URLSearchParams({
     client_id: options.clientId,
     scope: options.scopes.join(" ")
@@ -156,6 +241,11 @@ export async function acquireTokenViaDeviceCode(
 
   const deviceAuthController = new AbortController();
   const deviceAuthTimeout = setTimeout(() => deviceAuthController.abort(), options.timeoutMs);
+  const abortDeviceAuth = (): void => deviceAuthController.abort();
+  if (options.signal?.aborted) {
+    abortDeviceAuth();
+  }
+  options.signal?.addEventListener("abort", abortDeviceAuth, { once: true });
 
   let deviceAuthResponse: Response;
   try {
@@ -170,6 +260,7 @@ export async function acquireTokenViaDeviceCode(
     });
   } finally {
     clearTimeout(deviceAuthTimeout);
+    options.signal?.removeEventListener("abort", abortDeviceAuth);
   }
 
   if (!deviceAuthResponse.ok) {
@@ -190,6 +281,7 @@ export async function acquireTokenViaDeviceCode(
   const deviceAuth = parseDeviceAuthorizationResponse(deviceAuthPayload);
 
   const verificationUri = deviceAuth.verification_uri_complete ?? deviceAuth.verification_uri;
+  const deadlineMs = now() + deviceAuth.expires_in * 1000;
 
   // user_code is an ephemeral, single-use code with no value outside the active
   // flow — that is the spec's intent (RFC 8628). Log it so operators can see the
@@ -201,160 +293,199 @@ export async function acquireTokenViaDeviceCode(
     serverId
   });
 
-  // Also surface to stderr so terminal users can see the code regardless of log
-  // routing. This is the one deliberate carve-out from the suite's no-TUI-output
-  // rule (ADR-0014): the login URL/code is required UX, not a diagnostic —
-  // hiding it would make a first-time login look like a hang. Mirrors the
-  // browser-fallback pattern in client.ts.
-  const serviceLabel = options.serviceLabel ?? "opencode";
-  process.stderr.write(
-    `\n[${serviceLabel}] device-code login for ${serverId}:\n  visit: ${verificationUri}\n  code:  ${deviceAuth.user_code}\n  (expires in ${deviceAuth.expires_in}s)\n\n`
-  );
+  const info: DeviceCodeInfo = {
+    serverId,
+    verificationUri: deviceAuth.verification_uri,
+    verificationUriComplete: deviceAuth.verification_uri_complete,
+    userCode: deviceAuth.user_code,
+    expiresAt: deadlineMs,
+    expiresIn: deviceAuth.expires_in
+  };
 
-  // Step 2: poll the token endpoint.
-  let intervalSeconds = deviceAuth.interval ?? DEFAULT_POLL_INTERVAL_SECONDS;
-  const deadlineMs = now() + deviceAuth.expires_in * 1000;
-  let consecutiveTransientFailures = 0;
+  const poll = async (signal?: AbortSignal): Promise<TokenSet> => {
+    const throwIfAborted = (): void => {
+      if (signal?.aborted) {
+        throw new DeviceCodeAbortedError();
+      }
+    };
 
-  while (true) {
-    const remainingMs = deadlineMs - now();
-    if (remainingMs <= 0) {
-      throw new Error("device code expired before authorization completed");
-    }
+    let intervalSeconds = deviceAuth.interval ?? DEFAULT_POLL_INTERVAL_SECONDS;
+    let consecutiveTransientFailures = 0;
 
-    await sleep(Math.min(intervalSeconds * 1000, remainingMs));
+    while (true) {
+      throwIfAborted();
+      const remainingMs = deadlineMs - now();
+      if (remainingMs <= 0) {
+        throw new Error("device code expired before authorization completed");
+      }
 
-    const pollBody = new URLSearchParams({
-      grant_type: DEVICE_CODE_GRANT_TYPE,
-      device_code: deviceAuth.device_code,
-      client_id: options.clientId
-    });
+      await sleep(Math.min(intervalSeconds * 1000, remainingMs), signal);
+      throwIfAborted();
 
-    if (pkce) {
-      pollBody.set("code_verifier", pkce.verifier);
-    }
-
-    if (options.clientSecret) {
-      pollBody.set("client_secret", options.clientSecret);
-    }
-
-    const pollController = new AbortController();
-    const pollTimeout = setTimeout(() => pollController.abort(), options.timeoutMs);
-
-    let pollResponse: Response;
-    try {
-      pollResponse = await fetchImpl(options.tokenEndpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json"
-        },
-        body: pollBody,
-        signal: pollController.signal
+      const pollBody = new URLSearchParams({
+        grant_type: DEVICE_CODE_GRANT_TYPE,
+        device_code: deviceAuth.device_code,
+        client_id: options.clientId
       });
-      // Reset the failure counter on any HTTP response — even a non-2xx one
-      // is a sign the network round-trip is working; only thrown exceptions
-      // (network errors, timeouts) count as transient failures.
-      consecutiveTransientFailures = 0;
-    } catch (error) {
-      // TypeError from fetch typically means a programming/configuration
-      // error (malformed URL, unsupported scheme) that won't resolve on
-      // retry. Fail fast on those instead of burning the expires_in window.
-      // Everything else (AbortError from timeout, network errors, DNS
-      // failures) is treated as transient and triggers backoff per
-      // RFC 8628 §3.5.
-      if (error instanceof TypeError) {
+
+      if (pkce) {
+        pollBody.set("code_verifier", pkce.verifier);
+      }
+
+      if (options.clientSecret) {
+        pollBody.set("client_secret", options.clientSecret);
+      }
+
+      const pollController = new AbortController();
+      const pollTimeout = setTimeout(() => pollController.abort(), options.timeoutMs);
+      const onAbort = (): void => pollController.abort();
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      let pollResponse: Response;
+      try {
+        pollResponse = await fetchImpl(options.tokenEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            Accept: "application/json"
+          },
+          body: pollBody,
+          signal: pollController.signal
+        });
+        // Reset the failure counter on any HTTP response — even a non-2xx one
+        // is a sign the network round-trip is working; only thrown exceptions
+        // (network errors, timeouts) count as transient failures.
+        consecutiveTransientFailures = 0;
+      } catch (error) {
+        // An abort from the caller is final, not a transient fault.
+        throwIfAborted();
+        // TypeError from fetch typically means a programming/configuration
+        // error (malformed URL, unsupported scheme) that won't resolve on
+        // retry. Fail fast on those instead of burning the expires_in window.
+        // Everything else (AbortError from timeout, network errors, DNS
+        // failures) is treated as transient and triggers backoff per
+        // RFC 8628 §3.5.
+        if (error instanceof TypeError) {
+          logger.error("oauth_device_code_poll_failed", {
+            serverId,
+            error: error.message
+          });
+          throw error;
+        }
+        consecutiveTransientFailures++;
+        // Exponential backoff (capped) on transient transport errors. We do
+        // NOT hard-stop: VPN flaps, transient DNS/TLS outages, and similar
+        // short-lived disruptions are normal during a multi-minute device-code
+        // window. The `expires_in` deadline at the top of the loop is the
+        // sole termination condition.
+        intervalSeconds = Math.min(
+          intervalSeconds + SLOW_DOWN_INCREMENT_SECONDS,
+          MAX_POLL_INTERVAL_SECONDS
+        );
+        logger.warn("oauth_device_code_poll_transient_error", {
+          serverId,
+          error: error instanceof Error ? error.message : String(error),
+          consecutiveFailures: consecutiveTransientFailures,
+          nextIntervalSeconds: intervalSeconds
+        });
+        continue;
+      } finally {
+        clearTimeout(pollTimeout);
+        signal?.removeEventListener("abort", onAbort);
+      }
+
+      throwIfAborted();
+
+      if (pollResponse.ok) {
+        const payload = (await pollResponse.json()) as Record<string, unknown>;
+        const token = toTokenSet(payload, { requireRefreshToken: true });
+
+        logger.info("oauth_device_code_success", {
+          serverId,
+          hasRefreshToken: true
+        });
+
+        return token;
+      }
+
+      if (pollResponse.status >= 400 && pollResponse.status < 500) {
+        let errorPayload: TokenErrorPayload = {};
+        const text = await readResponseBodyPreview(pollResponse);
+        try {
+          if (text.length > 0) {
+            errorPayload = JSON.parse(text) as TokenErrorPayload;
+          }
+        } catch {
+          // Body was not valid JSON; keep the raw preview for the error message.
+        }
+
+        const errorCode = errorPayload.error;
+
+        if (errorCode === "authorization_pending") {
+          continue;
+        }
+
+        if (errorCode === "slow_down") {
+          intervalSeconds += SLOW_DOWN_INCREMENT_SECONDS;
+          continue;
+        }
+
+        if (errorCode === "expired_token") {
+          throw new Error("device code expired before user completed authorization");
+        }
+
+        if (errorCode === "access_denied") {
+          throw new Error("device code authorization denied by user");
+        }
+
         logger.error("oauth_device_code_poll_failed", {
           serverId,
-          error: error.message
+          status: pollResponse.status,
+          errorCode: errorCode || undefined,
+          // Body preview goes here, not into the thrown error.message — callers
+          // log error.message verbatim and would bypass the logger's redaction.
+          // scrubSecrets masks token-shaped substrings the field-name-based
+          // logger redaction would otherwise miss.
+          bodyPreview: text ? scrubSecrets(text) : undefined
         });
-        throw error;
-      }
-      consecutiveTransientFailures++;
-      // Exponential backoff (capped) on transient transport errors. We do
-      // NOT hard-stop: VPN flaps, transient DNS/TLS outages, and similar
-      // short-lived disruptions are normal during a multi-minute device-code
-      // window. The `expires_in` deadline at the top of the loop is the
-      // sole termination condition.
-      intervalSeconds = Math.min(
-        intervalSeconds + SLOW_DOWN_INCREMENT_SECONDS,
-        MAX_POLL_INTERVAL_SECONDS
-      );
-      logger.warn("oauth_device_code_poll_transient_error", {
-        serverId,
-        error: error instanceof Error ? error.message : String(error),
-        consecutiveFailures: consecutiveTransientFailures,
-        nextIntervalSeconds: intervalSeconds
-      });
-      continue;
-    } finally {
-      clearTimeout(pollTimeout);
-    }
-
-    if (pollResponse.ok) {
-      const payload = (await pollResponse.json()) as Record<string, unknown>;
-      const token = toTokenSet(payload, { requireRefreshToken: true });
-
-      logger.info("oauth_device_code_success", {
-        serverId,
-        hasRefreshToken: true
-      });
-
-      return token;
-    }
-
-    if (pollResponse.status >= 400 && pollResponse.status < 500) {
-      let errorPayload: TokenErrorPayload = {};
-      const text = await readResponseBodyPreview(pollResponse);
-      try {
-        if (text.length > 0) {
-          errorPayload = JSON.parse(text) as TokenErrorPayload;
-        }
-      } catch {
-        // Body was not valid JSON; keep the raw preview for the error message.
+        throw new Error(
+          `device code token poll failed (${pollResponse.status})${errorCode ? `: ${errorCode}` : ""}`
+        );
       }
 
-      const errorCode = errorPayload.error;
-
-      if (errorCode === "authorization_pending") {
-        continue;
-      }
-
-      if (errorCode === "slow_down") {
-        intervalSeconds += SLOW_DOWN_INCREMENT_SECONDS;
-        continue;
-      }
-
-      if (errorCode === "expired_token") {
-        throw new Error("device code expired before user completed authorization");
-      }
-
-      if (errorCode === "access_denied") {
-        throw new Error("device code authorization denied by user");
-      }
-
+      // 5xx — surface to caller; do not retry indefinitely on server errors.
+      const preview = await readResponseBodyPreview(pollResponse);
       logger.error("oauth_device_code_poll_failed", {
         serverId,
         status: pollResponse.status,
-        errorCode: errorCode || undefined,
-        // Body preview goes here, not into the thrown error.message — callers
-        // log error.message verbatim and would bypass the logger's redaction.
-        // scrubSecrets masks token-shaped substrings the field-name-based
-        // logger redaction would otherwise miss.
-        bodyPreview: text ? scrubSecrets(text) : undefined
+        bodyPreview: preview ? scrubSecrets(preview) : undefined
       });
-      throw new Error(
-        `device code token poll failed (${pollResponse.status})${errorCode ? `: ${errorCode}` : ""}`
-      );
+      throw new Error(`device code token poll failed (${pollResponse.status})`);
     }
+  };
 
-    // 5xx — surface to caller; do not retry indefinitely on server errors.
-    const preview = await readResponseBodyPreview(pollResponse);
-    logger.error("oauth_device_code_poll_failed", {
-      serverId,
-      status: pollResponse.status,
-      bodyPreview: preview ? scrubSecrets(preview) : undefined
-    });
-    throw new Error(`device code token poll failed (${pollResponse.status})`);
-  }
+  return { info, poll };
+}
+
+export async function acquireTokenViaDeviceCode(
+  options: AcquireTokenViaDeviceCodeOptions
+): Promise<TokenSet> {
+  const { logger, serverId } = options;
+  const flow = await beginDeviceCodeFlow(options);
+  const { info } = flow;
+  const verificationUri = info.verificationUriComplete ?? info.verificationUri;
+
+  // Also surface to stderr so terminal users can see the code regardless of log
+  // routing. This is the one deliberate carve-out from the suite's no-TUI-output
+  // rule (ADR-0014): the login URL/code is required UX, not a diagnostic —
+  // hiding it would make a first-time login look like a hang. The write is
+  // guarded: under a v2 host stderr is a closed pipe, and a bare write there is
+  // an EPIPE the host logs as an unhandled-rejection ERROR.
+  const serviceLabel = options.serviceLabel ?? "opencode";
+  writeTerminalPrompt(
+    `\n[${serviceLabel}] device-code login for ${serverId}:\n  visit: ${verificationUri}\n  code:  ${info.userCode}\n  (expires in ${info.expiresIn}s)\n\n`,
+    logger
+  );
+
+  return flow.poll();
 }

@@ -3,7 +3,12 @@ import { DEFAULT_TOKEN_EXPIRY_SKEW_MS } from "../config.js";
 import type { Logger } from "../logging.js";
 import type { TokenSet } from "../types.js";
 import { openExternalUrl } from "./browser.js";
-import { acquireTokenViaDeviceCode } from "./device-code.js";
+import {
+  acquireTokenViaDeviceCode,
+  beginDeviceCodeFlow,
+  type AcquireTokenViaDeviceCodeOptions,
+  type DeviceCodeFlow
+} from "./device-code.js";
 import { discoverOidcMetadata } from "./discovery.js";
 import { readResponseBodyPreview, redactUrl, scrubSecrets } from "./http-utils.js";
 import { startLocalCallbackServer } from "./local-callback.js";
@@ -586,7 +591,7 @@ export class OAuthClient {
     return nextToken;
   }
 
-  private async loginDeviceCode(): Promise<TokenSet> {
+  private async deviceCodeOptions(): Promise<AcquireTokenViaDeviceCodeOptions> {
     const endpoints = await this.resolveEndpoints();
     if (!endpoints.deviceAuthorizationEndpoint) {
       throw new Error(
@@ -594,7 +599,7 @@ export class OAuthClient {
       );
     }
 
-    return acquireTokenViaDeviceCode({
+    return {
       deviceAuthorizationEndpoint: endpoints.deviceAuthorizationEndpoint,
       tokenEndpoint: endpoints.tokenEndpoint,
       clientId: this.server.clientId,
@@ -606,7 +611,25 @@ export class OAuthClient {
       timeoutMs: this.timeoutMs,
       pkce: this.server.pkce,
       serviceLabel: this.serviceLabel
-    });
+    };
+  }
+
+  /**
+   * Request a device code and hand back the unredeemed flow, writing nothing to
+   * the terminal. The caller shows the code and decides when (and whether) to
+   * `poll`; storage is the caller's job (see `TokenRuntime.beginDeviceSignIn`).
+   */
+  async beginDeviceLogin(signal?: AbortSignal): Promise<DeviceCodeFlow> {
+    if (this.server.authFlow !== "device_code") {
+      throw new Error(
+        `beginDeviceLogin requires authFlow "device_code" (got ${this.server.authFlow})`
+      );
+    }
+    return beginDeviceCodeFlow({ ...(await this.deviceCodeOptions()), signal });
+  }
+
+  private async loginDeviceCode(): Promise<TokenSet> {
+    return acquireTokenViaDeviceCode(await this.deviceCodeOptions());
   }
 
   private async loginInteractive(): Promise<TokenSet> {

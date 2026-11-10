@@ -26,20 +26,28 @@ function makeToken(overrides: Partial<TokenSet> = {}): TokenSet {
 }
 
 interface SpyRuntime extends LightbridgeRuntimeLike {
-  calls: Array<{ interactive?: boolean } | undefined>;
+  /** Number of `getProjectToken()` calls. */
+  calls: number;
+  /** Number of `beginDeviceSignIn()` calls: only the Connect dialog may make one. */
+  beginCalls: number;
 }
 
-function makeSpyRuntime(
-  impl?: (options?: { interactive?: boolean }) => Promise<TokenSet>
-): SpyRuntime {
-  const calls: SpyRuntime["calls"] = [];
-  return {
-    calls,
-    getProjectToken: async (options) => {
-      calls.push(options);
-      return impl ? impl(options) : makeToken();
-    }
+function makeSpyRuntime(impl?: () => Promise<TokenSet>): SpyRuntime {
+  const spy: SpyRuntime = {
+    calls: 0,
+    beginCalls: 0,
+    getProjectToken: async () => {
+      spy.calls += 1;
+      return impl ? impl() : makeToken();
+    },
+    ensureRootToken: async () => (impl ? impl() : makeToken()),
+    beginDeviceSignIn: async () => {
+      spy.beginCalls += 1;
+      throw new Error("no device flow in this spy");
+    },
+    reset: async () => {}
   };
+  return spy;
 }
 
 /** Builds a `runtimeFactory` that always returns `runtime` and records each construction. */
@@ -111,7 +119,8 @@ describe("createLightbridgePlugin — gateway module", () => {
     const event = requestEvent("gateway", { authorization: "Bearer stale", "x-keep": "1" });
     await harness.call("session.model.request", event);
     expect(event.headers).toEqual({ "x-keep": "1", Authorization: "Bearer shared-project-token" });
-    expect(runtime.calls).toEqual([{ interactive: true }]);
+    expect(runtime.calls).toBe(1);
+    expect(runtime.beginCalls).toBe(0);
   });
 
   it("leaves an unmanaged provider untouched", async () => {
@@ -122,7 +131,7 @@ describe("createLightbridgePlugin — gateway module", () => {
     const event = requestEvent("some-other", { Authorization: "Bearer theirs" });
     await harness.call("session.model.request", event);
     expect(event.headers.Authorization).toBe("Bearer theirs");
-    expect(runtime.calls).toEqual([]);
+    expect(runtime.calls).toBe(0);
   });
 
   it("fails closed: the request dies when the shared token cannot be produced", async () => {
@@ -166,13 +175,25 @@ describe("createLightbridgePlugin — gateway module", () => {
     expect(on.built[0]?.exchange).toBe(true);
   });
 
-  it("builds no runtime for a register-only config", async () => {
+  it("builds no runtime for a register-only machine-flow config (nothing to sign in to)", async () => {
+    const { factory, built } = fixedRuntimeFactory(makeSpyRuntime());
+    await start(
+      {
+        auth: makeAuth({ authFlow: "client_credentials", clientSecret: "s" }),
+        register: { baseURL: "https://gw.example.com/v1" }
+      },
+      { runtimeFactory: factory, fetchImpl: (async () => new Response("{}")) as typeof fetch }
+    );
+    expect(built).toEqual([]);
+  });
+
+  it("builds the runtime for a register-only device_code config: the Connect dialog needs it", async () => {
     const { factory, built } = fixedRuntimeFactory(makeSpyRuntime());
     await start(
       { auth: makeAuth(), register: { baseURL: "https://gw.example.com/v1" } },
       { runtimeFactory: factory, fetchImpl: (async () => new Response("{}")) as typeof fetch }
     );
-    expect(built).toEqual([]);
+    expect(built).toHaveLength(1);
   });
 });
 
@@ -234,7 +255,8 @@ describe("createLightbridgePlugin — otel module", () => {
     const runtime = makeSpyRuntime(async () => makeToken({ accessToken: "otel-token" }));
     const { tokenSource } = await loadOtel({ runtime });
     await expect(tokenSource()?.headers()).resolves.toEqual({ Authorization: "Bearer otel-token" });
-    expect(runtime.calls).toEqual([{ interactive: false }]);
+    expect(runtime.calls).toBe(1);
+    expect(runtime.beginCalls).toBe(0);
   });
 
   it("TokenSource.headers() degrades to undefined on an exchange failure (ADR-0015)", async () => {
@@ -462,7 +484,8 @@ describe("createLightbridgePlugin — one shared runtime across both modules", (
     expect(built).toHaveLength(1);
 
     await harness.call("session.model.request", requestEvent("gateway"));
-    expect(runtime.calls).toEqual([{ interactive: true }]);
+    expect(runtime.calls).toBe(1);
+    expect(runtime.beginCalls).toBe(0);
   });
 });
 

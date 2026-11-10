@@ -1,5 +1,6 @@
 export {
   TokenRuntime,
+  type DeviceSignIn,
   type TokenRuntimeOptions
 } from "./token-runtime.js";
 
@@ -56,7 +57,11 @@ export {
 
 export {
   acquireTokenViaDeviceCode,
-  type AcquireTokenViaDeviceCodeOptions
+  beginDeviceCodeFlow,
+  DeviceCodeAbortedError,
+  type AcquireTokenViaDeviceCodeOptions,
+  type DeviceCodeFlow,
+  type DeviceCodeInfo
 } from "./oauth/device-code.js";
 
 export {

@@ -1,6 +1,6 @@
 // Slim public entry. Consumers that need the full surface (OAuth flows,
 // config validators, cache) import from `@vymalo/opencode-auth-core/lib`.
-export { TokenRuntime, type TokenRuntimeOptions } from "./token-runtime.js";
+export { TokenRuntime, type DeviceSignIn, type TokenRuntimeOptions } from "./token-runtime.js";
 export {
   FileCacheStore,
   hashCacheKey,

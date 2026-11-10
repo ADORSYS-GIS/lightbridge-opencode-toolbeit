@@ -8,6 +8,7 @@ import { DEFAULT_LOCK_STALE_MS, acquireFileLock } from "./lock.js";
 import type { Logger } from "./logging.js";
 import { createJsonConsoleLogger } from "./logging.js";
 import { OAuthClient, RefreshTokenError } from "./oauth/client.js";
+import { DeviceCodeAbortedError, type DeviceCodeInfo } from "./oauth/device-code.js";
 import type { TokenSet } from "./types.js";
 
 export interface TokenRuntimeOptions {
@@ -73,6 +74,19 @@ export interface TokenRuntimeOptions {
    * `"opencode"`.
    */
   serviceLabel?: string;
+}
+
+/**
+ * A device code that has been issued but not redeemed: show the code fields to
+ * the user, then `complete` to wait for their approval.
+ */
+export interface DeviceSignIn extends DeviceCodeInfo {
+  /**
+   * Poll the IdP until the user approves, the code expires, or `signal` aborts,
+   * then store the tokens through this runtime's single credential writer under
+   * the refresh lock. An abort (or an expired code) stores nothing and rejects.
+   */
+  complete(signal: AbortSignal): Promise<TokenSet>;
 }
 
 /**
@@ -193,9 +207,9 @@ export class TokenRuntime {
    *
    * The valid-cached-token fast path takes no lock at all.
    */
-  async ensure(options: { interactive?: boolean } = {}): Promise<TokenSet> {
+  async ensure(options: { interactive?: boolean; minValidityMs?: number } = {}): Promise<TokenSet> {
     const cached = await this.getCached();
-    if (this.client.isTokenValid(cached)) {
+    if (this.usable(cached, options.minValidityMs)) {
       return cached as TokenSet;
     }
 
@@ -205,7 +219,11 @@ export class TokenRuntime {
       return existing;
     }
 
-    const pending = this.acquireCoordinated(cached, options.interactive).finally(() => {
+    const pending = this.acquireCoordinated(
+      cached,
+      options.interactive,
+      options.minValidityMs
+    ).finally(() => {
       if (this.inFlight === pending) {
         this.inFlight = undefined;
       }
@@ -260,12 +278,13 @@ export class TokenRuntime {
    */
   private async acquireCoordinated(
     snapshot: TokenSet | undefined,
-    interactive?: boolean
+    interactive?: boolean,
+    minValidityMs?: number
   ): Promise<TokenSet> {
     const lock = await this.acquireRefreshLock();
     try {
       const reread = await this.getCached();
-      if (this.client.isTokenValid(reread)) {
+      if (this.usable(reread, minValidityMs)) {
         this.logger.info("token_refresh_adopted_persisted", {
           identity: this.identity,
           stage: "lock_entry"
@@ -277,6 +296,23 @@ export class TokenRuntime {
     } finally {
       await lock.release();
     }
+  }
+
+  /**
+   * Whether `token` can be served as-is: valid by the client's own (skewed)
+   * rule AND, when the caller asks for it, still good for `minValidityMs` more.
+   * The second clause lets a caller whose consumer refreshes earlier than our
+   * skew (the host's 5-minute window) force a real refresh instead of being
+   * handed the same token until the skew finally trips.
+   */
+  private usable(token: TokenSet | undefined, minValidityMs?: number): boolean {
+    if (!this.client.isTokenValid(token)) {
+      return false;
+    }
+    if (minValidityMs === undefined || token?.expiresAt === undefined) {
+      return true;
+    }
+    return token.expiresAt - Date.now() > minValidityMs;
   }
 
   private async refreshOrLogin(
@@ -393,6 +429,37 @@ export class TokenRuntime {
   private async persisted(token: TokenSet): Promise<TokenSet> {
     await this.persist(token);
     return token;
+  }
+
+  /**
+   * Begin an interactive device-code sign-in WITHOUT blocking on it: request the
+   * code and return it for display, with a `complete` that does the polling.
+   * This is the host-surface counterpart of `ensure({ interactive: true })` for
+   * callers that render the code themselves (no stderr prompt is written).
+   *
+   * `complete` persists through `persist` — the same single writer every other
+   * path uses — under the cross-process refresh lock, and only if the attempt
+   * has not been aborted by then.
+   */
+  async beginDeviceSignIn(signal?: AbortSignal): Promise<DeviceSignIn> {
+    const flow = await this.client.beginDeviceLogin(signal);
+    return {
+      ...flow.info,
+      complete: async (signal) => {
+        const token = await flow.poll(signal);
+        const lock = await this.acquireRefreshLock();
+        try {
+          if (signal.aborted) {
+            throw new DeviceCodeAbortedError();
+          }
+          await this.persist(token);
+        } finally {
+          await lock.release();
+        }
+        this.logger.info("device_sign_in_stored", { identity: this.identity });
+        return token;
+      }
+    };
   }
 
   /**

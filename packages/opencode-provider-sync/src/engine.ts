@@ -97,6 +97,15 @@ interface StartOptions {
 }
 
 export interface ProviderModelSyncEngineOptions {
+  /**
+   * Forbid this engine from ever starting an interactive login (browser or
+   * device-code poll) — warmup, scheduled sync, `syncServer` and
+   * `ensureAccessToken` all become refresh-only and throw
+   * `InteractiveAuthRequiredError` instead. For consumers that sign the user in
+   * somewhere else (lightbridge: the host's Connect dialog, ADR-0023). Default
+   * `false`, which leaves oauth2's behaviour untouched.
+   */
+  neverInteractive?: boolean;
   logger?: Logger;
   fetchImpl?: typeof fetch;
   onAuthorizationUrl?: (url: string) => Promise<void> | void;
@@ -483,8 +492,9 @@ export class ProviderModelSyncEngine {
     // setup. Without a TTY (CI, daemonized run, piped stdin) we stay
     // non-interactive so startup never hangs on a callback that will never
     // arrive. Callers can override explicitly via `interactive`.
-    const interactiveWarmup =
-      options.interactive ?? Boolean(process.stdin?.isTTY && process.stdout?.isTTY);
+    const interactiveWarmup = this.options.neverInteractive
+      ? false
+      : (options.interactive ?? Boolean(process.stdin?.isTTY && process.stdout?.isTTY));
 
     this.logger.trace("oauth2_start", {
       serverCount: this.config.servers.length,
@@ -565,8 +575,9 @@ export class ProviderModelSyncEngine {
 
   async syncServer(
     serverId: string,
-    options: { interactive?: boolean } = {}
+    callerOptions: { interactive?: boolean } = {}
   ): Promise<ServerSnapshot> {
+    const options = this.options.neverInteractive ? { interactive: false } : callerOptions;
     const runtime = this.runtimeByServer.get(serverId);
     if (!runtime) {
       throw new Error(`runtime not initialized for server: ${serverId}`);
@@ -682,8 +693,9 @@ export class ProviderModelSyncEngine {
 
   async ensureAccessToken(
     serverId: string,
-    options: { interactive?: boolean } = {}
+    callerOptions: { interactive?: boolean } = {}
   ): Promise<TokenSet> {
+    const options = this.options.neverInteractive ? { interactive: false } : callerOptions;
     const runtime = this.runtimeByServer.get(serverId);
     if (!runtime) {
       throw new Error(`runtime not initialized for server: ${serverId}`);

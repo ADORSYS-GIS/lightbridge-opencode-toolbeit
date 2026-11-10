@@ -76,6 +76,15 @@ export function createEditor(sources: SourceProvider[]) {
   return { editor, records };
 }
 
+/** What the plugin registered on the host's integration domain. */
+export interface RegisteredIntegrations {
+  /** Integration id -> display name. */
+  names: Map<string, string>;
+  /** Every oauth method registration, in registration order. */
+  // biome-ignore lint/suspicious/noExplicitAny: a duck-typed host registration
+  methods: Array<Record<string, any>>;
+}
+
 type AnyHook = (event: Record<string, unknown>) => Effect.Effect<void>;
 
 export interface Harness {
@@ -89,6 +98,8 @@ export interface Harness {
   setSources(sources: SourceProvider[]): void;
   /** Push a host event into the plugin's `event.subscribe` stream. */
   emit(event: Record<string, unknown>): Promise<void>;
+  /** Make the host report (or stop reporting) an active connection for the integration. */
+  setConnection(present: boolean): void;
   /** Wait for the `register` module's queued build. */
   settle(): Promise<void>;
   engine: LightbridgeRegisterHandle["engine"];
@@ -96,6 +107,8 @@ export interface Harness {
   /** Invoke a hook and wait for it; rejects with the hook's defect, if any. */
   call(key: string, event: Record<string, unknown>): Promise<void>;
   hasHook(key: string): boolean;
+  /** Run the registered integration transform on a fresh in-memory editor. */
+  integrations(): RegisteredIntegrations;
 }
 
 export interface StartOptions {
@@ -126,8 +139,11 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
   let sources = start.sources ?? [];
   let last: ReturnType<typeof createEditor> | undefined;
   let reloads = 0;
+  let integrationCb: ((editor: unknown) => void) | undefined;
   const registration = Effect.succeed({ dispose: Effect.void });
-  const events = await Effect.runPromise(Queue.unbounded<Record<string, unknown>>());
+  // One queue per subscriber, as a real event stream would fan out.
+  const queues: Array<Queue.Queue<Record<string, unknown>>> = [];
+  let connectionPresent = false;
 
   const runTransform = () => {
     last = createEditor(sources);
@@ -153,7 +169,22 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
           runTransform();
         })
     },
-    event: { subscribe: () => Stream.fromQueue(events) },
+    integration: {
+      connection: {
+        active: () => Effect.sync(() => (connectionPresent ? { id: "conn" } : undefined))
+      },
+      transform: (cb: (editor: unknown) => void) => {
+        integrationCb = cb;
+        return registration;
+      }
+    },
+    event: {
+      subscribe: () => {
+        const queue = Effect.runSync(Queue.unbounded<Record<string, unknown>>());
+        queues.push(queue);
+        return Stream.fromQueue(queue);
+      }
+    },
     session: { hook: hookOf("session") },
     tool: { hook: hookOf("tool") },
     permission: { hook: hookOf("permission") }
@@ -172,9 +203,14 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
       sources = next;
     },
     async emit(event) {
-      await Effect.runPromise(Queue.offer(events, event));
+      for (const queue of queues) {
+        await Effect.runPromise(Queue.offer(queue, event));
+      }
       // Let the forked subscriber drain.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    },
+    setConnection(present) {
+      connectionPresent = present;
     },
     async settle() {
       await handle?.settled();
@@ -190,6 +226,32 @@ export async function startPlugin(start: StartOptions = {}): Promise<Harness> {
       }
       await Effect.runPromise(hook(event));
     },
-    hasHook: (key) => hooks.has(key)
+    hasHook: (key) => hooks.has(key),
+    integrations() {
+      const names = new Map<string, string>();
+      const methods: RegisteredIntegrations["methods"] = [];
+      integrationCb?.({
+        list: () => [],
+        get: () => undefined,
+        remove: () => {},
+        update: (id: string, fn: (ref: { id: string; name: string }) => void) => {
+          const ref = { id, name: id };
+          fn(ref);
+          names.set(id, ref.name);
+        },
+        method: {
+          list: () => [],
+          remove: () => {},
+          // biome-ignore lint/suspicious/noExplicitAny: a duck-typed host registration
+          update: (registration: Record<string, any>) => {
+            methods.push(registration);
+            if (!names.has(String(registration.integrationID))) {
+              names.set(String(registration.integrationID), String(registration.integrationID));
+            }
+          }
+        }
+      });
+      return { names, methods };
+    }
   };
 }

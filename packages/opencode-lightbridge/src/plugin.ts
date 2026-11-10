@@ -6,6 +6,7 @@ import {
   resolveStateRoot,
   TokenRuntime,
   type AuthServerConfig,
+  type DeviceSignIn,
   type Logger,
   type TokenSet
 } from "@vymalo/opencode-auth-core/lib";
@@ -71,8 +72,26 @@ export interface LightbridgeRuntimeOptions {
  * `TokenRuntime` (no network, no disk).
  */
 export interface LightbridgeRuntimeLike {
-  getProjectToken(options?: { interactive?: boolean }): Promise<TokenSet>;
-  reset?(): Promise<void>;
+  /**
+   * A usable gateway/OTEL bearer. NEVER interactive (ADR-0023): when no usable
+   * token exists it rejects with `InteractiveAuthRequiredError` and the caller
+   * fails closed. The only way a human signs in is `beginDeviceSignIn`, driven
+   * from the host's Connect dialog.
+   */
+  getProjectToken(): Promise<TokenSet>;
+  /**
+   * The shared human/IdP root token, refresh-only (never interactive).
+   * `minValidityMs` forces a real refresh when the cached token has less than
+   * that left (the host's 5-minute refresh window is wider than our skew).
+   */
+  ensureRootToken(options?: { minValidityMs?: number }): Promise<TokenSet>;
+  /**
+   * Request a device code for the Connect dialog; `complete` polls and stores.
+   * `signal` cancels the device-authorization request.
+   */
+  beginDeviceSignIn(signal?: AbortSignal): Promise<DeviceSignIn>;
+  /** Drop every stored token for this identity (the host disconnected it). */
+  reset(): Promise<void>;
 }
 
 /**
@@ -237,9 +256,9 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
    * invents a token: a failure propagates to the caller, which is expected to
    * fail closed (no header / empty `headers()`).
    */
-  async getProjectToken(options: { interactive?: boolean } = {}): Promise<TokenSet> {
+  async getProjectToken(): Promise<TokenSet> {
     if (!this.exchange) {
-      return this.rootRuntime.ensure({ interactive: options.interactive });
+      return this.rootRuntime.ensure({ interactive: false });
     }
 
     const cached = await this.getCachedProjectToken();
@@ -253,7 +272,7 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
       return this.inFlightExchange;
     }
 
-    const exchange = this.performExchange(options);
+    const exchange = this.performExchange();
     this.inFlightExchange = exchange;
     try {
       return await exchange;
@@ -264,8 +283,8 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
     }
   }
 
-  private async performExchange(options: { interactive?: boolean }): Promise<TokenSet> {
-    const human = await this.rootRuntime.ensure({ interactive: options.interactive });
+  private async performExchange(): Promise<TokenSet> {
+    const human = await this.rootRuntime.ensure({ interactive: false });
     this.logger.info("lightbridge_exchange_started", { projectId: this.projectId ?? "(default)" });
     try {
       // No `projectId` → send no `project_id` param; the backend mints a token
@@ -286,6 +305,20 @@ export class LightbridgeRuntime implements LightbridgeRuntimeLike {
       });
       throw error;
     }
+  }
+
+  /** See {@link LightbridgeRuntimeLike.ensureRootToken}. */
+  async ensureRootToken(options: { minValidityMs?: number } = {}): Promise<TokenSet> {
+    return this.rootRuntime.ensure({ interactive: false, minValidityMs: options.minValidityMs });
+  }
+
+  /**
+   * The ONLY interactive entry point (ADR-0023): the root runtime requests a
+   * device code and, on `complete`, stores the result through the shared
+   * credential file's single writer (`setCached` under the refresh lock).
+   */
+  async beginDeviceSignIn(signal?: AbortSignal): Promise<DeviceSignIn> {
+    return this.rootRuntime.beginDeviceSignIn(signal);
   }
 
   /**
