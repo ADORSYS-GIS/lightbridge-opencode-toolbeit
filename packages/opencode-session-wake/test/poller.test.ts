@@ -5,6 +5,7 @@ import { TransportFailure } from "../src/github.js";
 import { backoffMs, buildNotice, createPoller, matchesMention } from "../src/poller.js";
 import { initialState, SubscriptionStore } from "../src/state.js";
 import {
+  checksPage,
   deferred,
   event,
   fakeDeliver,
@@ -14,7 +15,8 @@ import {
   page,
   record,
   subscription,
-  tempDir
+  tempDir,
+  timelinePage
 } from "./helpers.js";
 
 const options = parseWakeOptions({ intervalMs: 60_000, seenLimit: 10, maxPending: 5 });
@@ -95,7 +97,7 @@ describe("createPoller", () => {
     try {
       const rec = record();
       await store.put(rec);
-      transport.setPages([page([event("101")])]);
+      transport.setComments([page([event("101")])]);
 
       const outcome = await poller.tick(rec.subscription.id);
 
@@ -116,12 +118,12 @@ describe("createPoller", () => {
     try {
       const rec = record();
       await store.put(rec);
-      transport.setPages([page([event("101")])]);
+      transport.setComments([page([event("101")])]);
       await poller.tick(rec.subscription.id);
 
       // Same payload replayed by a later poll (GitHub may return it again).
       clockRef.advance(60_000);
-      transport.setPages([page([event("101")])]);
+      transport.setComments([page([event("101")])]);
       const second = await poller.tick(rec.subscription.id);
 
       expect(second.status).toBe("no-change");
@@ -137,7 +139,7 @@ describe("createPoller", () => {
     try {
       const rec = record();
       await store.put(rec);
-      transport.setPages([page([event("101")])]);
+      transport.setComments([page([event("101")])]);
       await poller.tick(rec.subscription.id);
       expect(notices).toHaveLength(1);
 
@@ -158,7 +160,7 @@ describe("createPoller", () => {
         sleep: async () => {}
       });
 
-      transport.setPages([page([event("101")])]);
+      transport.setComments([page([event("101")])]);
       const outcome = await restarted.tick(rec.subscription.id);
 
       expect(outcome.status).toBe("no-change");
@@ -174,7 +176,8 @@ describe("createPoller", () => {
       const rec = record();
       await store.put(rec);
       const gate = deferred<void>();
-      const slow = fakeTransport([page([event("101")])]);
+      const slow = fakeTransport();
+      slow.setComments([page([event("101")])]);
       const slowPoller = createPoller({
         store,
         transport: {
@@ -279,7 +282,7 @@ describe("createPoller", () => {
       await poller.tick(rec.subscription.id);
 
       clockRef.advance(60_000);
-      transport.setPages([page([event("101")])]);
+      transport.setComments([page([event("101")])]);
       const outcome = await poller.tick(rec.subscription.id);
 
       expect(outcome.status).toBe("delivered");
@@ -295,7 +298,7 @@ describe("createPoller", () => {
     try {
       const rec = record({ mentions: ["alice"] });
       await store.put(rec);
-      transport.setPages([
+      transport.setComments([
         page([
           event("101", { body: "for @alice" }),
           event("102", { body: "for @bob" }),
@@ -307,7 +310,7 @@ describe("createPoller", () => {
       expect(store.get(rec.subscription.id)?.state.pending.map((e) => e.id)).toEqual(["101"]);
 
       clockRef.advance(60_000);
-      transport.setPages([page([event("101", { body: "for @alice" })])]);
+      transport.setComments([page([event("101", { body: "for @alice" })])]);
       const replay = await poller.tick(rec.subscription.id);
 
       expect(replay.status).toBe("no-change");
@@ -322,14 +325,14 @@ describe("createPoller", () => {
     try {
       const rec = record();
       await store.put(rec);
-      transport.setPages([
+      transport.setComments([
         page([event("101")], { hasNextPage: true, etag: 'W/"a"' }),
         page([event("102")])
       ]);
 
       const outcome = await poller.tick(rec.subscription.id);
 
-      expect(transport.requests.map((r) => r.page)).toEqual([1, 2]);
+      expect(transport.requests.comments.map((r) => r.page)).toEqual([1, 2]);
       expect(outcome.newEvents).toBe(2);
       expect(store.get(rec.subscription.id)?.state.pending).toHaveLength(2);
     } finally {
@@ -342,16 +345,43 @@ describe("createPoller", () => {
     try {
       const rec = record();
       await store.put(rec);
-      transport.setPages([page([event("101")], { etag: 'W/"a"' })]);
+      // A poll with no new events earns a validator for the current cursor.
+      transport.setComments([page([], { etag: 'W/"a"' })]);
       await poller.tick(rec.subscription.id);
 
       clockRef.advance(60_000);
-      transport.setPages([page([], { notModified: true })]);
+      transport.setComments([page([], { notModified: true })]);
       const outcome = await poller.tick(rec.subscription.id);
 
-      expect(transport.requests.at(-1)?.etag).toBe('W/"a"');
+      expect(transport.requests.comments.at(-1)?.etag).toBe('W/"a"');
       expect(outcome.status).toBe("not-modified");
-      expect(store.get(rec.subscription.id)?.state.cursor.lastSeenAt).toBe("2026-01-01T00:00:00Z");
+      expect(store.get(rec.subscription.id)?.state.cursor.lastSeenAt).toBe(
+        "1970-01-01T00:00:01.000Z"
+      );
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("does not reuse a validator earned for a different cursor", async () => {
+    const { temp, store, transport, poller, clockRef } = await setup();
+    try {
+      const rec = record();
+      await store.put(rec);
+      transport.setComments([page([event("101")], { etag: 'W/"old"' })]);
+      await poller.tick(rec.subscription.id);
+
+      clockRef.advance(60_000);
+      transport.setComments([page([], { etag: 'W/"new"' })]);
+      await poller.tick(rec.subscription.id);
+
+      // The first request after the cursor moved is unconditional: the stored
+      // validator belonged to the old `since` URL.
+      expect(transport.requests.comments[1]?.etag).toBeUndefined();
+      expect(store.get(rec.subscription.id)?.state.etags).toEqual({
+        "/repos/acme/widgets/issues/7/comments?per_page=100&page=1&since=2026-01-01T00:00:00Z":
+          'W/"new"'
+      });
     } finally {
       await temp.cleanup();
     }
@@ -365,7 +395,7 @@ describe("createPoller", () => {
       await store.put(rec);
       const outcome = await poller.tick(rec.subscription.id);
       expect(outcome.status).toBe("skipped");
-      expect(transport.requests).toHaveLength(0);
+      expect(transport.requests.comments).toHaveLength(0);
     } finally {
       await temp.cleanup();
     }
@@ -406,7 +436,8 @@ describe("createPoller", () => {
       const store = await makeStore(temp.dir);
       const rec = record();
       await store.put(rec);
-      const transport = fakeTransport([page([event("101")])]);
+      const transport = fakeTransport();
+      transport.setComments([page([event("101")])]);
       const deliver = vi.fn(async () => {
         throw new Error("session gone");
       });
@@ -438,7 +469,7 @@ describe("createPoller", () => {
     try {
       const rec = record();
       await store.put(rec);
-      transport.setPages([
+      transport.setComments([
         page(Array.from({ length: 8 }, (_, index) => event(String(100 + index))))
       ]);
       await poller.tick(rec.subscription.id);
@@ -447,4 +478,312 @@ describe("createPoller", () => {
       await temp.cleanup();
     }
   });
+});
+
+describe("createPoller — additional sources", () => {
+  async function setup() {
+    const temp = await tempDir();
+    const clockRef = clock();
+    const store = await makeStore(temp.dir, clockRef.now);
+    const transport = fakeTransport();
+    const { deliver, notices } = fakeDeliver();
+    const logger = fakeLogger();
+    const poller = createPoller({
+      store,
+      transport,
+      deliver,
+      logger,
+      options,
+      now: clockRef.now,
+      random: () => 0,
+      sleep: async () => {}
+    });
+    return { temp, store, transport, deliver, notices, logger, poller, clockRef };
+  }
+
+  function review(id: string, at: string, body = "LGTM"): WakeEvent {
+    return {
+      id: `reviewed:${id}`,
+      kind: "review",
+      author: "bob",
+      createdAt: at,
+      updatedAt: at,
+      url: `https://github.com/acme/widgets/pull/7#pullrequestreview-${id}`,
+      body,
+      title: "review approved"
+    };
+  }
+
+  function label(id: string, at: string): WakeEvent {
+    return {
+      id: `labeled:${id}`,
+      kind: "label",
+      author: "carol",
+      createdAt: at,
+      updatedAt: at,
+      url: "",
+      body: "",
+      title: "label added: bug"
+    };
+  }
+
+  function merged(id: string, at: string): WakeEvent {
+    return {
+      id: `merged:${id}`,
+      kind: "state",
+      author: "dave",
+      createdAt: at,
+      updatedAt: at,
+      url: "",
+      body: "",
+      title: "merged"
+    };
+  }
+
+  it("delivers a timeline batch as one notice", async () => {
+    const { temp, store, transport, notices, poller } = await setup();
+    try {
+      const rec = record({ kind: "github.timeline" });
+      await store.put(rec);
+      transport.setTimeline([
+        timelinePage([
+          review("1", "2026-01-01T00:10:00Z"),
+          label("2", "2026-01-01T00:11:00Z"),
+          merged("3", "2026-01-01T00:12:00Z")
+        ])
+      ]);
+
+      const outcome = await poller.tick(rec.subscription.id);
+
+      expect(outcome.status).toBe("delivered");
+      expect(outcome.newEvents).toBe(3);
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.source).toBe("github.timeline");
+      expect(notices[0]?.text).not.toContain("LGTM");
+      expect(notices[0]?.text).not.toContain("bug");
+      expect(store.get(rec.subscription.id)?.state.pending.map((e) => e.kind)).toEqual([
+        "review",
+        "label",
+        "state"
+      ]);
+      expect(store.get(rec.subscription.id)?.state.cursor.lastSeenAt).toBe("2026-01-01T00:12:00Z");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("dedupes a replayed timeline page", async () => {
+    const { temp, store, transport, notices, poller, clockRef } = await setup();
+    try {
+      const rec = record({ kind: "github.timeline" });
+      await store.put(rec);
+      transport.setTimeline([timelinePage([review("1", "2026-01-01T00:10:00Z")])]);
+      await poller.tick(rec.subscription.id);
+
+      clockRef.advance(60_000);
+      transport.setTimeline([timelinePage([review("1", "2026-01-01T00:10:00Z")])]);
+      const second = await poller.tick(rec.subscription.id);
+
+      expect(second.status).toBe("no-change");
+      expect(notices).toHaveLength(1);
+      expect(store.get(rec.subscription.id)?.state.pending).toHaveLength(1);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("fails closed on a timeline 401", async () => {
+    const { temp, store, transport, notices, poller } = await setup();
+    try {
+      const rec = record({ kind: "github.timeline" });
+      await store.put(rec);
+      const before = store.get(rec.subscription.id)?.state.cursor.lastSeenAt;
+      transport.fail(
+        new TransportFailure("auth", "GitHub rejected the token (401)", { status: 401 })
+      );
+
+      const outcome = await poller.tick(rec.subscription.id);
+
+      expect(outcome.status).toBe("failed");
+      expect(outcome.failure).toBe("auth");
+      expect(notices).toHaveLength(0);
+      expect(store.get(rec.subscription.id)?.state.cursor.lastSeenAt).toBe(before);
+      expect(store.get(rec.subscription.id)?.state.consecutiveFailures).toBe(1);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("records the check baseline without waking, then wakes on a failure", async () => {
+    const { temp, store, transport, notices, poller, clockRef } = await setup();
+    try {
+      const rec = record({ kind: "github.checks" });
+      await store.put(rec);
+      transport.setPull({ notModified: false, headSHA: "aaa" });
+      transport.setChecks([checksPage([checkEvent("check:1:in_progress:", "in_progress")])]);
+
+      const first = await poller.tick(rec.subscription.id);
+
+      expect(first.status).toBe("no-change");
+      expect(notices).toHaveLength(0);
+      expect(store.get(rec.subscription.id)?.state.cursor.headSHA).toBe("aaa");
+
+      clockRef.advance(60_000);
+      transport.setPull({ notModified: true, headSHA: "" });
+      transport.setChecks([checksPage([checkEvent("check:1:completed:failure", "failure")])]);
+      const second = await poller.tick(rec.subscription.id);
+
+      expect(second.status).toBe("delivered");
+      expect(second.newEvents).toBe(1);
+      expect(notices).toHaveLength(1);
+      expect(store.get(rec.subscription.id)?.state.pending[0]?.title).toContain("failure");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("wakes on a new head commit", async () => {
+    const { temp, store, transport, notices, poller } = await setup();
+    try {
+      const rec = record({ kind: "github.checks" });
+      rec.state.cursor = { lastSeenAt: "2026-01-01T00:00:00Z", headSHA: "aaa" };
+      await store.put(rec);
+      transport.setPull({
+        notModified: false,
+        headSHA: "bbb",
+        htmlURL: "https://github.com/acme/widgets/pull/7"
+      });
+      transport.setChecks([checksPage([])]);
+
+      const outcome = await poller.tick(rec.subscription.id);
+
+      expect(outcome.status).toBe("delivered");
+      expect(notices[0]?.source).toBe("github.checks");
+      expect(store.get(rec.subscription.id)?.state.pending.map((e) => e.kind)).toEqual(["commit"]);
+      expect(store.get(rec.subscription.id)?.state.cursor.headSHA).toBe("bbb");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("fails closed when the number is not a pull request", async () => {
+    const { temp, store, transport, notices, poller } = await setup();
+    try {
+      const rec = record({ kind: "github.checks" });
+      await store.put(rec);
+      transport.fail(new TransportFailure("not-found", "404", { status: 404 }));
+
+      const outcome = await poller.tick(rec.subscription.id);
+
+      expect(outcome.status).toBe("failed");
+      expect(outcome.failure).toBe("not-found");
+      expect(notices).toHaveLength(0);
+      expect(store.get(rec.subscription.id)?.state.cursor.headSHA).toBeUndefined();
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("polls several watches in one session independently", async () => {
+    const { temp, store, transport, notices, poller } = await setup();
+    try {
+      const thread = record({ kind: "github.thread", number: 7 });
+      const timeline = record({ kind: "github.timeline", number: 8 });
+      await store.put(thread);
+      await store.put(timeline);
+      transport.setComments([page([event("101")])]);
+      transport.setTimeline([timelinePage([review("1", "2026-01-01T00:10:00Z")])]);
+
+      const outcomes = await poller.tickDue();
+
+      expect(outcomes).toHaveLength(2);
+      expect(notices).toHaveLength(2);
+      expect(new Set(notices.map((n) => n.sessionID))).toEqual(new Set(["ses_owner"]));
+      expect(new Set(notices.map((n) => n.source))).toEqual(
+        new Set(["github.thread", "github.timeline"])
+      );
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("wakes only the session that owns each watch", async () => {
+    const { temp, store, transport, notices, poller } = await setup();
+    try {
+      const mine = record({ kind: "github.timeline", sessionID: "ses_a", number: 7 });
+      const other = record({ kind: "github.timeline", sessionID: "ses_b", number: 8 });
+      await store.put(mine);
+      await store.put(other);
+      transport.setTimeline([
+        timelinePage([review("1", "2026-01-01T00:10:00Z")]),
+        timelinePage([merged("2", "2026-01-01T00:11:00Z")])
+      ]);
+
+      await poller.tickDue();
+
+      expect(notices).toHaveLength(2);
+      expect(notices.map((n) => n.sessionID).sort()).toEqual(["ses_a", "ses_b"]);
+      expect(store.get(mine.subscription.id)?.state.pending).toHaveLength(1);
+      expect(store.get(other.subscription.id)?.state.pending).toHaveLength(1);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("keeps one in-flight run per checks watch", async () => {
+    const { temp, store, notices } = await setup();
+    try {
+      const rec = record({ kind: "github.checks" });
+      await store.put(rec);
+      const gate = deferred<void>();
+      const transport = fakeTransport();
+      transport.setPull({ notModified: false, headSHA: "aaa" });
+      transport.setChecks([checksPage([checkEvent("check:1:completed:failure", "failure")])]);
+      const poller = createPoller({
+        store,
+        transport: {
+          listComments: (request) => transport.listComments(request),
+          listTimeline: (request) => transport.listTimeline(request),
+          getPullRequest: async (request) => {
+            await gate.promise;
+            return transport.getPullRequest(request);
+          },
+          listCheckRuns: (request) => transport.listCheckRuns(request)
+        },
+        deliver: async (notice) => {
+          notices.push(notice);
+        },
+        logger: fakeLogger(),
+        options,
+        now: () => 1_000,
+        sleep: async () => {}
+      });
+      // Make the first observation a baseline so the only delivery is the run.
+      rec.state.cursor = { lastSeenAt: "2026-01-01T00:00:00Z", headSHA: "aaa" };
+      await store.put(rec);
+
+      const first = poller.tick(rec.subscription.id);
+      const second = poller.tick(rec.subscription.id);
+      gate.resolve();
+      const [a, b] = await Promise.all([first, second]);
+
+      expect(a).toEqual(b);
+      expect(notices).toHaveLength(1);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  function checkEvent(id: string, conclusion: string): WakeEvent {
+    return {
+      id,
+      kind: "check",
+      author: "GitHub Actions",
+      createdAt: "2026-01-01T00:20:00Z",
+      updatedAt: "2026-01-01T00:25:00Z",
+      url: "https://github.com/acme/widgets/runs/1",
+      body: "",
+      title: `build: completed / ${conclusion}`
+    };
+  }
 });

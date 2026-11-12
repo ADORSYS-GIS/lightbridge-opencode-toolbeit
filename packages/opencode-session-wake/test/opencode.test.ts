@@ -75,7 +75,8 @@ describe("createSessionWakePlugin", () => {
       rec.state.nextPollAt = 0;
       await store.put(rec);
 
-      const transport = fakeTransport([page([{ ...commentEvent("101"), body: "hi" }])]);
+      const transport = fakeTransport();
+      transport.setComments([page([{ ...commentEvent("101"), body: "hi" }])]);
       const { context, synthetic } = fakeContext({ stateDir: temp.dir });
       const plugin = createSessionWakePlugin({ logger: fakeLogger(), transport });
 
@@ -109,11 +110,10 @@ describe("createSessionWakePlugin", () => {
       rec.state.nextPollAt = 0;
       await store.put(rec);
 
+      const transport = fakeTransport();
+      transport.setComments([page([commentEvent("101")])]);
       const { context, synthetic } = fakeContext({ stateDir: temp.dir });
-      const plugin = createSessionWakePlugin({
-        logger: fakeLogger(),
-        transport: fakeTransport([page([commentEvent("101")])])
-      });
+      const plugin = createSessionWakePlugin({ logger: fakeLogger(), transport });
       const fiber = Effect.runFork(Effect.scoped(plugin.effect(context as never)));
       await waitFor(() => synthetic.mock.calls.length > 0);
       await Effect.runPromise(Fiber.interrupt(fiber));
@@ -139,10 +139,9 @@ describe("createSessionWakePlugin", () => {
         stateDir: temp.dir,
         enabled: false
       });
-      const plugin = createSessionWakePlugin({
-        logger: fakeLogger(),
-        transport: fakeTransport([page([commentEvent("101")])])
-      });
+      const transport = fakeTransport();
+      transport.setComments([page([commentEvent("101")])]);
+      const plugin = createSessionWakePlugin({ logger: fakeLogger(), transport });
       const fiber = Effect.runFork(Effect.scoped(plugin.effect(context as never)));
       await new Promise((resolve) => setTimeout(resolve, 50));
       await Effect.runPromise(Fiber.interrupt(fiber));

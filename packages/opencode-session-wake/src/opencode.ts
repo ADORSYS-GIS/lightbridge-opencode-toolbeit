@@ -131,6 +131,7 @@ export function createSessionWakePlugin(
             metadata: {
               source: PLUGIN_ID,
               subscriptionID: notice.subscriptionID,
+              watchSource: notice.source,
               thread: notice.thread,
               count: notice.count,
               untrusted: true

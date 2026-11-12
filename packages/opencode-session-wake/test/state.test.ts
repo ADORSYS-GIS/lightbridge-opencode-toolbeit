@@ -179,3 +179,133 @@ describe("SubscriptionStore", () => {
     expect(state.nextPollAt).toBe(1_000);
   });
 });
+
+describe("SubscriptionStore — source kinds and schema migration", () => {
+  it("round-trips every source kind with its cursor", async () => {
+    const temp = await tempDir();
+    try {
+      const store = await makeStore(temp.dir);
+      for (const kind of ["github.thread", "github.timeline", "github.checks"] as const) {
+        const rec = record({ kind });
+        rec.state.cursor = { lastSeenAt: "2026-01-01T00:00:00Z", lastEventID: "x:1" };
+        if (kind === "github.checks") {
+          rec.state.cursor.headSHA = "abc123";
+        }
+        await store.put(rec);
+      }
+
+      const reopened = new SubscriptionStore({ dir: temp.dir, logger: fakeLogger() });
+      await reopened.load();
+
+      expect(
+        reopened
+          .list()
+          .map((r) => r.subscription.kind)
+          .sort()
+      ).toEqual(["github.checks", "github.thread", "github.timeline"]);
+      const checks = reopened.list().find((r) => r.subscription.kind === "github.checks");
+      expect(checks?.state.cursor.headSHA).toBe("abc123");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("keeps non-comment pending events and their summaries", async () => {
+    const temp = await tempDir();
+    try {
+      const store = await makeStore(temp.dir);
+      const rec = record({ kind: "github.checks" });
+      rec.state.pending.push({
+        id: "check:1:completed:failure",
+        kind: "check",
+        author: "GitHub Actions",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:05:00Z",
+        url: "https://github.com/acme/widgets/runs/1",
+        body: "",
+        title: "build: completed / failure"
+      });
+      await store.put(rec);
+
+      const reopened = new SubscriptionStore({ dir: temp.dir, logger: fakeLogger() });
+      await reopened.load();
+
+      expect(reopened.get(rec.subscription.id)?.state.pending[0]).toMatchObject({
+        kind: "check",
+        title: "build: completed / failure"
+      });
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("restores the per-URL etag map", async () => {
+    const temp = await tempDir();
+    try {
+      const store = await makeStore(temp.dir);
+      const rec = record({ kind: "github.timeline" });
+      rec.state.etags = { "/repos/acme/widgets/issues/7/timeline?per_page=100&page=1": 'W/"t"' };
+      await store.put(rec);
+
+      const reopened = new SubscriptionStore({ dir: temp.dir, logger: fakeLogger() });
+      await reopened.load();
+
+      expect(reopened.get(rec.subscription.id)?.state.etags).toEqual({
+        "/repos/acme/widgets/issues/7/timeline?per_page=100&page=1": 'W/"t"'
+      });
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("drops the pre-multi-source etag shape instead of trusting it", async () => {
+    const temp = await tempDir();
+    try {
+      const store = await makeStore(temp.dir);
+      const rec = record();
+      await store.put(rec);
+      // The first slice persisted `{ value, since }`; it cannot be mapped to a
+      // request URL, so it must be discarded (one extra full fetch, never a
+      // stale 304).
+      const path = join(temp.dir, `${rec.subscription.id}.json`);
+      await writeFile(
+        path,
+        JSON.stringify({
+          subscription: rec.subscription,
+          state: { ...rec.state, etag: { value: 'W/"old"', since: "2026-01-01T00:00:00Z" } }
+        }),
+        "utf8"
+      );
+
+      const reopened = new SubscriptionStore({ dir: temp.dir, logger: fakeLogger() });
+      await reopened.load();
+
+      expect(reopened.get(rec.subscription.id)?.state.etags).toBeUndefined();
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("rejects an unknown source kind", async () => {
+    const temp = await tempDir();
+    try {
+      const rec = record();
+      const id = newSubscriptionID();
+      await writeFile(
+        join(temp.dir, `${id}.json`),
+        JSON.stringify({
+          subscription: { ...rec.subscription, id, kind: "github.webhooks" },
+          state: rec.state
+        }),
+        "utf8"
+      );
+
+      const reopened = new SubscriptionStore({ dir: temp.dir, logger: fakeLogger() });
+      await reopened.load();
+
+      expect(reopened.list()).toEqual([]);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+});

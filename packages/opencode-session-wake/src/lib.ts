@@ -33,13 +33,27 @@ export {
 
 export {
   createGitHubTransport,
+  GITHUB_PAGE_SIZE,
+  summarize,
   TransportFailure,
+  type CheckRunsPage,
+  type CheckRunsRequest,
   type CommentPage,
   type CommentPageRequest,
   type GitHubTransport,
   type GitHubTransportOptions,
+  type PullRequestRequest,
+  type PullRequestSnapshot,
+  type TimelinePage,
+  type TimelineRequest,
   type TransportFailureKind
 } from "./github.js";
+
+export {
+  pollSource,
+  type SourceContext,
+  type SourceResult
+} from "./sources.js";
 
 export {
   backoffMs,
@@ -72,15 +86,17 @@ export {
   type WakeToolInfo
 } from "./tools.js";
 
-export type {
-  SubscriptionRecord,
-  SubscriptionState,
-  WakeCursor,
-  WakeETag,
-  WakeEvent,
-  WakeNotice,
-  WakeSourceKind,
-  WakeSubscription
+export {
+  WAKE_SOURCE_KINDS,
+  type SubscriptionRecord,
+  type SubscriptionState,
+  type WakeCursor,
+  type WakeETag,
+  type WakeEvent,
+  type WakeEventKind,
+  type WakeNotice,
+  type WakeSourceKind,
+  type WakeSubscription
 } from "./types.js";
 
 export {

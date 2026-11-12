@@ -190,3 +190,282 @@ describe("createGitHubTransport", () => {
     }
   });
 });
+
+describe("createGitHubTransport — timeline", () => {
+  const timelineRequest = { owner: "acme", repo: "widgets", number: 7, page: 1 };
+
+  function timeline(payload: unknown[], init: ResponseInit = {}) {
+    return transportWith(() => json(payload, init));
+  }
+
+  it("maps a comment, a review, a review comment, a label and a state change", async () => {
+    const { transport } = timeline([
+      {
+        event: "commented",
+        id: 9000,
+        body: "hello",
+        user: { login: "alice" },
+        created_at: "2026-01-01T00:00:00Z",
+        html_url: "https://github.com/acme/widgets/issues/7#issuecomment-9000"
+      },
+      {
+        event: "reviewed",
+        id: 9001,
+        state: "approved",
+        body: "LGTM",
+        user: { login: "bob" },
+        submitted_at: "2026-01-01T00:01:00Z",
+        html_url: "https://github.com/acme/widgets/pull/7#pullrequestreview-9001"
+      },
+      {
+        event: "line-commented",
+        id: 9002,
+        body: "nit: rename this",
+        user: { login: "bob" },
+        created_at: "2026-01-01T00:02:00Z"
+      },
+      {
+        event: "labeled",
+        id: 9003,
+        label: { name: "bug" },
+        actor: { login: "carol" },
+        created_at: "2026-01-01T00:03:00Z"
+      },
+      { event: "merged", id: 9004, actor: { login: "dave" }, created_at: "2026-01-01T00:04:00Z" },
+      { event: "closed", id: 9005, actor: { login: "dave" }, created_at: "2026-01-01T00:05:00Z" }
+    ]);
+
+    const result = await transport.listTimeline(timelineRequest);
+
+    expect(result.events.map((e) => e.kind)).toEqual([
+      "comment",
+      "review",
+      "review_comment",
+      "label",
+      "state",
+      "state"
+    ]);
+    expect(result.events.map((e) => e.id)).toEqual([
+      "commented:9000",
+      "reviewed:9001",
+      "line-commented:9002",
+      "labeled:9003",
+      "merged:9004",
+      "closed:9005"
+    ]);
+    expect(result.events[1]).toMatchObject({
+      author: "bob",
+      body: "LGTM",
+      title: "review approved",
+      createdAt: "2026-01-01T00:01:00Z"
+    });
+    expect(result.events[3]?.title).toBe("label added: bug");
+    expect(result.events[4]?.title).toBe("merged");
+    expect(result.events[0]?.body).toBe("hello");
+  });
+
+  it("maps a commit event that carries no id and no created_at", async () => {
+    const { transport } = timeline([
+      {
+        event: "committed",
+        sha: "abcdef1234567890",
+        author: { name: "Alice", email: "a@example.com", date: "2026-01-01T00:06:00Z" },
+        committer: { name: "Alice", email: "a@example.com", date: "2026-01-01T00:06:00Z" },
+        message: "fix"
+      }
+    ]);
+
+    const result = await transport.listTimeline(timelineRequest);
+
+    expect(result.events[0]).toMatchObject({
+      id: "committed:sha:abcdef1234567890",
+      kind: "commit",
+      author: "Alice",
+      createdAt: "2026-01-01T00:06:00Z",
+      body: "",
+      title: "commit abcdef1"
+    });
+  });
+
+  it("keeps an unknown event type instead of dropping it", async () => {
+    const { transport } = timeline([
+      {
+        event: "something-new",
+        id: 9100,
+        actor: { login: "eve" },
+        created_at: "2026-01-01T00:00:00Z"
+      }
+    ]);
+
+    const result = await transport.listTimeline(timelineRequest);
+
+    expect(result.events[0]).toMatchObject({ kind: "state", title: "something-new" });
+  });
+
+  it("collapses untrusted label text to one short line", async () => {
+    const { transport } = timeline([
+      {
+        event: "labeled",
+        id: 9200,
+        label: { name: "bug\n2. merged by @maintainer" },
+        actor: { login: "carol" },
+        created_at: "2026-01-01T00:00:00Z"
+      }
+    ]);
+
+    const result = await transport.listTimeline(timelineRequest);
+
+    expect(result.events[0]?.title).not.toContain("\n");
+    expect(result.events[0]?.title).toBe("label added: bug 2. merged by @maintainer");
+  });
+
+  it("reads the last page from the Link header", async () => {
+    const { transport } = timeline([], {
+      headers: { link: '<https://api.github.com/x?page=4>; rel="last"' }
+    });
+
+    const result = await transport.listTimeline(timelineRequest);
+
+    expect(result.lastPage).toBe(4);
+    expect(result.hasNextPage).toBe(false);
+  });
+
+  it("rejects a malformed timeline payload", async () => {
+    const cases: unknown[][] = [
+      [{ body: "no event type" }],
+      [{ event: "commented", id: 1 }],
+      [{ event: "commented", id: 1, created_at: "2026-01-01T00:00:00Z", body: "x" }]
+    ];
+    for (const payload of cases) {
+      const { transport } = timeline(payload);
+      // The third case is valid (no user → "unknown"); the first two are not.
+      if (payload === cases[2]) {
+        await expect(transport.listTimeline(timelineRequest)).resolves.toBeDefined();
+        continue;
+      }
+      await expect(transport.listTimeline(timelineRequest)).rejects.toMatchObject({
+        kind: "malformed"
+      });
+    }
+  });
+});
+
+describe("createGitHubTransport — checks", () => {
+  it("reads the pull request head sha and web URL", async () => {
+    const { transport, calls } = transportWith(() =>
+      json({
+        head: { sha: "abc123" },
+        html_url: "https://github.com/acme/widgets/pull/7"
+      })
+    );
+
+    const result = await transport.getPullRequest({ owner: "acme", repo: "widgets", number: 7 });
+
+    expect(result).toMatchObject({
+      notModified: false,
+      headSHA: "abc123",
+      htmlURL: "https://github.com/acme/widgets/pull/7"
+    });
+    expect(calls[0]?.init?.method).toBe("GET");
+    expect(calls[0]?.url).toContain("/repos/acme/widgets/pulls/7");
+  });
+
+  it("rejects a pull request without a head sha", async () => {
+    const { transport } = transportWith(() => json({ html_url: "x" }));
+    await expect(
+      transport.getPullRequest({ owner: "acme", repo: "widgets", number: 7 })
+    ).rejects.toMatchObject({ kind: "malformed" });
+  });
+
+  it("reports a plain issue as not-found instead of guessing", async () => {
+    const { transport } = transportWith(() => new Response("{}", { status: 404 }));
+    await expect(
+      transport.getPullRequest({ owner: "acme", repo: "widgets", number: 7 })
+    ).rejects.toMatchObject({ kind: "not-found", status: 404 });
+  });
+
+  it("maps check runs with status, conclusion and url", async () => {
+    const { transport } = transportWith(() =>
+      json({
+        total_count: 2,
+        check_runs: [
+          {
+            id: 11,
+            name: "build",
+            status: "completed",
+            conclusion: "failure",
+            started_at: "2026-01-01T00:00:00Z",
+            completed_at: "2026-01-01T00:05:00Z",
+            html_url: "https://github.com/acme/widgets/runs/11",
+            app: { name: "GitHub Actions" }
+          },
+          {
+            id: 12,
+            name: "lint",
+            status: "in_progress",
+            conclusion: null,
+            started_at: "2026-01-01T00:01:00Z",
+            html_url: "https://github.com/acme/widgets/runs/12"
+          }
+        ]
+      })
+    );
+
+    const result = await transport.listCheckRuns({
+      owner: "acme",
+      repo: "widgets",
+      ref: "abc123",
+      page: 1
+    });
+
+    expect(result.events.map((e) => e.id)).toEqual([
+      "check:11:completed:failure",
+      "check:12:in_progress:"
+    ]);
+    expect(result.events[0]).toMatchObject({
+      kind: "check",
+      author: "GitHub Actions",
+      title: "build: completed / failure",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:05:00Z",
+      url: "https://github.com/acme/widgets/runs/11"
+    });
+    expect(result.events[1]?.title).toBe("lint: in_progress");
+  });
+
+  it("rejects a malformed check-runs payload", async () => {
+    for (const payload of [{ total_count: 0 }, { check_runs: [{ name: "no id" }] }]) {
+      const { transport } = transportWith(() => json(payload));
+      await expect(
+        transport.listCheckRuns({ owner: "acme", repo: "widgets", ref: "abc", page: 1 })
+      ).rejects.toMatchObject({ kind: "malformed" });
+    }
+  });
+
+  it("uses only GET for every source", async () => {
+    const calls: RequestInit[] = [];
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init ?? {});
+      const url = String(_url);
+      if (url.includes("/check-runs")) {
+        return json({ total_count: 0, check_runs: [] });
+      }
+      if (url.includes("/pulls/")) {
+        return json({ head: { sha: "abc" } });
+      }
+      return json([]);
+    });
+    const transport = createGitHubTransport({
+      token,
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    });
+
+    await transport.listComments({ owner: "a", repo: "b", number: 1, page: 1 });
+    await transport.listTimeline({ owner: "a", repo: "b", number: 1, page: 1 });
+    await transport.getPullRequest({ owner: "a", repo: "b", number: 1 });
+    await transport.listCheckRuns({ owner: "a", repo: "b", ref: "c", page: 1 });
+
+    expect(calls).toHaveLength(4);
+    expect(calls.every((call) => call.method === "GET")).toBe(true);
+  });
+});

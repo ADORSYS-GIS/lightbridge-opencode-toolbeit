@@ -5,10 +5,26 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { vi } from "vitest";
 
-import type { CommentPage, GitHubTransport } from "../src/github.js";
+import type {
+  CheckRunsPage,
+  CheckRunsRequest,
+  CommentPage,
+  CommentPageRequest,
+  GitHubTransport,
+  PullRequestRequest,
+  PullRequestSnapshot,
+  TimelinePage,
+  TimelineRequest
+} from "../src/github.js";
 import type { Logger } from "../src/logging.js";
 import { initialState, SubscriptionStore, newSubscriptionID } from "../src/state.js";
-import type { SubscriptionRecord, WakeEvent, WakeNotice, WakeSubscription } from "../src/types.js";
+import type {
+  SubscriptionRecord,
+  WakeEvent,
+  WakeNotice,
+  WakeSourceKind,
+  WakeSubscription
+} from "../src/types.js";
 
 export interface FakeLogger extends Logger {
   readonly events: Array<{ level: string; event: string; fields?: Record<string, unknown> }>;
@@ -71,41 +87,106 @@ export function record(over: Partial<WakeSubscription> = {}, at = 1_000): Subscr
   return { subscription: subscription(over), state: initialState(at) };
 }
 
-/** A transport that answers from a queue of pages and records every request. */
+export function kinded(kind: WakeSourceKind, over: Partial<WakeSubscription> = {}) {
+  return record({ kind, ...over });
+}
+
+/**
+ * A transport that answers from per-method queues and records every request.
+ * `fail` makes the next call on *any* method throw, so a test can assert that a
+ * failure in any source leaves the cursor alone.
+ */
 export interface FakeTransport extends GitHubTransport {
-  readonly requests: Array<Parameters<GitHubTransport["listComments"]>[0]>;
-  setPages(pages: CommentPage[]): void;
+  readonly requests: {
+    comments: CommentPageRequest[];
+    timeline: TimelineRequest[];
+    pull: PullRequestRequest[];
+    checks: CheckRunsRequest[];
+  };
+  setComments(pages: CommentPage[]): void;
+  setTimeline(pages: TimelinePage[]): void;
+  setPull(snapshot: PullRequestSnapshot): void;
+  setChecks(pages: CheckRunsPage[]): void;
   fail(error: unknown): void;
 }
 
-export function fakeTransport(pages: CommentPage[] = []): FakeTransport {
-  let queue = [...pages];
+export function fakeTransport(): FakeTransport {
+  const requests: FakeTransport["requests"] = {
+    comments: [],
+    timeline: [],
+    pull: [],
+    checks: []
+  };
   let failure: unknown;
-  const requests: FakeTransport["requests"] = [];
+  let comments: CommentPage[] = [];
+  let timeline: TimelinePage[] = [];
+  let pull: PullRequestSnapshot | undefined;
+  let checks: CheckRunsPage[] = [];
+
   return {
     requests,
-    setPages(next) {
-      queue = [...next];
+    setComments(pages) {
+      comments = [...pages];
+      failure = undefined;
+    },
+    setTimeline(pages) {
+      timeline = [...pages];
+      failure = undefined;
+    },
+    setPull(snapshot) {
+      pull = snapshot;
+      failure = undefined;
+    },
+    setChecks(pages) {
+      checks = [...pages];
       failure = undefined;
     },
     fail(error) {
       failure = error;
     },
     async listComments(request) {
-      requests.push(request);
+      requests.comments.push(request);
       if (failure) {
         throw failure;
       }
-      const page = queue.shift();
-      if (!page) {
-        return { notModified: false, events: [], hasNextPage: false };
+      return comments.shift() ?? { notModified: false, events: [], hasNextPage: false };
+    },
+    async listTimeline(request) {
+      requests.timeline.push(request);
+      if (failure) {
+        throw failure;
       }
-      return page;
+      return timeline.shift() ?? { notModified: false, events: [], hasNextPage: false };
+    },
+    async getPullRequest(request) {
+      requests.pull.push(request);
+      if (failure) {
+        throw failure;
+      }
+      if (!pull) {
+        throw new Error("fakeTransport: no pull request configured (call setPull)");
+      }
+      return pull;
+    },
+    async listCheckRuns(request) {
+      requests.checks.push(request);
+      if (failure) {
+        throw failure;
+      }
+      return checks.shift() ?? { notModified: false, events: [], hasNextPage: false };
     }
   };
 }
 
 export function page(events: WakeEvent[], over: Partial<CommentPage> = {}): CommentPage {
+  return { notModified: false, events, hasNextPage: false, ...over };
+}
+
+export function timelinePage(events: WakeEvent[], over: Partial<TimelinePage> = {}): TimelinePage {
+  return { notModified: false, events, hasNextPage: false, ...over };
+}
+
+export function checksPage(events: WakeEvent[], over: Partial<CheckRunsPage> = {}): CheckRunsPage {
   return { notModified: false, events, hasNextPage: false, ...over };
 }
 

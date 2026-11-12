@@ -3,11 +3,14 @@ import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/pro
 import { join } from "node:path";
 
 import type { Logger } from "./logging.js";
-import type {
-  SubscriptionRecord,
-  SubscriptionState,
-  WakeEvent,
-  WakeSubscription
+import {
+  WAKE_SOURCE_KINDS,
+  type SubscriptionRecord,
+  type SubscriptionState,
+  type WakeEvent,
+  type WakeEventKind,
+  type WakeSourceKind,
+  type WakeSubscription
 } from "./types.js";
 
 /** Ids this plugin generates; also the only ids it will accept back from a tool call. */
@@ -38,17 +41,30 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+const EVENT_KINDS: readonly WakeEventKind[] = [
+  "comment",
+  "review",
+  "review_comment",
+  "review_request",
+  "state",
+  "label",
+  "assignee",
+  "commit",
+  "check"
+];
+
 function isEvent(value: unknown): value is WakeEvent {
   const record = asRecord(value);
   return (
     record !== undefined &&
     typeof record.id === "string" &&
-    record.kind === "comment" &&
+    EVENT_KINDS.includes(record.kind as WakeEventKind) &&
     typeof record.author === "string" &&
     typeof record.createdAt === "string" &&
     typeof record.updatedAt === "string" &&
     typeof record.url === "string" &&
-    typeof record.body === "string"
+    typeof record.body === "string" &&
+    (record.title === undefined || typeof record.title === "string")
   );
 }
 
@@ -59,7 +75,7 @@ function isSubscription(value: unknown): value is WakeSubscription {
     isSubscriptionID(record.id) &&
     typeof record.sessionID === "string" &&
     record.sessionID.length > 0 &&
-    record.kind === "github.thread" &&
+    WAKE_SOURCE_KINDS.includes(record.kind as WakeSourceKind) &&
     typeof record.owner === "string" &&
     typeof record.repo === "string" &&
     typeof record.number === "number" &&
@@ -86,17 +102,22 @@ function parseState(value: unknown, now: number): SubscriptionState {
   const seen = Array.isArray(record.seen)
     ? record.seen.filter((id): id is string => typeof id === "string")
     : [];
-  const etag = asRecord(record.etag);
+  const etags = asRecord(record.etags);
+  const validEtags: Record<string, string> = {};
+  for (const [url, value] of Object.entries(etags ?? {})) {
+    if (typeof value === "string") {
+      validEtags[url] = value;
+    }
+  }
 
   return {
     cursor: {
       lastSeenAt:
         typeof cursor?.lastSeenAt === "string" ? cursor.lastSeenAt : base.cursor.lastSeenAt,
-      ...(typeof cursor?.lastEventID === "string" ? { lastEventID: cursor.lastEventID } : {})
+      ...(typeof cursor?.lastEventID === "string" ? { lastEventID: cursor.lastEventID } : {}),
+      ...(typeof cursor?.headSHA === "string" ? { headSHA: cursor.headSHA } : {})
     },
-    ...(typeof etag?.value === "string" && typeof etag?.since === "string"
-      ? { etag: { value: etag.value, since: etag.since } }
-      : {}),
+    ...(Object.keys(validEtags).length > 0 ? { etags: validEtags } : {}),
     pending,
     seen,
     consecutiveFailures:
