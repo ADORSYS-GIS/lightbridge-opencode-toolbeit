@@ -311,10 +311,18 @@ ring, `consecutiveFailures`, `lastError` (fetch), `lastPollAt`, `nextPollAt`, th
 and `lastTouchedAt`.
 
 **Lease** (`leases/`): `{ key, owner, expiresAt }`. `owner` is a random per-poller id (never a
-session id or a token). It is claimed with an atomic exclusive create (`open(..., "wx")`), renewed
-on every poll and released by a graceful `stop()`. A lease that is unreadable but **fresh** is
-treated as a claim still being written (fail closed); only an unreadable file older than one TTL is
-reclaimed as corrupt leftovers.
+session id or a token). A **free slot** is claimed with an atomic exclusive create
+(`open(..., "wx")`). An **existing lease is changed only by compare-and-swap**: the new claim is
+written to a unique temp file, the current file is moved aside atomically with `rename`, its content
+is compared with the exact record this caller read, and only then is the claim published with
+`link` (which fails with `EEXIST` if another poller won the slot). A file that does not match is put
+back with `link`; a **two-poller** takeover therefore does not delete the winner's fresh claim.
+`renew` and `release` use the same discipline, so a renewal cannot clobber a takeover. The
+take-aside window is not a global lock: a third poller can still claim the slot while another poller
+has a fresh claim moved aside (see the take-aside-window limitation under Delivery guarantees). A
+lease that is unreadable but
+**fresh** is treated as a claim still being written (fail closed); only an unreadable file older
+than one TTL is reclaimed as corrupt leftovers.
 
 No token is ever written to these files.
 
@@ -346,9 +354,12 @@ No token is ever written to these files.
 - **One delivery per event per subscriber.** The shared `seen` ring stops the fetcher re-accepting an
   event; each subscriber's own `seen` ring stops it re-appending one. `wake_next` removes events from
   `pending`, which is the actual delivery, and then records their ids in the shared `seen` ring
-  (`wake_seen_marked`). The ring is trimmed to `seenLimit`, but a drained id is **never evicted by
-  that trim**: if every remaining id is protected the ring may exceed the cap until a later trim,
-  because losing the proof of a completed read would allow a second wake.
+  (`wake_seen_marked`). Every watch write **re-reads and unions** the on-disk ring, so a drain that
+  ran while a poll was in flight is not overwritten by the poll's older snapshot (the same process
+  serializes the two writes, but the poll still holds a snapshot from before the fetch). The ring is
+  trimmed to `seenLimit`, but a drained id is **never evicted by that trim**: if every remaining id
+  is protected the ring may exceed the cap until a later trim, because losing the proof of a
+  completed read would allow a second wake.
 - **One durable delivery write, then the notice.** On a poll with new events the plugin writes each
   affected subscriber once with `updateState`: the fresh events are **appended** to the on-disk
   `pending`, the subscriber `seen` ring and loop state are merged, and an event already drained by a
@@ -365,11 +376,20 @@ No token is ever written to these files.
   poll appended.
 - **One live poller per watch.** A per-watch lease (`owner` + expiry) is acquired before the fetch
   and renewed on every poll. A poller that cannot acquire it skips the whole poll — no HTTP request,
-  no pending append, no notice — and backs off in memory. The TTL is
-  `clamp(2 × negotiated interval + 30 s, 60 s, 2 × maxIntervalMs)`: two intervals tolerate a delayed
-  poll, the floor keeps a fast test interval from expiring mid-poll, and the ceiling bounds crash
-  failover. A graceful `stop()` releases every lease immediately; a crash waits for expiry. Overlapping
-  ticks **inside** one poller still share a single in-flight promise.
+  no pending append, no notice — and backs off in memory. A free slot is claimed with an atomic
+  exclusive create; an expired lease is taken over by compare-and-swap, so **two pollers that both
+  see the same expired record cannot both win**. The take-aside window is **not** a global lock: a
+  third poller that reads the slot while another poller has moved a fresh claim aside can claim it;
+  the mover's restore then loses to that claim (`EEXIST`) and deletes the file it moved aside, so the
+  first and third pollers can both believe they hold the lease until their next `renew` (the first's
+  `renew` fails, so it does not deliver). Only the two-poller race is fully closed. The TTL
+  is `clamp(2 × negotiated interval + 30 s, 60 s, 2 × maxIntervalMs)`: two intervals tolerate a
+  delayed poll, the floor keeps a fast test interval from expiring mid-poll, and the ceiling bounds
+  crash failover. A failed poll **extends the lease to cover its backoff** (still under the same
+  ceiling), so a rate-limited owner is not replaced while it is correctly idle and a second poller
+  does not issue its own request into the same 429. A graceful `stop()` releases every lease
+  immediately; a crash waits for expiry. Overlapping ticks **inside** one poller still share a single
+  in-flight promise.
 - **Failures never advance the cursor.** `401`, `403`, `404`, `429`, `5xx`, a network error, a
   malformed payload or a timeline backlog deeper than `maxPages` leave the shared cursor/ETags/`seen`
   and every subscriber's `pending` untouched; the poll is logged as `wake_poll_failed` and
@@ -468,8 +488,9 @@ watch keeps its cursor — no partial state is claimed.
 - **Cross-process delivery is single-writer, not global exactly-once.** A lease file per watch key
   (`owner` + expiry) now makes one live poller the only fetcher and the only deliverer for that key;
   a second poller skips the whole poll. The guarantee rests on the filesystem honouring an atomic
-  exclusive create (`open(..., "wx")`) and atomic rename. On a filesystem that does not (some network
-  shares), two claims can both succeed, and clock skew can expire a live lease early. There is
+  exclusive create (`open(..., "wx")`), hard links (`link`) and atomic rename. On a filesystem that
+  does not (some network shares), two claims can both succeed, and clock skew can expire a live
+  lease early. There is
   therefore **no claim of global exactly-once across arbitrary filesystems** — only a single-writer
   guard on a local state root. `wake_next` is also not lease-arbitrated: it re-reads the queue from
   disk, appends only its own delta on the next poll, and marks drained ids in the shared `seen` ring,
@@ -477,6 +498,14 @@ watch keeps its cursor — no partial state is claimed.
   subscriber `seen` ring are the guards there, not a transaction. Two processes adopting the same
   record concurrently remain last-writer-wins (in one process the writes are serialized per
   subscription).
+- **The lease take-aside window is not a global lock.** The compare-and-swap closes the two-poller
+  race over one expired record, but it cannot make "move the old file aside, publish the new one"
+  atomic against an arbitrary number of pollers. A third poller that reads the slot during the
+  window sees a free slot and claims it; the poller that moved the first fresh claim aside then gets
+  `EEXIST` on restore and deletes the file it moved. The first and third pollers both believe they
+  hold the lease until their next `renew`; the first's `renew` then fails, so it skips the poll and
+  does not deliver. Closing this fully would need a separate per-key lock or a compare-and-swap
+  primitive the filesystem does not expose.
 - **Tool calls other than `wake_next` keep their loaded snapshot.** `wake_next` re-reads the
   subscription and the watch from disk, and the poller reloads both stores at the start of every
   poll, so the observed "pending=1 but No unread comments" case is fixed. `wake_list` and

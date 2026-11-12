@@ -36,15 +36,20 @@ Sources (`wake_subscribe.source`):
   Delivery state (`pending`, `seen`, loop guard) stays per session, and `wake_next` never crosses
   sessions.
 - **One poller per watch, even across processes.** A lease file per watch key (`owner` + expiry)
-  is claimed with an atomic exclusive create and renewed on every poll; only the holder fetches or
-  wakes. A second process over the same state root skips the whole poll and makes no HTTP request.
-  The lease is released by a graceful `stop()` and expires after a bounded TTL (two negotiated
-  intervals plus margin, clamped to 60 s–2 h) so a crashed owner cannot wedge the watch.
+  is claimed with an atomic exclusive create for a free slot and a **compare-and-swap** (unique temp
+  file + hard link, verified against the record that was read) when taking over an expired lease or
+  renewing; only the holder fetches or wakes. A second process over the same state root skips the
+  whole poll and makes no HTTP request. The lease is released by a graceful `stop()` and expires
+  after a bounded TTL (two negotiated intervals plus margin, clamped to 60 s–2 h) so a crashed owner
+  cannot wedge the watch. A failed poll extends the lease to cover its backoff, so a rate-limited
+  owner is not replaced while it is correctly idle (which would amplify the 429).
 - **Dedupe is durable and counted honestly.** A poll appends its fresh events to `pending` in one
   `updateState` write (merged with the on-disk queue, so a concurrent drain is not resurrected) and
-  persists the shared `seen` ring before the notice. `wake_next` marks drained ids in that ring, and
-  a drained id is kept past the `seenLimit` trim rather than evicted before the next poll. The
-  notice `count` is read back from the persisted queue, so it matches what `wake_next` can return.
+  persists the shared `seen` ring before the notice. Every watch write **unions** the on-disk ring,
+  so a `wake_next` drain that raced a poll cannot be overwritten by the poll's older snapshot.
+  `wake_next` marks drained ids in that ring, and a drained id is kept past the `seenLimit` trim
+  rather than evicted before the next poll. The notice `count` is read back from the persisted
+  queue, so it matches what `wake_next` can return.
 - The cursor, per-URL ETags and a bounded `seen` ring are durable under the **state root**; the
   fetcher stops when the last subscriber leaves and its state ages out after 7 days.
 - **Restart-safe ownership.** Every new subscription records the **plugin instance's** project
@@ -72,4 +77,4 @@ manual test: [`docs/session-wake.md`](../../docs/session-wake.md).
 > A live single-session wake is confirmed. Multi-session, cross-poller dedupe and loop-guard
 > behaviour are covered by tests but still pending live verification; the exact steps are in the doc.
 > The lease is a single-writer guard on a local state root, **not** global exactly-once on a
-> filesystem that does not honour atomic exclusive create/rename.
+> filesystem that does not honour atomic exclusive create, hard links or rename.

@@ -2,7 +2,7 @@ import { dirname, join } from "node:path";
 
 import type { WakeOptions } from "./config.js";
 import { TransportFailure, type GitHubTransport } from "./github.js";
-import { LeaseStore, leaseTtlMs, newLeaseOwnerID } from "./lease.js";
+import { LeaseStore, leaseTtlForIdleMs, leaseTtlMs, newLeaseOwnerID } from "./lease.js";
 import { decideWake, isIgnoredAuthor, normalizeAuthors, OriginatedSet } from "./loop.js";
 import type { Logger } from "./logging.js";
 import { pollSource, type SourceResult } from "./sources.js";
@@ -380,6 +380,20 @@ export function createPoller(deps: PollerDeps): Poller {
     } catch (error) {
       const failure = toFailure(error);
       finishFailure(watch, failure);
+      // Hold the lease across the backoff. The normal TTL is two intervals,
+      // but a rate-limited owner may be correctly idle for up to
+      // `maxIntervalMs`; letting the lease expire in that gap makes every other
+      // poller take over and issue its own request, amplifying the 429.
+      const idleMs = Math.max(0, watch.state.nextPollAt - now());
+      const held = await leases.renew(
+        watch.key,
+        ownerID,
+        leaseTtlForIdleMs(idleMs, negotiatedIntervalMs(subscribers, options), options.maxIntervalMs)
+      );
+      if (!held) {
+        heldLeases.delete(watch.key);
+        logger.warn("wake_lease_lost", { key: watch.key, owner: ownerID });
+      }
       // Cursor, etags, seen and every subscriber's pending are untouched: a
       // failed poll must never look like an empty thread.
       await watches.put(watch);

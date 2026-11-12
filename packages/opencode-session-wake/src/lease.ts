@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  link,
   mkdir,
   open,
   readFile,
@@ -52,6 +53,11 @@ export const LEASE_TTL_CEILING_FACTOR = 2;
 /** Extra slack on top of two negotiated intervals, for a slow fetch + delivery. */
 export const LEASE_TTL_MARGIN_MS: number = 30_000;
 
+/** The widest a lease may ever be: two maximum intervals, never below the floor. */
+export function leaseTtlCeilingMs(maxIntervalMs: number): number {
+  return Math.max(LEASE_TTL_FLOOR_MS, maxIntervalMs * LEASE_TTL_CEILING_FACTOR);
+}
+
 /**
  * How long a lease stays valid. It must outlive the gap between two polls of a
  * live owner (otherwise two pollers would alternate), so it is based on the
@@ -67,8 +73,25 @@ export const LEASE_TTL_MARGIN_MS: number = 30_000;
  */
 export function leaseTtlMs(intervalMs: number, maxIntervalMs: number): number {
   const wanted = intervalMs * 2 + LEASE_TTL_MARGIN_MS;
-  const ceiling = Math.max(LEASE_TTL_FLOOR_MS, maxIntervalMs * LEASE_TTL_CEILING_FACTOR);
-  return Math.min(Math.max(wanted, LEASE_TTL_FLOOR_MS), ceiling);
+  return Math.min(Math.max(wanted, LEASE_TTL_FLOOR_MS), leaseTtlCeilingMs(maxIntervalMs));
+}
+
+/**
+ * TTL for an owner that is about to idle for `idleMs` — a failure backoff. The
+ * lease must outlive the backoff, otherwise another poller takes over a watch
+ * whose owner is correctly waiting and issues its own request, amplifying a
+ * rate limit. The result is clamped to the same ceiling as a normal lease.
+ */
+export function leaseTtlForIdleMs(
+  idleMs: number,
+  intervalMs: number,
+  maxIntervalMs: number
+): number {
+  const wanted = Math.max(0, idleMs) + LEASE_TTL_MARGIN_MS;
+  return Math.min(
+    leaseTtlCeilingMs(maxIntervalMs),
+    Math.max(leaseTtlMs(intervalMs, maxIntervalMs), wanted)
+  );
 }
 
 /** A random, process-unique owner id. Never derived from a session or a token. */
@@ -103,15 +126,38 @@ export function leaseFileFor(key: string): string {
 }
 
 /**
- * File-backed lease with an **exclusive-create** claim. `open(path, "wx")` is
- * the primitive that makes a claim atomic on a local filesystem: of two
- * processes racing for a free lease exactly one gets the file. An expired lease
- * is removed first; the following `wx` create then has the same guarantee.
+ * File-backed lease with an **exclusive-create** claim for a free slot and a
+ * **compare-and-swap** for every mutation of an existing lease.
  *
- * Known boundary: on a filesystem that does not honour atomic exclusive create
- * (some network shares), two claims can both succeed. This lease is therefore a
- * single-writer guard, not a distributed consensus protocol — the docs say so
- * explicitly and no global exactly-once claim is made.
+ * `open(path, "wx")` is atomic on a local filesystem: of two processes racing
+ * for a free lease exactly one gets the file. Replacing a lease cannot use that
+ * primitive, because the old file exists. The CAS is built from two POSIX
+ * primitives:
+ *
+ * 1. write the new claim to a unique temp file;
+ * 2. `rename(target, trash)` to take the current file aside atomically;
+ * 3. read `trash` and compare it with the exact record this caller observed;
+ * 4. `link(temp, target)` to publish the claim. `link` fails with `EEXIST` when
+ *    another process won the slot in the meantime, so only one caller succeeds.
+ *
+ * A file that does not match is put back with `link(trash, target)` (which also
+ * fails if a third caller has already claimed the slot). This is what prevents
+ * the old read → `unlink` → `wx` race in which the second of two pollers
+ * deleted the first one's fresh lease and both claims succeeded. `renew` and
+ * `release` use the same discipline, so a renewal cannot clobber a takeover.
+ *
+ * The window between `rename` and `link` is **not** a global lock. A third
+ * caller that reads the slot while a fresh claim is taken aside can claim it;
+ * the mover's restore then loses (`EEXIST`) and deletes the file it moved. The
+ * first and third callers both believe they hold the lease until their next
+ * renew; the first's renew fails, so it must not deliver. Only the two-caller
+ * race over one expired record is fully closed.
+ *
+ * Known boundary: on a filesystem that does not honour atomic exclusive create,
+ * hard links or rename (some network shares), two claims can still both
+ * succeed. This lease is therefore a single-writer guard, not a distributed
+ * consensus protocol — the docs say so explicitly and no global exactly-once
+ * claim is made.
  */
 export class LeaseStore {
   private readonly now: () => number;
@@ -126,6 +172,11 @@ export class LeaseStore {
 
   private path(key: string): string {
     return join(this.options.dir, leaseFileFor(key));
+  }
+
+  /** A unique sibling path; never one of the two lease filenames. */
+  private tempPath(key: string, suffix: "claim" | "trash"): string {
+    return `${this.path(key)}.${process.pid}.${randomBytes(4).toString("hex")}.${suffix}`;
   }
 
   /**
@@ -158,6 +209,15 @@ export class LeaseStore {
     return { lease, unreadable: false };
   }
 
+  /** Read one lease file without logging: used on the CAS trash snapshot. */
+  private async readLeaseFile(path: string): Promise<LeaseRecord | undefined> {
+    try {
+      return parseLease(JSON.parse(await readFile(path, "utf8")));
+    } catch {
+      return undefined;
+    }
+  }
+
   /** The current lease, if the file exists and is readable. */
   async read(key: string): Promise<LeaseRecord | undefined> {
     return (await this.readRaw(key)).lease;
@@ -170,23 +230,33 @@ export class LeaseStore {
    */
   async acquire(key: string, owner: string, ttlMs: number): Promise<boolean> {
     const at = this.now();
+    const expiresAt = at + ttlMs;
     const { lease: current, unreadable } = await this.readRaw(key);
-    if (current && current.expiresAt > at && current.owner !== owner) {
-      return false;
-    }
-    if (current && current.owner === owner) {
-      return this.renew(key, owner, ttlMs);
-    }
+
     if (current) {
-      // Expired: remove it, then race for the free slot with `wx`.
-      await this.removeFile(key);
-    } else if (unreadable) {
+      if (current.expiresAt > at && current.owner !== owner) {
+        return false;
+      }
+      if (current.owner === owner) {
+        return this.renew(key, owner, ttlMs);
+      }
+      // Expired: swap only the exact record just read. If another poller took
+      // over (or renewed) between the read and the swap, the comparison fails
+      // and its fresh lease is restored instead of being deleted.
+      return this.compareAndSwap(key, (observed) => sameLease(observed, current), {
+        key,
+        owner,
+        expiresAt
+      });
+    }
+
+    if (unreadable) {
       // A claim being written is briefly unreadable. Fail closed while the file
       // is fresh (it is a live claimant, not a crash); only a file older than
-      // one TTL is treated as corrupt leftovers and removed.
+      // one TTL is treated as corrupt leftovers and reclaimed.
       const metadata = await stat(this.path(key)).catch(() => undefined);
       if (!metadata) {
-        return this.createExclusive(key, owner, at + ttlMs);
+        return this.createExclusive(key, owner, expiresAt);
       }
       if (at - metadata.mtimeMs <= ttlMs) {
         return false;
@@ -195,19 +265,11 @@ export class LeaseStore {
         key,
         ageMs: at - metadata.mtimeMs
       });
-      await this.removeFile(key);
+      return this.reclaimUnreadable(key, owner, expiresAt, ttlMs);
     }
-    return this.createExclusive(key, owner, at + ttlMs);
-  }
 
-  private async removeFile(key: string): Promise<void> {
-    try {
-      await unlink(this.path(key));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
-    }
+    // Free slot: exclusive create is the atomic claim.
+    return this.createExclusive(key, owner, expiresAt);
   }
 
   /**
@@ -220,12 +282,17 @@ export class LeaseStore {
     if (!current || current.owner !== owner) {
       return false;
     }
-    await this.writeAtomic(key, {
+    // Compare on the owner, not the expiry: two renewals from the same owner
+    // are both valid, while a takeover by another owner must win.
+    return this.compareAndSwap(
       key,
-      owner,
-      expiresAt: this.now() + ttlMs
-    });
-    return true;
+      (observed) => observed.key === key && observed.owner === owner,
+      {
+        key,
+        owner,
+        expiresAt: this.now() + ttlMs
+      }
+    );
   }
 
   /** Release only a lease this owner still holds; never steal another's. */
@@ -234,8 +301,142 @@ export class LeaseStore {
     if (!current || current.owner !== owner) {
       return;
     }
+    await this.removeIf(key, (observed) => observed.key === key && observed.owner === owner);
+  }
+
+  /**
+   * Reclaim a stale unreadable file with the same move-aside discipline. The
+   * file may have been replaced by a fresh claim while it was being inspected;
+   * in that case it is restored and this caller loses.
+   */
+  private async reclaimUnreadable(
+    key: string,
+    owner: string,
+    expiresAt: number,
+    ttlMs: number
+  ): Promise<boolean> {
+    const trash = await this.moveAside(key);
+    if (trash === undefined) {
+      // It vanished while we looked: the slot is free again.
+      return this.createExclusive(key, owner, expiresAt);
+    }
     try {
-      await unlink(this.path(key));
+      const metadata = await stat(trash).catch(() => undefined);
+      if (!metadata || this.now() - metadata.mtimeMs <= ttlMs) {
+        await this.restore(trash, key);
+        return false;
+      }
+      return await this.createExclusive(key, owner, expiresAt);
+    } finally {
+      await this.unlinkQuietly(trash);
+    }
+  }
+
+  /**
+   * Replace the lease only if the file still holds a record accepted by
+   * `matches`. The temp claim is published with `link`, so a concurrent claim
+   * wins the slot rather than being overwritten.
+   */
+  private async compareAndSwap(
+    key: string,
+    matches: (observed: LeaseRecord) => boolean,
+    next: LeaseRecord
+  ): Promise<boolean> {
+    const temp = await this.writeClaim(key, next);
+    let trash: string | undefined;
+    try {
+      trash = await this.moveAside(key);
+      if (trash === undefined) {
+        // The lease vanished between our read and the move: claim the free slot
+        // with the same exclusive link.
+        return await this.linkClaim(temp, key);
+      }
+      const observed = await this.readLeaseFile(trash);
+      if (!observed || !matches(observed)) {
+        // Another poller changed the lease. Put its file back if the slot is
+        // still free; if a third caller already claimed it, that claim wins.
+        await this.restore(trash, key);
+        return false;
+      }
+      return await this.linkClaim(temp, key);
+    } finally {
+      if (trash !== undefined) {
+        await this.unlinkQuietly(trash);
+      }
+      await this.unlinkQuietly(temp);
+    }
+  }
+
+  /** Remove the lease only if the file still holds a record accepted by `matches`. */
+  private async removeIf(
+    key: string,
+    matches: (observed: LeaseRecord) => boolean
+  ): Promise<boolean> {
+    const trash = await this.moveAside(key);
+    if (trash === undefined) {
+      return false;
+    }
+    try {
+      const observed = await this.readLeaseFile(trash);
+      if (!observed || !matches(observed)) {
+        await this.restore(trash, key);
+        return false;
+      }
+      return true;
+    } finally {
+      await this.unlinkQuietly(trash);
+    }
+  }
+
+  private async writeClaim(key: string, lease: LeaseRecord): Promise<string> {
+    await mkdir(this.options.dir, { recursive: true });
+    const temp = this.tempPath(key, "claim");
+    await writeFile(temp, `${JSON.stringify(lease, null, 2)}\n`, { mode: 0o600 });
+    return temp;
+  }
+
+  /** Publish a claim with `link`; `EEXIST` means another caller won. */
+  private async linkClaim(temp: string, key: string): Promise<boolean> {
+    try {
+      await link(temp, this.path(key));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  /** Move the current lease aside atomically; `undefined` when it is gone. */
+  private async moveAside(key: string): Promise<string | undefined> {
+    const trash = this.tempPath(key, "trash");
+    try {
+      await rename(this.path(key), trash);
+      return trash;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  /** Put a file taken aside back, unless another caller already claimed the slot. */
+  private async restore(trash: string, key: string): Promise<void> {
+    try {
+      await link(trash, this.path(key));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST" && code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+
+  private async unlinkQuietly(path: string): Promise<void> {
+    try {
+      await unlink(path);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
@@ -261,13 +462,14 @@ export class LeaseStore {
     }
     return true;
   }
+}
 
-  /** Atomic per-writer temp + rename (ADR-0005), mode `0o600`. */
-  private async writeAtomic(key: string, lease: LeaseRecord): Promise<void> {
-    await mkdir(this.options.dir, { recursive: true });
-    const path = this.path(key);
-    const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-    await writeFile(temp, `${JSON.stringify(lease, null, 2)}\n`, { mode: 0o600 });
-    await rename(temp, path);
-  }
+function sameLease(a: LeaseRecord | undefined, b: LeaseRecord | undefined): boolean {
+  return (
+    a !== undefined &&
+    b !== undefined &&
+    a.key === b.key &&
+    a.owner === b.owner &&
+    a.expiresAt === b.expiresAt
+  );
 }
