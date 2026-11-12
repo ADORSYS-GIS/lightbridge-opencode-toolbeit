@@ -4,7 +4,29 @@ All notable changes to the **OpenCode Toolbelt** — the `@vymalo/*` plugin suit
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
+All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `session-wake`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
+
+## [0.20.1] — 2026-11-12
+
+> **session-wake ships on the pipeline, and 0.20.0 is retired.** `@vymalo/opencode-session-wake@0.20.0` reached npm by hand, without SLSA provenance, so the publish guard correctly classifies it as foreign and refuses to skip it; npm cannot republish a version. `0.20.1` is the first version of the package this pipeline can publish — with provenance — and the whole suite moves with it. No behaviour changes for the other packages.
+
+### Changed
+
+- **release:** `@vymalo/opencode-session-wake@0.20.0` was hand-published (bootstrap first publish) and therefore has no provenance attestation naming this repo's `.github/workflows/publish.yml`. Run [`43222813224`](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/actions/runs/43222813224) failed its preflight on exactly that: the other thirteen packages classified as `pipeline` and would have been skipped, session-wake classified as `foreign` and the run stopped with nothing published. That is the guard working as designed — a version this workflow has not proven it can publish is never reported as "already released". npm cannot republish an existing version, so the fix is a new version line: every package moves to `0.20.1`, and `0.20.1` is the first session-wake release with pipeline provenance. (The next preflight still has to prove the package's Trusted Publisher exchange; see `CLAUDE.md` → Releasing → "Adding a new published package".) ([#161](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/161))
+
+### Added
+
+- **session-wake:** New published package `@vymalo/opencode-session-wake`, the first in the suite that *pushes* into a running session instead of waiting to be called. `wake_subscribe` / `wake_unsubscribe` / `wake_list` / `wake_next` are scoped to the calling session, so a watch is owned by the session that created it.
+  - **Sources:** `github.thread` (comments only, the default and unchanged from its first landing), `github.timeline` (comments, reviews, review comments, review requests, opened/closed/reopened/merged, labels, assignees, milestones, commits, force-pushes) and `github.checks` (the PR head commit and its check runs, keyed by `(run id, status, conclusion)` so each transition is a distinct event). Read-only GitHub calls; there is no write verb anywhere in the package.
+  - **One fetcher, many subscribers:** a watch is keyed by `(apiBase, source, owner, repo, number)`, so every session watching the same target shares one poller, one cursor, one ETag map and one `seen` ring. Delivery state (`pending`, per-subscriber `seen`, loop guard) stays per session, and `wake_next` never crosses sessions. The shared interval is the shortest any subscriber asked for, clamped to `[minIntervalMs, maxIntervalMs]`; at zero subscribers the poller stops, and the watch file is kept for 7 days so a rejoin resumes from its cursor.
+  - **Per-session wake:** new events produce a short `ctx.session.synthetic({ resume: true })` notice that carries a count and a pointer only — never a comment body or summary. Content is readable solely through `wake_next`, labelled untrusted.
+  - **Loop guard:** `ignoreAuthors` drops configured logins at fan-out, `markOriginated(id)` is the seam a future write path uses to suppress its own events, and a per-`(session, watch)` wake budget (`maxWakes` / `windowMs`) coalesces the notice once exhausted, holds a `cooldownMs` quiet period, and surfaces `loop_suspected` in `wake_list`. Events stay readable throughout.
+  - **Durability and failure:** the cursor, per-URL ETags and a bounded `seen` ring live under the **state root** ([ADR-0022](docs/adr/0022-credentials-in-state-dir.md)), written atomically with mode `0o600`; no token is ever stored. Auth is `gh auth token` or a configured `tokenCommand`, held in memory only. `401`/`403`/`429`/network/malformed fail closed — the cursor never advances and the poll backs off, with the server's `retry-after` winning.
+
+### Documentation
+
+- **docs:** [`docs/session-wake.md`](docs/session-wake.md) (sources, shared fetcher and interval negotiation, state layout, per-source cursor/dedupe and ETag rules, delivery guarantees, loop guard, configuration) and the package README; the root README table and [`docs/README.md`](docs/README.md) index list the new package. The doc records the host-API limitation honestly: the `synthetic` wake is verified against a fake session API, not a live host.
+- **docs:** `CONTRIBUTING.md` now states the real package counts — seventeen workspace packages, fourteen published (session-wake included) and three private — and the root `CLAUDE.md` / `AGENTS.md` version line reads `0.20.1`.
 
 ## [0.20.0] — 2026-11-10
 
