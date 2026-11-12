@@ -27,6 +27,7 @@ import {
   HOST_REFRESH_WINDOW_MS,
   createSignInRegistration,
   createSignInRequiredNotifier,
+  signInCommand,
   projectCredential,
   signInPath
 } from "../src/sign-in.js";
@@ -625,6 +626,10 @@ describe("hard cutover — nothing but the Connect dialog starts a device flow",
       expect(String((notices[0]?.fields as { message?: string } | undefined)?.message)).toContain(
         signInPath("lightbridge")
       );
+      // The command carries the integration id wired from `auth.id`.
+      expect((notices[0]?.fields as { command?: string } | undefined)?.command).toBe(
+        `opencode auth login ${SERVER_ID}`
+      );
       // Every non-interactive caller reported through the one latch.
       expect(seenSources(events)).toEqual(new Set(["startup", "register", "gateway", "otel"]));
     }
@@ -633,7 +638,7 @@ describe("hard cutover — nothing but the Connect dialog starts a device flow",
   it("the sign-in notice is latched, and re-arms on reset", () => {
     const logger = createRecordingLogger();
     const events = logger.events;
-    const notice = createSignInRequiredNotifier(logger, "Camer Digital");
+    const notice = createSignInRequiredNotifier(logger, "Camer Digital", "camer-digital");
 
     notice.notify("gateway");
     notice.notify("otel");
@@ -654,6 +659,39 @@ describe("hard cutover — nothing but the Connect dialog starts a device flow",
     notice.reset();
     notice.notify("gateway");
     expect(warns(events)).toHaveLength(2);
+  });
+
+  it("the sign-in warning names the terminal command with the real id, not the display name", () => {
+    const logger = createRecordingLogger();
+    createSignInRequiredNotifier(logger, "Camer Digital", "camer-digital").notify("startup");
+    const fields = logger.events.find((e) => e.event === "lightbridge_sign_in_required")
+      ?.fields as { message: string; command: string };
+    expect(fields.command).toBe("opencode auth login camer-digital");
+    expect(fields.message).toBe(
+      'lightbridge is not signed in: open Settings → Providers → Show more providers → (Integrations dialog) search "Camer Digital" → Sign in, or in a terminal run `opencode auth login camer-digital`'
+    );
+  });
+
+  it("signInCommand leaves plain ids bare", () => {
+    expect(signInCommand("camer-digital")).toBe("opencode auth login camer-digital");
+    expect(signInCommand("corp_1.eu@prod")).toBe("opencode auth login corp_1.eu@prod");
+  });
+
+  it.each([
+    ["my corp", "'my corp'"],
+    ["it's", "'it'\\''s'"],
+    ["a'b'c", "'a'\\''b'\\''c'"],
+    ['a"b$c', "'a\"b$c'"],
+    ["a$(x)", "'a$(x)'"],
+    ["a$HOME", "'a$HOME'"],
+    ["a`b", "'a`b'"],
+    ["a;b", "'a;b'"],
+    ["-x", "'-x'"],
+    [".hidden", "'.hidden'"],
+    ["caf\u00e9", "'caf\u00e9'"],
+    ["https://idp.example/realm", "'https://idp.example/realm'"]
+  ])("signInCommand single-quotes %j, which is not a plain word", (id, quoted) => {
+    expect(signInCommand(id)).toBe(`opencode auth login ${quoted}`);
   });
 
   async function startWithFake(runtime: LightbridgeRuntimeLike, auth: Record<string, unknown>) {
@@ -709,6 +747,41 @@ describe("hard cutover — nothing but the Connect dialog starts a device flow",
     );
 
     expect(warns(events)).toHaveLength(0);
+  });
+
+  it("the wired warning shows the register name in the UI path but auth.id in the command", async () => {
+    const needs = new InteractiveAuthRequiredError("lightbridge", "device_code");
+    const logger = createRecordingLogger();
+    const harness = await startPlugin({
+      options: {
+        auth: AUTH,
+        gateway: { providers: ["gateway"] },
+        register: { baseURL: "https://gw.example.com/v1", name: "Camer Digital" }
+      },
+      factory: {
+        logger,
+        runtimeFactory: () =>
+          fakeRuntime(
+            { accessToken: "x", tokenType: "Bearer" },
+            {
+              getProjectToken: async () => {
+                throw needs;
+              }
+            }
+          )
+      }
+    });
+    await expect(
+      harness.call("session.model.request", {
+        model: { id: "m", providerID: "gateway" },
+        headers: {}
+      })
+    ).rejects.toThrow();
+
+    const fields = warns(logger.events)[0]?.fields as { command: string; message: string };
+    expect(fields.command).toBe(`opencode auth login ${SERVER_ID}`);
+    expect(fields.message).toContain('search "Camer Digital"');
+    expect(fields.message).toContain(`\`opencode auth login ${SERVER_ID}\``);
   });
 
   it("re-arms after a sign-in: signed in, later revoked, warns again", async () => {
