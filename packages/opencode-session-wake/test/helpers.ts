@@ -14,7 +14,9 @@ import type {
   PullRequestRequest,
   PullRequestSnapshot,
   TimelinePage,
-  TimelineRequest
+  TimelineRequest,
+  WorkflowRunsPage,
+  WorkflowRunsRequest
 } from "../src/github.js";
 import type { Logger } from "../src/logging.js";
 import {
@@ -163,11 +165,13 @@ export interface FakeTransport extends GitHubTransport {
     timeline: TimelineRequest[];
     pull: PullRequestRequest[];
     checks: CheckRunsRequest[];
+    runs: WorkflowRunsRequest[];
   };
   setComments(pages: CommentPage[]): void;
   setTimeline(pages: TimelinePage[]): void;
   setPull(snapshot: PullRequestSnapshot): void;
   setChecks(pages: CheckRunsPage[]): void;
+  setRuns(pages: WorkflowRunsPage[]): void;
   fail(error: unknown): void;
 }
 
@@ -176,13 +180,15 @@ export function fakeTransport(): FakeTransport {
     comments: [],
     timeline: [],
     pull: [],
-    checks: []
+    checks: [],
+    runs: []
   };
   let failure: unknown;
   let comments: CommentPage[] = [];
   let timeline: TimelinePage[] = [];
   let pull: PullRequestSnapshot | undefined;
   let checks: CheckRunsPage[] = [];
+  let runs: WorkflowRunsPage[] = [];
 
   return {
     requests,
@@ -200,6 +206,10 @@ export function fakeTransport(): FakeTransport {
     },
     setChecks(pages) {
       checks = [...pages];
+      failure = undefined;
+    },
+    setRuns(pages) {
+      runs = [...pages];
       failure = undefined;
     },
     fail(error) {
@@ -235,6 +245,13 @@ export function fakeTransport(): FakeTransport {
         throw failure;
       }
       return checks.shift() ?? { notModified: false, events: [], hasNextPage: false };
+    },
+    async listWorkflowRuns(request) {
+      requests.runs.push(request);
+      if (failure) {
+        throw failure;
+      }
+      return runs.shift() ?? { notModified: false, events: [], hasNextPage: false };
     }
   };
 }
@@ -248,6 +265,13 @@ export function timelinePage(events: WakeEvent[], over: Partial<TimelinePage> = 
 }
 
 export function checksPage(events: WakeEvent[], over: Partial<CheckRunsPage> = {}): CheckRunsPage {
+  return { notModified: false, events, hasNextPage: false, ...over };
+}
+
+export function runsPage(
+  events: WakeEvent[],
+  over: Partial<WorkflowRunsPage> = {}
+): WorkflowRunsPage {
   return { notModified: false, events, hasNextPage: false, ...over };
 }
 

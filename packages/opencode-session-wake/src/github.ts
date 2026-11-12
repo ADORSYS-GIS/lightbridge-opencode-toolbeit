@@ -104,6 +104,24 @@ export interface CheckRunsPage {
   readonly hasNextPage: boolean;
 }
 
+export interface WorkflowRunsRequest {
+  readonly owner: string;
+  readonly repo: string;
+  /** Workflow id or file name. Omitted means every workflow in the repository. */
+  readonly workflow?: string;
+  /** Branch filter (`branch=`). */
+  readonly branch?: string;
+  readonly page: number;
+  readonly etag?: string;
+}
+
+export interface WorkflowRunsPage {
+  readonly notModified: boolean;
+  readonly etag?: string;
+  readonly events: readonly WakeEvent[];
+  readonly hasNextPage: boolean;
+}
+
 /**
  * The seam tests replace with a fake. Read-only by construction: every method
  * is one `GET`, and the real transport has no other HTTP verb anywhere.
@@ -117,6 +135,8 @@ export interface GitHubTransport {
   getPullRequest(request: PullRequestRequest): Promise<PullRequestSnapshot>;
   /** `github.checks` — check runs for one commit. */
   listCheckRuns(request: CheckRunsRequest): Promise<CheckRunsPage>;
+  /** `github.actions` — workflow runs for a repository (optionally one workflow/branch). */
+  listWorkflowRuns(request: WorkflowRunsRequest): Promise<WorkflowRunsPage>;
 }
 
 export interface GitHubTransportOptions {
@@ -403,6 +423,42 @@ function toCheckRunEvent(value: unknown, fallbackAt: string): WakeEvent {
   };
 }
 
+/**
+ * One workflow run, keyed by `(run id, status, conclusion, updated_at)` so every
+ * observed transition is a distinct event while a repeated observation of the
+ * same state dedupes. `created_at` is the creation boundary the source pages
+ * against; `run_started_at` is only a fallback because a queued run has none.
+ */
+function toWorkflowRunEvent(value: unknown, fallbackAt: string): WakeEvent {
+  const record = asRecord(value);
+  const id = record?.id;
+  if (record === undefined || (typeof id !== "number" && typeof id !== "string")) {
+    throw new TransportFailure("malformed", "workflow run without a usable id");
+  }
+  const status = stringOf(record.status) ?? "unknown";
+  const conclusion = stringOf(record.conclusion);
+  const createdAt =
+    stringOf(record.created_at) ?? stringOf(record.run_started_at) ?? stringOf(record.updated_at);
+  const updatedAt = stringOf(record.updated_at) ?? createdAt ?? fallbackAt;
+  if (createdAt === undefined) {
+    throw new TransportFailure("malformed", `workflow run ${String(id)} has no timestamp`);
+  }
+  const name = stringOf(record.name) ?? stringOf(record.display_title) ?? "workflow";
+  const branch = stringOf(record.head_branch);
+  return {
+    id: `run:${String(id)}:${status}:${conclusion ?? ""}:${updatedAt}`,
+    kind: "run",
+    author: loginOf(record.actor) ?? "github",
+    createdAt,
+    updatedAt,
+    url: stringOf(record.html_url) ?? "",
+    body: "",
+    title: summarize(
+      `${name}${branch ? ` (${branch})` : ""}: ${status}${conclusion ? ` / ${conclusion}` : ""}`
+    )
+  };
+}
+
 interface RawResponse {
   readonly notModified: boolean;
   readonly etag?: string;
@@ -615,6 +671,41 @@ export function createGitHubTransport(options: GitHubTransportOptions): GitHubTr
         notModified: false,
         ...(response.etag !== undefined ? { etag: response.etag } : {}),
         events: runs.map((run) => toCheckRunEvent(run, fallbackAt)),
+        hasNextPage: pageFromLink(response.link ?? "", "next") !== undefined
+      };
+    },
+
+    async listWorkflowRuns(request) {
+      const path =
+        request.workflow !== undefined
+          ? `${repoPath(request.owner, request.repo)}/actions/workflows/${encodeURIComponent(
+              request.workflow
+            )}/runs`
+          : `${repoPath(request.owner, request.repo)}/actions/runs`;
+      const response = await get(
+        path,
+        {
+          per_page: String(GITHUB_PAGE_SIZE),
+          page: String(request.page),
+          ...(request.branch !== undefined ? { branch: request.branch } : {})
+        },
+        request.etag
+      );
+      if (response.notModified) {
+        return { notModified: true, events: [], hasNextPage: false };
+      }
+      const record = asRecord(response.body);
+      const runs = record?.workflow_runs;
+      if (!Array.isArray(runs)) {
+        throw new TransportFailure("malformed", "workflow-runs response without `workflow_runs`", {
+          status: 200
+        });
+      }
+      const fallbackAt = new Date(now()).toISOString();
+      return {
+        notModified: false,
+        ...(response.etag !== undefined ? { etag: response.etag } : {}),
+        events: runs.map((run) => toWorkflowRunEvent(run, fallbackAt)),
         hasNextPage: pageFromLink(response.link ?? "", "next") !== undefined
       };
     }

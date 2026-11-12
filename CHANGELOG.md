@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `session-wake`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
 
+## [Unreleased]
+
+### Added
+
+- **session-wake:** New `github.actions` source watches a repository's GitHub Actions **workflow runs**: a new run, every status transition (`queued` → `in_progress` → `completed`), every conclusion (`success`, `failure`, `cancelled`, `skipped`, …) and reruns. `wake_subscribe` accepts `owner`/`repo` plus optional `workflow` (file name or id) and `branch`; `number` is now optional at the schema level and is **rejected** for this source, while the three thread sources still require it and reject `workflow`/`branch`. Events are keyed by `(run id, status, conclusion, updated_at)` — `run:<id>:<status>:<conclusion>:<updated_at>` — so each transition is delivered once and a replay dedupes. The first poll records a baseline without waking, like `github.checks`. Run-level only; jobs are out of scope. Needs `Actions: read` and fails closed as `auth`/`forbidden` without it. Because GitHub exposes no `since`/`updated` filter for runs, the source keeps a window anchored at `cursor.runFloor` and fails closed as `backlog` when new runs push it past `maxPages`. ([#162](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/162))
+
+### Documentation
+
+- **docs:** [`docs/session-wake.md`](docs/session-wake.md) and the package README document the `github.actions` source, its per-source cursor/dedupe and ETag rules, the `Actions: read` scope, the run-window limitation and the manual verification steps.
+
 ## [0.20.1] — 2026-11-12
 
 > **session-wake ships on the pipeline, and 0.20.0 is retired.** `@vymalo/opencode-session-wake@0.20.0` reached npm by hand, without SLSA provenance, so the publish guard correctly classifies it as foreign and refuses to skip it; npm cannot republish a version. `0.20.1` is the first version of the package this pipeline can publish — with provenance — and the whole suite moves with it. No behaviour changes for the other packages.

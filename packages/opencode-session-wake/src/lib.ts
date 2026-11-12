@@ -48,7 +48,9 @@ export {
   type PullRequestSnapshot,
   type TimelinePage,
   type TimelineRequest,
-  type TransportFailureKind
+  type TransportFailureKind,
+  type WorkflowRunsPage,
+  type WorkflowRunsRequest
 } from "./github.js";
 
 export {
@@ -85,6 +87,8 @@ export {
   isSubscriptionID,
   newSubscriptionID,
   SubscriptionStore,
+  subscriptionLabel,
+  targetLabel,
   targetOf,
   watchFileFor,
   watchKey,

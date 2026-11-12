@@ -32,26 +32,54 @@ function repoPath(owner: string, repo: string): string {
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 }
 
+/** The issue/PR number a thread source needs; `github.actions` has none. */
+function requireNumber(target: WatchTarget): number {
+  if (target.number === undefined) {
+    throw new TransportFailure("malformed", `${target.kind} requires an issue/PR number`);
+  }
+  return target.number;
+}
+
 function threadURL(target: WatchTarget, page: number, since: string): string {
-  return `${repoPath(target.owner, target.repo)}/issues/${
-    target.number
-  }/comments?per_page=${GITHUB_PAGE_SIZE}&page=${page}&since=${since}`;
+  return `${repoPath(target.owner, target.repo)}/issues/${requireNumber(
+    target
+  )}/comments?per_page=${GITHUB_PAGE_SIZE}&page=${page}&since=${since}`;
 }
 
 function timelineURL(target: WatchTarget, page: number): string {
-  return `${repoPath(target.owner, target.repo)}/issues/${
-    target.number
-  }/timeline?per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
+  return `${repoPath(target.owner, target.repo)}/issues/${requireNumber(
+    target
+  )}/timeline?per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
 }
 
 function pullURL(target: WatchTarget): string {
-  return `${repoPath(target.owner, target.repo)}/pulls/${target.number}`;
+  return `${repoPath(target.owner, target.repo)}/pulls/${requireNumber(target)}`;
 }
 
 function checksURL(target: WatchTarget, ref: string, page: number): string {
   return `${repoPath(target.owner, target.repo)}/commits/${encodeURIComponent(
     ref
   )}/check-runs?per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
+}
+
+/**
+ * The URL a workflow-runs request will use. `github.actions` needs it only as
+ * the ETag key: it must be stable for the exact request variant (workflow,
+ * branch, page), because a validator earned for one variant is never reused for
+ * another. The real URL is built by the transport from the same parts.
+ */
+function runsURL(target: WatchTarget, page: number): string {
+  const base =
+    target.workflow !== undefined
+      ? `${repoPath(target.owner, target.repo)}/actions/workflows/${encodeURIComponent(
+          target.workflow
+        )}/runs`
+      : `${repoPath(target.owner, target.repo)}/actions/runs`;
+  const query = [`per_page=${GITHUB_PAGE_SIZE}`, `page=${page}`];
+  if (target.branch !== undefined) {
+    query.push(`branch=${encodeURIComponent(target.branch)}`);
+  }
+  return `${base}?${query.join("&")}`;
 }
 
 /** Advance the cursor to the newest event, preserving fields the source owns. */
@@ -95,7 +123,7 @@ async function pollThread(context: SourceContext): Promise<SourceResult> {
     const response = await transport.listComments({
       owner: target.owner,
       repo: target.repo,
-      number: target.number,
+      number: requireNumber(target),
       page,
       since,
       ...(page === 1 && cached !== undefined ? { etag: cached } : {})
@@ -171,7 +199,7 @@ async function pollTimeline(context: SourceContext): Promise<SourceResult> {
   const first = await transport.listTimeline({
     owner: target.owner,
     repo: target.repo,
-    number: target.number,
+    number: requireNumber(target),
     page: 1,
     ...(cached !== undefined ? { etag: cached } : {})
   });
@@ -202,7 +230,7 @@ async function pollTimeline(context: SourceContext): Promise<SourceResult> {
           : await transport.listTimeline({
               owner: target.owner,
               repo: target.repo,
-              number: target.number,
+              number: requireNumber(target),
               page
             });
       pages.unshift([...response.events]);
@@ -236,15 +264,16 @@ async function pollTimeline(context: SourceContext): Promise<SourceResult> {
  * `github.checks`: the PR's head commit plus its check runs. Needs a pull-request
  * number — a plain issue answers `404` on `/pulls/{n}` and fails closed.
  *
- * Workflow runs (`/actions/runs`) are deliberately not fetched: they need a
- * separate `actions: read` scope and would report the same CI twice.
+ * This source stays check-run based. Workflow runs are a different signal and a
+ * different scope (`actions: read`); they live in `github.actions` instead, so a
+ * repository can watch one, the other, or both deliberately.
  */
 async function pollChecks(context: SourceContext): Promise<SourceResult> {
   const { target, state, transport, options, now } = context;
   const pull = await transport.getPullRequest({
     owner: target.owner,
     repo: target.repo,
-    number: target.number,
+    number: requireNumber(target),
     ...(state.etags?.[pullURL(target)] !== undefined ? { etag: state.etags[pullURL(target)] } : {})
   });
 
@@ -327,6 +356,118 @@ async function pollChecks(context: SourceContext): Promise<SourceResult> {
   };
 }
 
+/**
+ * `github.actions`: the repository's workflow runs (or one workflow's, or one
+ * branch's). Run-level only — jobs are out of scope.
+ *
+ * GitHub has **no `since`/`updated` filter** for workflow runs: the list is
+ * creation-ordered, and a run that was created an hour ago and just finished
+ * does not move to page 1. The watch therefore keeps a *window*: the cursor's
+ * `runFloor` is the `created_at` of the oldest run in the tracked window, and
+ * every poll re-reads from the newest page down to that floor, fingerprinting
+ * each run as `(run id, status, conclusion, updated_at)` so only transitions
+ * are reported. If new runs push the floor past `maxPages`, the poll fails
+ * closed as `backlog` instead of silently dropping the middle.
+ *
+ * The first successful poll records a baseline (no wake), exactly like
+ * `github.checks`: a new watch reports *changes*, not the current CI snapshot.
+ */
+async function pollActions(context: SourceContext): Promise<SourceResult> {
+  const { target, state, transport, options, now } = context;
+  const floor = state.cursor.runFloor;
+  const baseline = floor === undefined;
+  const firstURL = runsURL(target, 1);
+  const cached = state.etags?.[firstURL];
+
+  const observed: WakeEvent[] = [];
+  let firstPageETag: string | undefined;
+  let notModified = false;
+  let page = 1;
+  let hasNextPage = true;
+  let reachedFloor = false;
+  let singlePage = true;
+  let oldestCreatedAt: string | undefined;
+
+  while (hasNextPage && page <= options.maxPages) {
+    const response = await transport.listWorkflowRuns({
+      owner: target.owner,
+      repo: target.repo,
+      ...(target.workflow !== undefined ? { workflow: target.workflow } : {}),
+      ...(target.branch !== undefined ? { branch: target.branch } : {}),
+      page,
+      ...(page === 1 && cached !== undefined ? { etag: cached } : {})
+    });
+    if (response.notModified) {
+      notModified = true;
+      break;
+    }
+    observed.push(...response.events);
+    if (page === 1 && response.etag !== undefined) {
+      firstPageETag = response.etag;
+    }
+    if (page > 1) {
+      singlePage = false;
+    }
+    // The list is creation-ordered, so the page's oldest `created_at` is the
+    // boundary candidate. An empty page has none and cannot extend the window.
+    let oldest: string | undefined;
+    for (const event of response.events) {
+      if (oldest === undefined || event.createdAt < oldest) {
+        oldest = event.createdAt;
+      }
+    }
+    if (oldest !== undefined && (oldestCreatedAt === undefined || oldest < oldestCreatedAt)) {
+      oldestCreatedAt = oldest;
+    }
+    if (!baseline && floor !== undefined && oldest !== undefined && oldest <= floor) {
+      reachedFloor = true;
+      break;
+    }
+    hasNextPage = response.hasNextPage;
+    page += 1;
+  }
+
+  if (notModified) {
+    return {
+      events: [],
+      cursor: state.cursor,
+      etags: state.etags ?? {},
+      notModified: true
+    };
+  }
+
+  if (!baseline && !reachedFloor && hasNextPage) {
+    throw new TransportFailure(
+      "backlog",
+      `workflow runs need more than ${options.maxPages} pages to reach the cursor`
+    );
+  }
+
+  const advanced = advanceCursor(state.cursor, observed);
+  const cursor: WakeCursor = {
+    ...advanced,
+    // An empty baseline still needs a floor, otherwise the next run to appear
+    // would be swallowed as a second baseline instead of waking.
+    runFloor: baseline ? (oldestCreatedAt ?? new Date(now()).toISOString()) : (floor as string)
+  };
+
+  // Re-reading the window is cheap for the HTTP cache but would overflow the
+  // bounded `seen` ring; `updated_at` only moves forward, so anything not newer
+  // than the previous boundary is an unchanged fingerprint by definition.
+  const events = baseline
+    ? observed
+    : observed.filter((event) => event.updatedAt >= state.cursor.lastSeenAt);
+
+  // Same rule as `github.checks`: a page-1 validator proves the whole tracked
+  // set unchanged only when it was the only page and was not full.
+  const etags: Record<string, string> = {};
+  if (singlePage && observed.length < GITHUB_PAGE_SIZE && firstPageETag !== undefined) {
+    etags[firstURL] = firstPageETag;
+  }
+
+  return { events, cursor, etags, notModified: false, baseline };
+}
+
 /** Dispatch to the adapter for this watch target's source kind. */
 export function pollSource(context: SourceContext): Promise<SourceResult> {
   switch (context.target.kind) {
@@ -336,6 +477,8 @@ export function pollSource(context: SourceContext): Promise<SourceResult> {
       return pollTimeline(context);
     case "github.checks":
       return pollChecks(context);
+    case "github.actions":
+      return pollActions(context);
     default: {
       const kind: never = context.target.kind;
       return Promise.reject(

@@ -14,7 +14,7 @@ import {
   WATCH_TTL_MS
 } from "../src/poller.js";
 import { SubscriptionStore, WatchStore } from "../src/state.js";
-import type { SubscriptionRecord } from "../src/types.js";
+import type { SubscriptionRecord, WakeEvent, WakeSubscription } from "../src/types.js";
 import {
   checksPage,
   deferred,
@@ -26,6 +26,7 @@ import {
   makeStores,
   page,
   record,
+  runsPage,
   seedWatch,
   tempDir,
   timelinePage
@@ -947,6 +948,176 @@ describe("createPoller — migration and lifecycle", () => {
       await poller.join(only);
       await poller.leave(only.subscription.id);
       expect(watches.get(keyOf(only))?.state.subscribers).toEqual([]);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+});
+
+function runEvent(
+  runID: string,
+  status: string,
+  conclusion: string | null,
+  createdAt: string,
+  updatedAt: string
+): WakeEvent {
+  return {
+    id: `run:${runID}:${status}:${conclusion ?? ""}:${updatedAt}`,
+    kind: "run",
+    author: "alice",
+    createdAt,
+    updatedAt,
+    url: `https://github.com/acme/widgets/actions/runs/${runID}`,
+    body: "",
+    title: `CI: ${status}${conclusion ? ` / ${conclusion}` : ""}`
+  };
+}
+
+function actionsRecord(over: Partial<WakeSubscription> = {}): SubscriptionRecord {
+  return record({ kind: "github.actions", number: undefined, ...over });
+}
+
+describe("createPoller — github.actions", () => {
+  it("records the baseline without waking, then wakes on a transition", async () => {
+    const { temp, store, watches, transport, notices, poller, clockRef } = await setup();
+    try {
+      const a = actionsRecord({ workflow: "ci.yml", branch: "main" });
+      await poller.join(a);
+      transport.setRuns([
+        runsPage([runEvent("1", "queued", null, "2026-01-01T00:20:00Z", "2026-01-01T00:20:00Z")], {
+          etag: 'W/"r"'
+        })
+      ]);
+
+      const baseline = await poller.tick(a.subscription.id);
+      expect(baseline.status).toBe("no-change");
+      expect(notices).toHaveLength(0);
+      expect(watches.get(keyOf(a))?.state.cursor.runFloor).toBe("2026-01-01T00:20:00Z");
+      expect(store.get(a.subscription.id)?.state.pending).toHaveLength(0);
+      expect(transport.requests.runs[0]).toMatchObject({ workflow: "ci.yml", branch: "main" });
+
+      clockRef.advance(60_000);
+      transport.setRuns([
+        runsPage([
+          runEvent("1", "in_progress", null, "2026-01-01T00:20:00Z", "2026-01-01T00:21:00Z")
+        ])
+      ]);
+      const transition = await poller.tick(a.subscription.id);
+
+      expect(transition.status).toBe("delivered");
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.source).toBe("github.actions");
+      expect(notices[0]?.text).toContain("acme/widgets actions");
+      expect(notices[0]?.text).toContain("workflow=ci.yml");
+      expect(store.get(a.subscription.id)?.state.pending[0]?.title).toContain("in_progress");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("delivers queued → in_progress → success once each and dedupes a replay", async () => {
+    const { temp, store, transport, notices, poller, clockRef } = await setup();
+    try {
+      const a = actionsRecord();
+      await poller.join(a);
+      transport.setRuns([
+        runsPage([runEvent("9", "queued", null, "2026-01-01T00:20:00Z", "2026-01-01T00:20:00Z")])
+      ]);
+      await poller.tick(a.subscription.id);
+      expect(notices).toHaveLength(0);
+
+      clockRef.advance(60_000);
+      transport.setRuns([
+        runsPage([
+          runEvent("9", "in_progress", null, "2026-01-01T00:20:00Z", "2026-01-01T00:21:00Z")
+        ])
+      ]);
+      await poller.tick(a.subscription.id);
+      expect(notices).toHaveLength(1);
+
+      clockRef.advance(60_000);
+      const success = [
+        runEvent("9", "completed", "success", "2026-01-01T00:20:00Z", "2026-01-01T00:22:00Z")
+      ];
+      transport.setRuns([runsPage(success)]);
+      await poller.tick(a.subscription.id);
+      expect(notices).toHaveLength(2);
+
+      clockRef.advance(60_000);
+      transport.setRuns([runsPage(success)]);
+      const replay = await poller.tick(a.subscription.id);
+
+      expect(replay.status).toBe("no-change");
+      expect(notices).toHaveLength(2);
+      expect(store.get(a.subscription.id)?.state.pending).toHaveLength(2);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("shares one actions fetcher between two sessions and wakes both", async () => {
+    const { temp, store, watches, transport, notices, poller, clockRef } = await setup();
+    try {
+      const a = actionsRecord({ sessionID: "ses_a", workflow: "ci.yml" });
+      const b = actionsRecord({ sessionID: "ses_b", workflow: "ci.yml" });
+      await poller.join(a);
+      await poller.join(b);
+
+      transport.setRuns([
+        runsPage([runEvent("3", "queued", null, "2026-01-01T00:20:00Z", "2026-01-01T00:20:00Z")])
+      ]);
+      await poller.tickDue();
+      expect(notices).toHaveLength(0);
+      expect(watches.get(keyOf(a))?.state.subscribers).toHaveLength(2);
+
+      clockRef.advance(60_000);
+      transport.setRuns([
+        runsPage([
+          runEvent("3", "completed", "failure", "2026-01-01T00:20:00Z", "2026-01-01T00:25:00Z")
+        ])
+      ]);
+      await poller.tickDue();
+
+      expect(transport.requests.runs).toHaveLength(2);
+      expect(notices).toHaveLength(2);
+      expect(notices.map((notice) => notice.sessionID).sort()).toEqual(["ses_a", "ses_b"]);
+      expect(store.get(a.subscription.id)?.state.pending).toHaveLength(1);
+      expect(store.get(b.subscription.id)?.state.pending).toHaveLength(1);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("keeps an actions watch and a checks watch on the same repo separate", async () => {
+    const { temp, transport, notices, poller, clockRef } = await setup();
+    try {
+      const actions = actionsRecord({ sessionID: "ses_a" });
+      const checks = record({ kind: "github.checks", sessionID: "ses_b", number: 7 });
+      await poller.join(actions);
+      await poller.join(checks);
+
+      transport.setRuns([
+        runsPage([runEvent("3", "queued", null, "2026-01-01T00:20:00Z", "2026-01-01T00:20:00Z")])
+      ]);
+      transport.setPull({ notModified: false, headSHA: "aaa" });
+      transport.setChecks([checksPage([])]);
+      await poller.tickDue();
+
+      expect(transport.requests.runs).toHaveLength(1);
+      expect(transport.requests.pull).toHaveLength(1);
+
+      clockRef.advance(60_000);
+      transport.setRuns([
+        runsPage([
+          runEvent("3", "completed", "success", "2026-01-01T00:20:00Z", "2026-01-01T00:30:00Z")
+        ])
+      ]);
+      transport.setPull({ notModified: true, headSHA: "" });
+      transport.setChecks([checksPage([], { notModified: true })]);
+      await poller.tickDue();
+
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.sessionID).toBe("ses_a");
     } finally {
       await temp.cleanup();
     }
