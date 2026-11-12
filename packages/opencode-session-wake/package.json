@@ -1,0 +1,69 @@
+{
+  "name": "@vymalo/opencode-session-wake",
+  "version": "0.20.0",
+  "description": "OpenCode plugin that watches a GitHub issue/PR thread and wakes the session that subscribed to it: durable per-subscription cursor under the state root, dedupe by comment id, no GitHub writes, and an untrusted-content notice delivered through ctx.session.synthetic.",
+  "license": "MIT",
+  "author": "vymalo contributors",
+  "homepage": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit.git",
+    "directory": "packages/opencode-session-wake"
+  },
+  "bugs": {
+    "url": "https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-v2",
+    "github",
+    "notifications",
+    "session",
+    "wake"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./lib": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs",
+    "lint": "biome lint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.2.6"
+  },
+  "devDependencies": {
+    "effect": "4.1.0",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  },
+  "peerDependencies": {
+    "effect": "^4.0.0"
+  }
+}

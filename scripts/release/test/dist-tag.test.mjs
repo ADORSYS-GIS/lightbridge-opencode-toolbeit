@@ -59,7 +59,7 @@ describe("npmMeetsFloor", () => {
 });
 
 describe("plan", () => {
-  it("plans all thirteen and records latest", async () => {
+  it("plans every package and records latest", async () => {
     const r = await plan({
       packages,
       tag: "opencode-v1",
@@ -68,7 +68,7 @@ describe("plan", () => {
       fetch: fakeFetch()
     });
     expect(r.problems).toEqual([]);
-    expect(r.todo).toHaveLength(13);
+    expect(r.todo).toHaveLength(packages.length);
     expect(r.todo[0].latestBefore).toBe("0.18.0");
   });
   it("skips packages already tagged (idempotent)", async () => {
@@ -142,11 +142,11 @@ describe("main", () => {
     expect(await main("plan", { env: e(), fetch: fakeFetch(), getNpmVersion: ok, run })).toBe(0);
     expect(run).not.toHaveBeenCalled();
   });
-  it("apply tags all thirteen", async () => {
+  it("apply tags every package", async () => {
     quiet();
     const run = vi.fn(() => 0);
     expect(await main("apply", { env: e(), fetch: fakeFetch(), getNpmVersion: ok, run })).toBe(0);
-    expect(run).toHaveBeenCalledTimes(13);
+    expect(run).toHaveBeenCalledTimes(packages.length);
   });
   it("a failed plan blocks apply entirely", async () => {
     quiet();
