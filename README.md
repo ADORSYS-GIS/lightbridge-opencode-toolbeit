@@ -42,6 +42,7 @@ The **OpenCode Toolbelt** is the set of `@vymalo/*` plugins that fill those gaps
 | 🌉 **lightbridge** | [`@vymalo/opencode-lightbridge`](packages/opencode-lightbridge) | The **umbrella** — one login, one credential shared across the **gateway** bearer *and* **OTEL** export. Composes `auth-core` + `core-otel` over a single `TokenRuntime`; each module opt-in, MCP out of scope. |
 | **models-info** | [`@vymalo/opencode-models-info`](packages/opencode-models-info) | Enrich your model list with real **metadata** — context length, output limit, USD/M-token cost, modalities, and `tool_call` / `reasoning` / `attachment` flags — from any OpenRouter-shaped `/models` endpoint. |
 | **ratelimit** | [`@vymalo/opencode-ratelimit`](packages/opencode-ratelimit) | Teach a provider to **respect the rate-limit headers** your gateway already sends. Reads Envoy / IETF draft-03 `x-ratelimit-*`, throttles before you hit the wall, and backs off + retries on `429`. |
+| **session-wake** | [`@vymalo/opencode-session-wake`](packages/opencode-session-wake) | **Wake a running session when a GitHub thread changes.** Watches an issue/PR, keeps a durable cursor under the state root, dedupes by comment id, and injects a short *untrusted* notice — never the comment body, never a GitHub write. |
 | **browser** | [`@vymalo/opencode-browser`](packages/opencode-browser) | Give the model **hands in a real browser**: 34 `browser_*` tools (open, click, type, scroll, screenshot, snapshot, human-in-the-loop feedback…) over a localhost bridge that a companion extension drives. |
 | **browser-mcp** | [`@vymalo/opencode-browser-mcp`](packages/opencode-browser-mcp) | The same browser tools, exposed as an **MCP stdio server** — so Claude Code, Cursor, Cline, and any other MCP client can drive the extension too. |
 | **devtools** | [`@vymalo/opencode-devtools`](packages/opencode-devtools) | A belt of everyday **local utilities** the model can call — `math` (precise eval, units, stats), `codec` (base64/hex/url, JWT decode, gzip), `crypto` (hash/hmac, uuid/ulid, keypairs), `datetime` (parse/format/diff, timezones, cron), `convert` (JSON/YAML/TOML/CSV + JSONPath), and an opt-in, SSRF-guarded `http` client. Deterministic, zero-auth, no server. |
@@ -309,13 +310,14 @@ Full index: [`docs/README.md`](docs/README.md). The highlights:
 
 ## 🗂️ Workspace layout
 
-This is a [pnpm](https://pnpm.io) monorepo. Thirteen packages publish to npm under `@vymalo`; four are private.
+This is a [pnpm](https://pnpm.io) monorepo. Fourteen packages publish to npm under `@vymalo`; four are private.
 
 | Package | Published as | |
 | --- | --- | --- |
 | [`packages/opencode-oauth2`](packages/opencode-oauth2) | `@vymalo/opencode-oauth2` | OAuth2/OIDC auth + model discovery |
 | [`packages/opencode-models-info`](packages/opencode-models-info) | `@vymalo/opencode-models-info` | Auth-agnostic model metadata enrichment |
 | [`packages/opencode-ratelimit`](packages/opencode-ratelimit) | `@vymalo/opencode-ratelimit` | Auth-agnostic rate-limit awareness |
+| [`packages/opencode-session-wake`](packages/opencode-session-wake) | `@vymalo/opencode-session-wake` | Durable GitHub thread watch that wakes the owning session |
 | [`packages/opencode-browser`](packages/opencode-browser) | `@vymalo/opencode-browser` | Auth-agnostic browser automation + localhost bridge |
 | [`packages/opencode-browser-mcp`](packages/opencode-browser-mcp) | `@vymalo/opencode-browser-mcp` | MCP server exposing the browser tools to any MCP client |
 | [`packages/opencode-devtools`](packages/opencode-devtools) | `@vymalo/opencode-devtools` | Auth-agnostic local developer utilities |
@@ -363,7 +365,7 @@ For end-to-end usage against a local OpenCode install, see [GETTING_STARTED.md](
 
 ## 🌟 Status
 
-Early but functional, and used in anger. All thirteen packages are published and on the same version line; the browser extension ships alongside as a Release asset and on the Chrome Web Store / Firefox AMO. Public API may still shift before `1.0` — roadmap in [`plans/prd.md`](plans/prd.md).
+Early but functional, and used in anger. All fourteen packages are published and on the same version line; the browser extension ships alongside as a Release asset and on the Chrome Web Store / Firefox AMO. Public API may still shift before `1.0` — roadmap in [`plans/prd.md`](plans/prd.md).
 
 **Still on OpenCode v1?** `0.18.0` and later need an OpenCode v2 host. `0.17.0` is the last v1-compatible release; install it with `@0.17.0` (or the `opencode-v1` dist-tag once published). It is frozen, with no backported fixes, so it defers the upgrade rather than avoiding it. See [Staying on v1](docs/migration-v2.md#staying-on-v1). The six packages without a per-package migration note (`auth-core`, `core-otel`, `provider-sync`, `browser`, `browser-mcp`, `devtools-mcp`) are covered here only, since their READMEs have no "Migrating from v1" section to extend.
 

@@ -31,6 +31,11 @@ install; come here when you need depth on a specific topic.
 | --- | --- |
 | [ratelimit.md](ratelimit.md) | Reading Envoy `x-ratelimit-*` headers, throttle/backoff state machine, tiers & scope, the timeout caveat |
 
+### `@vymalo/opencode-session-wake` — GitHub thread → session wake
+| Page | When you need it |
+| --- | --- |
+| [session-wake.md](session-wake.md) | The `wake_*` tools, durable cursor/ETag layout, dedupe + backoff, the untrusted-notice security model, and the host-API limitation |
+
 ### `@vymalo/opencode-browser` (+ `-mcp`) — browser automation
 | Page | When you need it |
 | --- | --- |

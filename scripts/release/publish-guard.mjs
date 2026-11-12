@@ -44,6 +44,7 @@ export const PUBLISH_ORDER = [
   "opencode-oauth2",
   "opencode-models-info",
   "opencode-ratelimit",
+  "opencode-session-wake",
   "opencode-browser",
   "opencode-browser-mcp",
   "opencode-devtools",
