@@ -64,12 +64,14 @@ wake_subscribe (session B) ─┘                       │
 
 Each poll:
 
-1. fetches once and computes the newly observed events **once**;
-2. persists the shared cursor/ETags/`seen` (after the subscribers, see below);
-3. fans out to every subscriber, applying that subscriber's filters;
-4. appends to each subscriber's `pending`;
+1. takes (or renews) the watch **lease**; a poller that does not hold it stops here;
+2. reloads the subscriptions and the shared watch from disk, then fetches once and computes the newly
+   observed events **once**;
+3. appends each subscriber's fresh events to its `pending` in one `updateState` write, together with
+   its `seen` ring and loop state (never replacing an event a concurrent `wake_next` drained);
+4. persists the shared cursor/ETags/`seen`;
 5. injects `ctx.session.synthetic` **only** for subscribers that received at least one event and are
-   not inside a loop cooldown.
+   not inside a loop cooldown, with `count` read back from the persisted queue.
 
 Delivery state (`pending`, `seen`, loop guard) stays **per subscriber**, so sessions remain isolated
 even when they share a fetcher: `wake_next` in session A never drains session B's events.
@@ -173,7 +175,7 @@ afterwards). Every other value is left unchanged:
 | Preserved | Why it matters |
 | --- | --- |
 | `state.pending` (unread events) | The new session can `wake_next` exactly what the old one had not read. |
-| `state.seen` ring and `state.lastError` | Adoption does not re-append or re-deliver an event. (The separate multi-poller duplicate-delivery limitation is unchanged.) |
+| `state.seen` ring and `state.lastError` | Adoption does not re-append or re-deliver an event. The poller's per-watch lease and disk reload are unchanged by adoption. |
 | `state.loop` (`wakes`, `suppressed`, `loopSuspected`, `cooldownUntil`) | A crash loop cannot reset its budget by adopting. |
 | shared `watches/<hash>.json` — `cursor`, `etags`, `seen`, `consecutiveFailures`, `nextPollAt`, `subscribers` | The shared fetcher is not reset and does not re-fetch history; the subscription id (the refcount key) is unchanged. |
 | subscription `id`, source, filters, interval, `createdAt`, existing `project` | Adoption is a move, not a re-subscribe. A legacy record's missing `project` is the one value added. |
@@ -210,9 +212,10 @@ session.
    shows the old watch with `owner=ses_old orphan=true pending=N`.
 4. `wake_resume` (or `wake_adopt`) changes the owner to the new session. Pending stays `N`; cursor,
    ETags, shared `seen` and the refcount are unchanged.
-5. `wake_next` drains the old pending events. The next poll delivers only genuinely new events, to
-   the new session; the shared `seen` ring prevents a duplicate **within that poller**. The separate
-   multi-poller duplicate-delivery gap described under Known limitations is not changed by adoption.
+5. `wake_next` drains the old pending events and marks their ids in the shared `seen` ring. The next
+   poll delivers only genuinely new events, to the new session; the lease holder is the only poller
+   and the shared `seen` ring prevents a duplicate. The residual limits (filesystem atomicity, tool
+   snapshots) are described under Known limitations.
 
 ## Tools
 
@@ -283,12 +286,14 @@ nor the provider definition.
 
 ## State
 
-Two files per watch under the **state root** (ADR-0022):
+Two state files per watch (subscription + shared watch), plus a lease, under the **state root**
+(ADR-0022):
 
 ```
 <stateRoot>/opencode-session-wake/
 ├── subscriptions/<subscriptionID>.json   # one per subscriber: filters + private delivery state
-└── watches/<hash>.json                   # one per watch key: shared cursor, ETags, dedupe, backoff
+├── watches/<hash>.json                   # one per watch key: shared cursor, ETags, dedupe, backoff
+└── leases/<hash>.json                    # one per watch key: the poller allowed to deliver
 ```
 
 `<stateRoot>` is `~/Library/Application Support` (macOS), `$XDG_STATE_HOME` or `~/.local/state`
@@ -304,6 +309,12 @@ before project identity existed simply has no `project` key; it is still read.
 **Watch** (`watches/`): the key and target, `cursor`, `etags` (by request URL), the shared `seen`
 ring, `consecutiveFailures`, `lastError` (fetch), `lastPollAt`, `nextPollAt`, the subscriber id list
 and `lastTouchedAt`.
+
+**Lease** (`leases/`): `{ key, owner, expiresAt }`. `owner` is a random per-poller id (never a
+session id or a token). It is claimed with an atomic exclusive create (`open(..., "wx")`), renewed
+on every poll and released by a graceful `stop()`. A lease that is unreadable but **fresh** is
+treated as a claim still being written (fail closed); only an unreadable file older than one TTL is
+reclaimed as corrupt leftovers.
 
 No token is ever written to these files.
 
@@ -334,15 +345,31 @@ No token is ever written to these files.
 
 - **One delivery per event per subscriber.** The shared `seen` ring stops the fetcher re-accepting an
   event; each subscriber's own `seen` ring stops it re-appending one. `wake_next` removes events from
-  `pending`, which is the actual delivery.
-- **Persist before wake, in the right order.** On a poll with new events the plugin writes each
-  affected subscriber (`pending` + loop state) **first**, then the shared cursor/ETags/`seen`, then
-  wakes. A crash between the two writes re-observes the events on the next poll, and the subscriber's
-  `seen` ring suppresses the duplicate; a crash before the wake leaves the events readable through
-  `wake_next` and announced at startup.
-- **Concurrent polls cannot duplicate.** Overlapping ticks for one watch key share a single in-flight
-  promise — two sessions, or a timer tick plus a manual `wake_subscribe` poll, produce one fetch and
-  one fan-out.
+  `pending`, which is the actual delivery, and then records their ids in the shared `seen` ring
+  (`wake_seen_marked`). The ring is trimmed to `seenLimit`, but a drained id is **never evicted by
+  that trim**: if every remaining id is protected the ring may exceed the cap until a later trim,
+  because losing the proof of a completed read would allow a second wake.
+- **One durable delivery write, then the notice.** On a poll with new events the plugin writes each
+  affected subscriber once with `updateState`: the fresh events are **appended** to the on-disk
+  `pending`, the subscriber `seen` ring and loop state are merged, and an event already drained by a
+  concurrent `wake_next` is not resurrected. The shared watch (`cursor`, ETags, `seen`) is written
+  before any notice, and the notice is sent only after both writes resolve. A crash between the two
+  re-observes the events on the next poll; the subscriber's persisted `seen` ring suppresses the
+  duplicate. If `updateState` returns `undefined` (the record was removed mid-poll), no notice is
+  sent.
+- **The count is the drainable count.** A notice's `count` is read back from the queue that was
+  actually persisted: the number of this poll's events a following `wake_next` can return. It is not
+  `result.events.length` (which includes events filtered out for this subscriber) and not a number
+  computed before the write. `wake_next` returns all unread events up to its `limit` (default 20), so
+  a batch larger than that is read in more than one call; the notice still counts only the events this
+  poll appended.
+- **One live poller per watch.** A per-watch lease (`owner` + expiry) is acquired before the fetch
+  and renewed on every poll. A poller that cannot acquire it skips the whole poll — no HTTP request,
+  no pending append, no notice — and backs off in memory. The TTL is
+  `clamp(2 × negotiated interval + 30 s, 60 s, 2 × maxIntervalMs)`: two intervals tolerate a delayed
+  poll, the floor keeps a fast test interval from expiring mid-poll, and the ceiling bounds crash
+  failover. A graceful `stop()` releases every lease immediately; a crash waits for expiry. Overlapping
+  ticks **inside** one poller still share a single in-flight promise.
 - **Failures never advance the cursor.** `401`, `403`, `404`, `429`, `5xx`, a network error, a
   malformed payload or a timeline backlog deeper than `maxPages` leave the shared cursor/ETags/`seen`
   and every subscriber's `pending` untouched; the poll is logged as `wake_poll_failed` and
@@ -438,35 +465,24 @@ watch keeps its cursor — no partial state is claimed.
 
 ## Known limitations
 
-- **Duplicate delivery across poller instances (observed live, not fixed here).** The registry is
-  per plugin instance, and `inflight` only dedupes overlapping ticks **inside one poller**. Two
-  poller instances over one state root — two OpenCode processes, or the plugin loaded twice in one
-  process — each load the same subscriptions, each poll the same watch, and each call
-  `ctx.session.synthetic` for the subscriber. A live run produced:
-
-  ```text
-  14:01:14.474 wake_notice_delivered subscriptionID=wake_5c18f0478692c558 sessionID=ses_e3637cfddffeKGnvtGJihmjQhZ count=1
-  14:01:14.623 wake_notice_delivered subscriptionID=wake_5c18f0478692c558 sessionID=ses_e3637cfddffeKGnvtGJihmjQhZ count=1
-  ```
-
-  — two notices for the same `subscriptionID` and `sessionID` 149 ms apart. A later notice arrived
-  with `pending=0` and an unchanged cursor, and `wake_next` answered "No unread comments." There is
-  **no cross-instance or cross-process lease/leader** yet. The fix is a single-owner guard — e.g. a
-  lease file per watch key (`owner` + expiry, renewed each poll) so only one live poller delivers,
-  with lease-expiry failover after a crash — plus a state reload for tool calls served by a
-  non-owner. **Adoption does not fix this**: "no duplicate wake" in the adoption section means
-  adoption itself neither re-delivers nor loses an event within one poller; the multi-poller gap is
-  pre-existing and remains. Adoption is also a read-modify-write with no cross-process lock, so two
-  processes adopting the same record concurrently are last-writer-wins; **in one process the writes
-  are serialized per subscription, but two concurrent `wake_adopt` calls are still last-writer-wins**
-  (the later call takes ownership). The Phase 3 plan is a lease (or a small local broker) so one
-  process polls a key while the others consume shared state.
-- **A second store instance keeps its loaded snapshot (H3).** `SubscriptionStore.load()` is
-  idempotent and does not re-read after the first load, so instance B over the same state root keeps
-  the old `sessionID` after instance A adopts. B can still list, drain and deliver for the old owner
-  until it restarts; tool calls in B do not re-stat the files. This is the same instance-boundary
-  limitation as the duplicate-delivery note above, and it is **not fixed** by adoption. A reload (or
-  a re-stat) on tool calls plus a single-owner lease is the follow-up.
+- **Cross-process delivery is single-writer, not global exactly-once.** A lease file per watch key
+  (`owner` + expiry) now makes one live poller the only fetcher and the only deliverer for that key;
+  a second poller skips the whole poll. The guarantee rests on the filesystem honouring an atomic
+  exclusive create (`open(..., "wx")`) and atomic rename. On a filesystem that does not (some network
+  shares), two claims can both succeed, and clock skew can expire a live lease early. There is
+  therefore **no claim of global exactly-once across arbitrary filesystems** — only a single-writer
+  guard on a local state root. `wake_next` is also not lease-arbitrated: it re-reads the queue from
+  disk, appends only its own delta on the next poll, and marks drained ids in the shared `seen` ring,
+  but two processes can still interleave a tool write with a poll. The append-merge and the
+  subscriber `seen` ring are the guards there, not a transaction. Two processes adopting the same
+  record concurrently remain last-writer-wins (in one process the writes are serialized per
+  subscription).
+- **Tool calls other than `wake_next` keep their loaded snapshot.** `wake_next` re-reads the
+  subscription and the watch from disk, and the poller reloads both stores at the start of every
+  poll, so the observed "pending=1 but No unread comments" case is fixed. `wake_list` and
+  `wake_adopt` still read the in-memory snapshot loaded at startup: after another process adopts a
+  record, they can show the old owner until this process restarts. A cross-process reload for those
+  tools is the remaining follow-up.
 - **Adoption moves ownership, it does not share it.** After `wake_adopt` / `wake_resume` the previous
   session can no longer list, drain, unsubscribe or receive wakes for that watch. An already-queued
   synthetic notice in the old session cannot be recalled (it can still be seen, but `wake_next`
@@ -521,7 +537,11 @@ watch keeps its cursor — no partial state is claimed.
 | `github.timeline` / `github.checks` against the live GitHub API | Not yet verified live; covered by tests with a fake transport and by mapping tests over real GitHub payload shapes |
 | `github.actions` against the live GitHub API | Not yet verified live; covered by tests with a fake transport, mapping tests over real workflow-run payload shapes, and a typed `actions: read` failure test |
 | Shared registry (two sessions, one fetcher, one wake each) | **Not yet verified live — required** (steps below) |
-| Restart adoption (`wake_list` orphans → `wake_resume` → `wake_next`, no adoption-induced duplicate) | **Not yet verified live — required** (steps below); covered by the restart-simulation test with two stores over one state directory. This does not cover the separate multi-poller duplicate-delivery gap. |
+| Restart adoption (`wake_list` orphans → `wake_resume` → `wake_next`, no adoption-induced duplicate) | **Not yet verified live — required** (steps below); covered by the restart-simulation test with two stores over one state directory. |
+| Cross-poller dedupe (two pollers, one state root, one event → one notice, one pending entry) | **Verified by test** — two independent stores/pollers race for one watch; exactly one lease holder fetches and delivers, the loser makes no request and appends nothing. Not yet verified live. |
+| Lease failover after a crash (expired lease → survivor delivers once) | **Verified by test** with a controllable clock; not yet verified live. |
+| Notice `count` equals the following `wake_next` count (one subscriber and two subscribers) | **Verified by test** — the count is read back from the persisted queue, not from the fetch result. Not yet verified live. |
+| `wake_next` after another process appended (stale store) | **Verified by test** — `takePending` re-reads the queue from disk. Not yet verified live. |
 | Adoption during an in-flight poll (owner not reverted, notice to the new owner) | **Verified by test** — a deferred transport holds the fetch while `wake_adopt` lands; the durable owner is the new session and no notice goes to the old one. Not yet verified live. |
 | Loop guard / `ignoreAuthors` against a real comment | Not yet verified live |
 
@@ -539,7 +559,10 @@ watch keeps its cursor — no partial state is claimed.
    synthetic notice for a shared target (one GitHub request, two wakes), and `wake_next` returns the
    event in each; for different targets, only the owning session wakes.
 6. Confirm one fetch for a shared target: the plugin log shows a single `wake_notice_delivered` pair
-   per poll (one per subscriber) and no duplicate `wake_poll_failed`/HTTP pair.
+   per poll (one per subscriber) and no duplicate `wake_poll_failed`/HTTP pair. `leases/` holds one
+   file for the watch; the other process logs `wake_lease_held_elsewhere` and makes **no** HTTP
+   request. Kill the lease holder without a graceful stop and confirm the survivor takes over after
+   the TTL and delivers the event once.
 7. In session A, call `wake_unsubscribe` with session B's subscription id. Expect "not found for this
    session", and B's watch must still be listed in B.
 8. Unsubscribe B's watch too. The fetcher must stop (no further `wake_notice_delivered` for that

@@ -605,10 +605,14 @@ describe("restart simulation", () => {
       const cursorBefore = first.watches.get(key)?.state.cursor;
       const etagsBefore = first.watches.get(key)?.state.etags;
 
-      // Restart: new stores/poller over the same state directory, new session.
+      // Restart: the old poller is gone, so it releases its watch lease. (A
+      // crash cannot release; that case waits for lease expiry.)
+      await first.poller.stop();
+
+      // New stores/poller over the same state directory, new session.
       const second = await harness(temp.dir, PROJECT_A);
       await second.poller.start();
-      second.poller.stop();
+      await second.poller.stop();
 
       const own = await exec(second.tool("wake_list"), {}, "ses_new");
       expect(own.content).toContain("No thread subscriptions for this session.");

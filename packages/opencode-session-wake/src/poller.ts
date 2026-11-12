@@ -1,5 +1,8 @@
+import { dirname, join } from "node:path";
+
 import type { WakeOptions } from "./config.js";
 import { TransportFailure, type GitHubTransport } from "./github.js";
+import { LeaseStore, leaseTtlMs, newLeaseOwnerID } from "./lease.js";
 import { decideWake, isIgnoredAuthor, normalizeAuthors, OriginatedSet } from "./loop.js";
 import type { Logger } from "./logging.js";
 import { pollSource, type SourceResult } from "./sources.js";
@@ -7,6 +10,7 @@ import {
   initialWatchState,
   subscriptionLabel,
   targetLabel,
+  trimSeenRing,
   type SubscriptionStore,
   targetOf,
   watchKey,
@@ -51,6 +55,14 @@ export interface PollerDeps {
   readonly deliver: (notice: WakeNotice) => Promise<void>;
   readonly logger: Logger;
   readonly options: WakeOptions;
+  /**
+   * The per-watch delivery lease. Defaults to a `leases/` directory beside the
+   * watch directory, so a library caller that already has stores gets the
+   * single-writer guard without extra wiring.
+   */
+  readonly leases?: LeaseStore;
+  /** Override the poller instance id (tests). Defaults to a random id. */
+  readonly ownerID?: string;
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly random?: () => number;
@@ -59,7 +71,11 @@ export interface PollerDeps {
 export interface Poller {
   /** Load both stores, migrate pre-registry state, recover backlogs, then poll. */
   start(): Promise<void>;
-  stop(): void;
+  /**
+   * Stop the timer and release every lease this poller holds. Async so a
+   * graceful shutdown can wait for the releases; callers may ignore the promise.
+   */
+  stop(): Promise<void>;
   /** Attach a subscriber to its shared watch (creating the watch if needed). */
   join(record: SubscriptionRecord): Promise<void>;
   /** Detach a subscriber. Returns false when it did not exist. */
@@ -72,6 +88,12 @@ export interface Poller {
   tickDue(): Promise<PollOutcome[]>;
   /** The watch a subscription reads through (created lazily). */
   watchFor(subscriptionID: string): Promise<WatchRecord | undefined>;
+  /**
+   * Mark drained event ids as seen on the shared watch. `wake_next` calls this
+   * after a successful drain so a later poll cannot re-add an event the model
+   * has already read.
+   */
+  markSeen(subscriptionID: string, eventIDs: readonly string[]): Promise<void>;
   /**
    * Record an event id this toolchain produced. A future GitHub write path calls
    * this with the returned comment id so the next fan-out suppresses the wake
@@ -196,12 +218,6 @@ function toFailure(error: unknown): TransportFailure {
   );
 }
 
-function trim(list: string[], limit: number): void {
-  if (list.length > limit) {
-    list.splice(0, list.length - limit);
-  }
-}
-
 /**
  * One registry per plugin instance. It owns the timer, one shared fetch state
  * per watch key, the per-subscriber fan-out, the loop guard and the failure
@@ -214,6 +230,16 @@ export function createPoller(deps: PollerDeps): Poller {
   const sleep = deps.sleep ?? sleepFor;
   const { store, watches, transport, logger, options } = deps;
   const originated = new OriginatedSet(now);
+  const ownerID = deps.ownerID ?? newLeaseOwnerID();
+  const leases =
+    deps.leases ??
+    new LeaseStore({
+      dir: join(dirname(watches.dir), "leases"),
+      logger,
+      now
+    });
+  /** Lease keys this poller holds; released together on `stop()`. */
+  const heldLeases = new Set<string>();
 
   const inflight = new Map<string, Promise<PollOutcome>>();
   let running = false;
@@ -224,9 +250,42 @@ export function createPoller(deps: PollerDeps): Poller {
     return watchKey(targetOf(subscription, options.apiBase));
   }
 
+  function ttlFor(subscribers: readonly SubscriptionRecord[]): number {
+    return leaseTtlMs(negotiatedIntervalMs(subscribers, options), options.maxIntervalMs);
+  }
+
+  /**
+   * Take (or renew) the watch lease before touching shared state. A live owner
+   * elsewhere means this poller must not fetch or deliver: a second fan-out is
+   * exactly the duplicate notice this guard exists to prevent.
+   */
+  async function acquireLease(
+    key: string,
+    subscribers: readonly SubscriptionRecord[]
+  ): Promise<boolean> {
+    const acquired = await leases.acquire(key, ownerID, ttlFor(subscribers));
+    if (acquired) {
+      heldLeases.add(key);
+      return true;
+    }
+    logger.debug("wake_lease_held_elsewhere", { key, owner: ownerID });
+    return false;
+  }
+
+  async function releaseLease(key: string): Promise<void> {
+    if (!heldLeases.delete(key)) {
+      return;
+    }
+    await leases.release(key, ownerID);
+    logger.debug("wake_lease_released", { key, owner: ownerID });
+  }
+
   async function ensureWatch(record: SubscriptionRecord): Promise<WatchRecord> {
     const key = keyOf(record.subscription);
-    const existing = watches.get(key);
+    // Re-read before creating: another process may have created this watch
+    // since this store loaded. Creating from the stale snapshot would reset its
+    // cursor and `seen` ring and drop every other subscriber.
+    const existing = (await watches.refresh(key)) ?? watches.get(key);
     if (existing) {
       if (!existing.state.subscribers.includes(record.subscription.id)) {
         existing.state.subscribers.push(record.subscription.id);
@@ -259,10 +318,52 @@ export function createPoller(deps: PollerDeps): Poller {
     ];
   }
 
-  async function pollWatch(watch: WatchRecord): Promise<PollOutcome> {
-    const subscribers = store.listByKey(watch.key, options.apiBase);
+  /**
+   * The subscribers of a watch as they exist **on disk**. The watch's own
+   * `subscribers` list discovers ids joined by another process; refreshing each
+   * record picks up its current owner, pending queue and `seen` ring. Without
+   * this, the lease holder would only ever serve the subscriptions it loaded at
+   * startup and every other session would starve.
+   */
+  async function currentSubscribers(watch: WatchRecord): Promise<SubscriptionRecord[]> {
+    const ids = new Set(watch.state.subscribers);
+    for (const record of store.listByKey(watch.key, options.apiBase)) {
+      ids.add(record.subscription.id);
+    }
+    const subscribers: SubscriptionRecord[] = [];
+    for (const id of ids) {
+      const record = await store.refresh(id);
+      if (record && keyOf(record.subscription) === watch.key) {
+        subscribers.push(record);
+      }
+    }
+    return subscribers;
+  }
+
+  async function pollWatch(candidate: WatchRecord): Promise<PollOutcome> {
+    // Re-read both stores first: another process may have advanced the cursor,
+    // added ids to `seen`, or created/removed a subscription since this store
+    // loaded. A watch that no longer exists on disk is skipped, never
+    // re-created from the stale snapshot.
+    await store.reload();
+    const watch = await watches.refresh(candidate.key);
+    if (!watch) {
+      return { key: candidate.key, status: "skipped", newEvents: 0, delivered: 0, suppressed: 0 };
+    }
+    const subscribers = await currentSubscribers(watch);
     if (subscribers.length === 0) {
       // Refcount 0: the fetcher stops. The cursor is kept for a later rejoin.
+      await releaseLease(watch.key);
+      return { key: watch.key, status: "skipped", newEvents: 0, delivered: 0, suppressed: 0 };
+    }
+
+    // One live poller per watch key. The loser must not fetch, append or wake:
+    // skipping the whole poll (not just the notice) also keeps the shared
+    // cursor from being advanced by a process that will not deliver.
+    if (!(await acquireLease(watch.key, subscribers))) {
+      // Do not write the watch file (the owner owns it); just back off in
+      // memory so this poller does not retry on every loop iteration.
+      watch.state.nextPollAt = now() + negotiatedIntervalMs(subscribers, options);
       return { key: watch.key, status: "skipped", newEvents: 0, delivered: 0, suppressed: 0 };
     }
 
@@ -302,6 +403,16 @@ export function createPoller(deps: PollerDeps): Poller {
       };
     }
 
+    // Renew before touching the shared state. A fetch that outlived the TTL (or
+    // a lease removed underneath us) means another poller may already own this
+    // watch; this poll must then write nothing, so the new owner can still
+    // deliver the event. Delivery itself is short and covered by the TTL.
+    if (!(await leases.renew(watch.key, ownerID, ttlFor(subscribers)))) {
+      heldLeases.delete(watch.key);
+      logger.warn("wake_lease_lost", { key: watch.key, owner: ownerID });
+      return { key: watch.key, status: "skipped", newEvents: 0, delivered: 0, suppressed: 0 };
+    }
+
     // Compute the new events ONCE, then fan out. Shared dedupe lives here.
     const newEvents: WakeEvent[] = [];
     for (const event of result.events) {
@@ -311,7 +422,7 @@ export function createPoller(deps: PollerDeps): Poller {
       watch.state.seen.push(event.id);
       newEvents.push(event);
     }
-    trim(watch.state.seen, options.seenLimit);
+    trimSeenRing(watch.state.seen, options.seenLimit);
 
     const deliveries: Array<{ subscriptionID: string; count: number }> = [];
     let suppressed = 0;
@@ -339,8 +450,17 @@ export function createPoller(deps: PollerDeps): Poller {
         }
         fresh.push(event);
       }
-      trim(subscriber.state.seen, options.seenLimit);
+      trimSeenRing(subscriber.state.seen, options.seenLimit);
+
       if (fresh.length === 0) {
+        // No pending append, but the seen ids still belong in the one durable
+        // delivery write so a crash cannot re-evaluate a filtered event.
+        if (newEvents.length > 0) {
+          await store.updateState(subscriber.subscription.id, subscriber.state, {
+            maxPending: options.maxPending,
+            seenLimit: options.seenLimit
+          });
+        }
         continue;
       }
 
@@ -351,16 +471,29 @@ export function createPoller(deps: PollerDeps): Poller {
 
       const decision = decideWake(subscriber.state.loop, options.loop, now());
       subscriber.state.loop = decision.next;
-      // Persist only the private state, re-read by id. An adoption may have
-      // replaced the record while the fetch was in flight; writing the
-      // captured subscription back would revert the owner. A record removed
-      // during the fetch returns `undefined` and is never re-created.
-      const persisted = await store.updateState(subscriber.subscription.id, subscriber.state);
+      // ONE durable delivery write: `pending`, the subscriber `seen` ring and
+      // the loop state. An adoption may have replaced the record while the
+      // fetch was in flight; updateState re-reads the owner from disk and
+      // returns `undefined` for a removed record, which must never produce a
+      // notice.
+      const persisted = await store.updateState(subscriber.subscription.id, subscriber.state, {
+        appended: fresh,
+        maxPending: options.maxPending,
+        seenLimit: options.seenLimit
+      });
       if (!persisted) {
         continue;
       }
+      // The notice count is read back from the queue that was actually
+      // persisted, not from a separately computed number. It is the number of
+      // this poll's events a following `wake_next` can return for them.
+      const freshIDs = new Set(fresh.map((event) => event.id));
+      const appended = persisted.state.pending.filter((event) => freshIDs.has(event.id)).length;
+      if (appended === 0) {
+        continue;
+      }
       if (decision.deliver) {
-        deliveries.push({ subscriptionID: persisted.subscription.id, count: fresh.length });
+        deliveries.push({ subscriptionID: persisted.subscription.id, count: appended });
       } else {
         suppressed += 1;
         logger.info("wake_suppressed_loop_suspected", {
@@ -384,13 +517,17 @@ export function createPoller(deps: PollerDeps): Poller {
     }
     watch.state.consecutiveFailures = 0;
     delete watch.state.lastError;
-    // Recompute membership from the store: a subscriber may have unsubscribed
-    // (or been adopted) during the fetch. Using the pre-fetch snapshot would
-    // resurrect a removed id in the watch file and keep the fetcher alive.
-    const currentSubscribers = store.listByKey(watch.key, options.apiBase);
-    watch.state.nextPollAt = now() + negotiatedIntervalMs(currentSubscribers, options);
-    watch.state.subscribers = currentSubscribers.map((record) => record.subscription.id);
+    // Recompute membership from disk: a subscriber may have unsubscribed,
+    // been adopted, or joined from another process during the fetch. Using the
+    // pre-fetch snapshot would resurrect a removed id in the watch file and
+    // starve a newly joined one.
+    const members = await currentSubscribers(watch);
+    watch.state.nextPollAt = now() + negotiatedIntervalMs(members, options);
+    watch.state.subscribers = members.map((record) => record.subscription.id);
     watch.state.lastTouchedAt = now();
+    // Shared `seen` (including the ids just accepted) is persisted BEFORE any
+    // notice: a crash after this point can re-observe the event, but the ring
+    // — and each subscriber's own persisted `seen` — suppresses a second wake.
     await watches.put(watch);
 
     let delivered = 0;
@@ -417,7 +554,10 @@ export function createPoller(deps: PollerDeps): Poller {
         current.state.lastError = `deliver: ${
           error instanceof Error ? error.message : String(error)
         }`;
-        await store.updateState(current.subscription.id, current.state);
+        await store.updateState(current.subscription.id, current.state, {
+          maxPending: options.maxPending,
+          seenLimit: options.seenLimit
+        });
         logger.warn("wake_notice_failed", {
           key: watch.key,
           subscriptionID: current.subscription.id,
@@ -459,7 +599,9 @@ export function createPoller(deps: PollerDeps): Poller {
   }
 
   async function tick(subscriptionID: string): Promise<PollOutcome> {
-    const record = store.get(subscriptionID);
+    // A poll may be asked for by a session whose record was written by another
+    // process since this store loaded.
+    const record = await store.refresh(subscriptionID);
     if (!record) {
       return {
         key: subscriptionID,
@@ -494,7 +636,7 @@ export function createPoller(deps: PollerDeps): Poller {
   async function seedWatch(seed: LegacyWatchSeed): Promise<void> {
     const target: WatchTarget = { ...seed.target, apiBase: options.apiBase };
     const key = watchKey(target);
-    const existing = watches.get(key);
+    const existing = (await watches.refresh(key)) ?? watches.get(key);
     if (!existing) {
       await watches.put({
         key,
@@ -526,21 +668,11 @@ export function createPoller(deps: PollerDeps): Poller {
   }
 
   async function reconcileMembership(): Promise<void> {
-    const byKey = new Map<string, string[]>();
+    // `ensureWatch` re-reads the watch and unions this process's subscribers
+    // into it. Never replace the list with only this process's view: another
+    // process over the same state root may own other subscriptions on the key.
     for (const record of store.list()) {
-      const key = keyOf(record.subscription);
-      byKey.set(key, [...(byKey.get(key) ?? []), record.subscription.id]);
       await ensureWatch(record);
-    }
-    for (const watch of watches.list()) {
-      const members = byKey.get(watch.key) ?? [];
-      if (
-        members.length !== watch.state.subscribers.length ||
-        members.some((id) => !watch.state.subscribers.includes(id))
-      ) {
-        watch.state.subscribers = members;
-        await watches.put(watch);
-      }
     }
   }
 
@@ -561,42 +693,63 @@ export function createPoller(deps: PollerDeps): Poller {
    * The loop guard applies here too, so a crash loop cannot re-announce forever.
    */
   async function recover(): Promise<void> {
+    // Group by watch so the backlog announcement is also lease-guarded: after a
+    // crash, a second process must not re-announce events the first already
+    // queued. One lease per key, acquired once, renewed by the first poll.
+    const byKey = new Map<string, SubscriptionRecord[]>();
     for (const record of store.list()) {
-      if (record.state.pending.length === 0) {
+      const key = keyOf(record.subscription);
+      byKey.set(key, [...(byKey.get(key) ?? []), record]);
+    }
+    for (const [key, records] of byKey) {
+      if (records.every((record) => record.state.pending.length === 0)) {
         continue;
       }
-      const decision = decideWake(record.state.loop, options.loop, now());
-      record.state.loop = decision.next;
-      // Same rule as a live poll: persist only the private state, never the
-      // captured subscription. An adoption during startup must not be reverted.
-      const persisted = await store.updateState(record.subscription.id, record.state);
-      if (!persisted) {
+      if (!(await acquireLease(key, records))) {
         continue;
       }
-      if (!decision.deliver) {
-        logger.info("wake_backlog_announce_suppressed", {
-          subscriptionID: persisted.subscription.id,
-          reason: decision.reason
+      for (const snapshot of records) {
+        // Re-read: another process may have drained or adopted this record.
+        const record = await store.refresh(snapshot.subscription.id);
+        if (!record || record.state.pending.length === 0) {
+          continue;
+        }
+        const decision = decideWake(record.state.loop, options.loop, now());
+        record.state.loop = decision.next;
+        // Same rule as a live poll: persist only the private state, never the
+        // captured subscription. An adoption during startup must not be reverted.
+        const persisted = await store.updateState(record.subscription.id, record.state, {
+          maxPending: options.maxPending,
+          seenLimit: options.seenLimit
         });
-        continue;
-      }
-      const current = store.get(persisted.subscription.id);
-      if (!current) {
-        continue;
-      }
-      const notice = buildNotice(current.subscription, current.state.pending.length);
-      try {
-        await deps.deliver({ ...notice, resume: false });
-        logger.info("wake_backlog_announced", {
-          subscriptionID: current.subscription.id,
-          sessionID: current.subscription.sessionID,
-          count: current.state.pending.length
-        });
-      } catch (error) {
-        logger.warn("wake_backlog_announce_failed", {
-          subscriptionID: current.subscription.id,
-          error: error instanceof Error ? error.message : String(error)
-        });
+        if (!persisted) {
+          continue;
+        }
+        if (!decision.deliver) {
+          logger.info("wake_backlog_announce_suppressed", {
+            subscriptionID: persisted.subscription.id,
+            reason: decision.reason
+          });
+          continue;
+        }
+        const current = await store.refresh(persisted.subscription.id);
+        if (!current) {
+          continue;
+        }
+        const notice = buildNotice(current.subscription, current.state.pending.length);
+        try {
+          await deps.deliver({ ...notice, resume: false });
+          logger.info("wake_backlog_announced", {
+            subscriptionID: current.subscription.id,
+            sessionID: current.subscription.sessionID,
+            count: current.state.pending.length
+          });
+        } catch (error) {
+          logger.warn("wake_backlog_announce_failed", {
+            subscriptionID: current.subscription.id,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
       }
     }
   }
@@ -640,16 +793,28 @@ export function createPoller(deps: PollerDeps): Poller {
       loop = runLoop(controller.signal);
       void loop;
     },
-    stop() {
+    async stop() {
       running = false;
       controller?.abort();
       controller = undefined;
+      // Wait for the loop to leave any in-flight tick before releasing: a tick
+      // that acquired a lease after the release would leave it held by a poller
+      // that is no longer running.
+      const pending = loop;
+      loop = undefined;
+      await pending?.catch(() => undefined);
+      // Graceful shutdown hands the watches back immediately, so a restart does
+      // not have to wait for the TTL. A crash cannot run this and is covered by
+      // expiry instead.
+      await Promise.allSettled([...heldLeases].map((key) => releaseLease(key)));
     },
     async join(record) {
       await store.put(record);
       const watch = await ensureWatch(record);
       watch.state.lastTouchedAt = now();
-      const members = store.listByKey(watch.key, options.apiBase);
+      // Negotiate against every subscriber on disk, including ones another
+      // process joined: the shortest interval wins for the shared fetcher.
+      const members = await currentSubscribers(watch);
       watch.state.nextPollAt = Math.min(
         watch.state.nextPollAt,
         now() + negotiatedIntervalMs(members, options)
@@ -657,17 +822,20 @@ export function createPoller(deps: PollerDeps): Poller {
       await watches.put(watch);
     },
     async leave(subscriptionID) {
-      const record = store.get(subscriptionID);
+      const record = await store.refresh(subscriptionID);
       if (!record) {
         return false;
       }
       const key = keyOf(record.subscription);
       await store.remove(subscriptionID);
-      const watch = watches.get(key);
+      const watch = await watches.refresh(key);
       if (watch) {
         watch.state.subscribers = watch.state.subscribers.filter((id) => id !== subscriptionID);
         watch.state.lastTouchedAt = now();
         await watches.put(watch);
+        if (watch.state.subscribers.length === 0) {
+          await releaseLease(key);
+        }
       }
       return true;
     },
@@ -675,11 +843,35 @@ export function createPoller(deps: PollerDeps): Poller {
     tickKey,
     tickDue,
     async watchFor(subscriptionID) {
-      const record = store.get(subscriptionID);
+      const record = await store.refresh(subscriptionID);
       if (!record) {
         return undefined;
       }
       return ensureWatch(record);
+    },
+    async markSeen(subscriptionID, eventIDs) {
+      if (eventIDs.length === 0) {
+        return;
+      }
+      const record = await store.refresh(subscriptionID);
+      if (!record) {
+        return;
+      }
+      const key = keyOf(record.subscription);
+      const recorded = await watches.recordSeen(key, eventIDs, options.seenLimit);
+      if (!recorded) {
+        logger.warn("wake_seen_mark_failed", {
+          subscriptionID,
+          key,
+          count: eventIDs.length
+        });
+        return;
+      }
+      logger.debug("wake_seen_marked", {
+        subscriptionID,
+        key,
+        count: eventIDs.length
+      });
     },
     markOriginated(eventID) {
       originated.mark(eventID);

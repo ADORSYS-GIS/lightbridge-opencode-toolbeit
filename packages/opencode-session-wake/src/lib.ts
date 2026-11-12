@@ -19,10 +19,23 @@ export {
   resolveStateRoot,
   resolveWakeStateDir,
   STATE_NAMESPACE,
+  wakeLeasesDir,
   wakeSubscriptionsDir,
   wakeWatchesDir,
   type WakeOptions
 } from "./config.js";
+
+export {
+  LEASE_TTL_CEILING_FACTOR,
+  LEASE_TTL_FLOOR_MS,
+  LEASE_TTL_MARGIN_MS,
+  LeaseStore,
+  leaseFileFor,
+  leaseTtlMs,
+  newLeaseOwnerID,
+  type LeaseRecord,
+  type LeaseStoreOptions
+} from "./lease.js";
 
 export {
   createTokenSource,
@@ -91,11 +104,13 @@ export {
   subscriptionLabel,
   targetLabel,
   targetOf,
+  trimSeenRing,
   watchFileFor,
   watchKey,
   WatchStore,
   type LegacyWatchSeed,
-  type StoreOptions
+  type StoreOptions,
+  type UpdateStateOptions
 } from "./state.js";
 
 export {

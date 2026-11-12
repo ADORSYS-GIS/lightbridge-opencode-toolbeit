@@ -77,7 +77,10 @@ export async function tempDir(): Promise<{ dir: string; cleanup: () => Promise<v
   const dir = await mkdtemp(join(tmpdir(), "opencode-session-wake-"));
   return {
     dir,
-    cleanup: () => rm(dir, { recursive: true, force: true })
+    // A subscribe path starts a poll without awaiting it; a lease/cursor write
+    // can still be in flight when a test finishes. Retry a transient ENOTEMPTY
+    // instead of making every test wait on an internal background poll.
+    cleanup: () => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 10 })
   };
 }
 

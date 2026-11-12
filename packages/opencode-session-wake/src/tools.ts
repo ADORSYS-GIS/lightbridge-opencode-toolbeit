@@ -42,7 +42,7 @@ export interface WakeToolContext {
 
 export interface WakeToolDeps {
   readonly store: SubscriptionStore;
-  readonly poller: Pick<Poller, "join" | "leave" | "tick" | "watchFor">;
+  readonly poller: Pick<Poller, "join" | "leave" | "tick" | "watchFor" | "markSeen">;
   readonly options: WakeOptions;
   readonly logger: Logger;
   /**
@@ -883,6 +883,25 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
             }
             remaining -= taken.events.length;
             drained.push(taken);
+            // The drain is durable (takePending already wrote the reduced
+            // queue). Record the ids on the shared watch as well, so a later
+            // poll — in this process or one that takes over the lease — cannot
+            // re-add an event the model has now read. A failure here must not
+            // fail the tool call: the events are already handed over, and the
+            // subscriber's own persisted `seen` ring remains the second guard.
+            try {
+              await deps.poller.markSeen(
+                subscriptionID,
+                taken.events.map((event) => event.id)
+              );
+            } catch (error) {
+              logger.warn("wake_seen_mark_failed", {
+                subscriptionID,
+                sessionID,
+                count: taken.events.length,
+                error: error instanceof Error ? error.message : String(error)
+              });
+            }
           }
 
           const total = drained.reduce((sum, item) => sum + item.events.length, 0);

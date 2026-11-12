@@ -97,6 +97,15 @@ export function wakeWatchesDir(stateDir: string): string {
   return join(stateDir, "watches");
 }
 
+/**
+ * `<stateDir>/leases` — one file per watch key, holding the id of the poller
+ * currently allowed to fetch and deliver that watch. Kept apart from `watches/`
+ * so the watch loader never mistakes a lease for a watch record.
+ */
+export function wakeLeasesDir(stateDir: string): string {
+  return join(stateDir, "leases");
+}
+
 function stringArray(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value) || value.length === 0) {
     return undefined;
