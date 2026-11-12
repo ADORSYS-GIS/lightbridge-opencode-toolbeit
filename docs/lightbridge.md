@@ -47,6 +47,8 @@ flowchart LR
    sign-in surface any more (`lightbridge_sign_in_unsupported_flow`); use `device_code`.
    Disconnecting the integration in the host signs lightbridge out too (the state file is cleared);
    a host with no credential at startup does **not** — existing logins keep working.
+   From a terminal the same method is `opencode auth login <auth.id>`; see
+   [Signing in and out](#signing-in-and-out) for the two host rows, duplicates and sign-out.
 2. **Exchange once per project — OPT-IN since ADR-0017 (`gateway.exchange: true`).**
    `exchangeTo(projectKey, humanToken, projectId ? { project_id } : {})`, an RFC 8693 token exchange
    presenting `project_id` as a form param when configured (no `audience`, no mint step — same
@@ -77,6 +79,74 @@ flowchart LR
 
 Both modules are independent opt-ins. `auth` alone (no `gateway`, no `otel`) is a valid, inert
 config — the plugin logs once and registers no observing hooks.
+
+## Signing in and out
+
+Two things in the host look like logins when the plugin is distributed through
+[`.well-known/opencode`](well-known.md). They do different jobs, and only one of them is yours to
+remove.
+
+```mermaid
+flowchart LR
+  subgraph HOST["what the host lists (Settings, or opencode auth list)"]
+    WK["&lt;well-known host&gt;<br/>API key · value 'plugin-managed'"]
+    ACC["&lt;provider name&gt;<br/>you@example.com"]
+  end
+  WK -->|"lets the host fetch the manifest on every launch"| MAN["plugins + providers config"]
+  ACC -.->|"marker only, holds no usable token"| LB["lightbridge state file<br/>(the real access + refresh token)"]
+  LB -->|"Authorization: Bearer"| GW["LLM gateway"]
+```
+
+| Row in the host | Created by | What it is | Remove it? |
+| --- | --- | --- | --- |
+| `<well-known host>` · **API key** | `opencode auth login <well-known url>` | The manifest subscription. Its value is the literal string the manifest's `auth.command` prints (`plugin-managed`), never a real key. | **No.** The host fetches the manifest only while the newest credential on this integration is a key. Remove it and the host stops fetching the manifest and falls back to its cached copy, so plugin and model updates no longer arrive. |
+| `<provider name>` · your email | Signing in (below) | The real OAuth login. The host stores a marker (`refresh: ""`); the tokens stay in lightbridge's own state file. | Yes, to sign out or to clear duplicates. |
+
+`<provider name>` is `register.name`, else `auth.id`. Both rows are needed: the first makes the
+plugin load, the second authenticates requests.
+
+### Sign in
+
+In the app: **Settings → Providers → Show more providers**, search the provider name in the
+Integrations dialog, click **Sign in**.
+
+In a terminal (the same method, rendered by the CLI, so it works over SSH and for TUI-only users):
+
+```bash
+opencode auth login <auth.id>
+```
+
+The CLI prints the confirmation code and the verification URL, waits while you approve in any
+browser, then prints `Connected to <provider name>`. Pass `--method device` if the host asks which
+method to use. The `lightbridge_sign_in_required` warning names only the Settings path; the command
+above is equivalent.
+
+### Accounts, duplicates and signing out
+
+```mermaid
+stateDiagram-v2
+  [*] --> SignedOut
+  SignedOut --> SignedIn: Sign in (dialog or CLI)
+  SignedIn --> SignedIn: Sign in again (adds another host account)
+  SignedIn --> SignedIn: remove an account, another stays active
+  SignedIn --> SignedOut: integration left with no active account
+  SignedOut --> SignedOut: request or startup (warns, never prompts)
+```
+
+- **Every sign-in adds a host account; it does not replace the previous one.** Signing in twice
+  shows two identical rows. They are harmless: lightbridge keeps **one** token file per `auth.id`,
+  and each sign-in overwrites it. The rows are not separate identities, and switching between them
+  in the host changes nothing about which token is sent.
+- **Remove an account** with `opencode auth logout <auth.id>` (it opens an account picker).
+- **Signing out** is removing the last one. When the integration goes from connected to having no
+  active account, lightbridge clears its state file, drops the in-memory token and logs
+  `lightbridge_signed_out_by_host` followed by `lightbridge_sign_in_required`
+  ([`opencode.ts`](../packages/opencode-lightbridge/src/opencode.ts), "host disconnect => sign
+  out"). Requests then fail closed until you sign in again.
+- The sign-out is **transition-based**: only a connection the running process saw and then lost
+  counts. A host with no account at startup does not sign you out, which is why logins made before
+  0.20.0 (token file present, no host account) keep working. Such a login shows no account row at
+  all until you sign in once through the host.
 
 ## Configuration
 
