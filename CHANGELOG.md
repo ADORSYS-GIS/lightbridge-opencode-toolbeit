@@ -8,6 +8,14 @@ All seventeen workspace packages move on **one version line** and are released t
 
 ## [Unreleased]
 
+### Fixed
+
+- **session-wake (lease compare-and-swap, backoff TTL, watch-ring union):** The expired-lease takeover no longer uses read → `unlink` → `open(..., "wx")`, which let two pollers that both observed the same expired lease delete each other's fresh claim and both succeed. A free slot is still claimed with the atomic exclusive create; an existing lease is now changed only by compare-and-swap: the new claim is written to a unique temp file, the current file is moved aside atomically and compared with the exact record that was read, and the claim is published with `link` (which fails with `EEXIST` if another poller won). A mismatched file is put back with `link` instead of being deleted, and `renew`/`release` use the same discipline, so a renewal cannot clobber a takeover. A failed poll now extends the lease to cover its backoff (under the same TTL ceiling), so a rate-limited owner is not replaced while it is correctly idle and a second poller does not issue its own request into the same 429. `WatchStore.put` now re-reads and unions the shared `seen` ring, so a `wake_next` drain that raced a poll is not overwritten by the poll's older snapshot (in the same process too). Tests now race two independent `LeaseStore` instances against an expired lease (the loser's `renew` returns false), assert the lease survives a backoff, and strengthen the three pre-PR-passing dedupe tests (ring dropped the drained id, capped queue makes the notice count diverge, record removed on disk by another store) plus a same-process drain/poll ring race. ([#158](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/158), [review of #164](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/164))
+
+### Documentation
+
+- **docs:** [`docs/session-wake.md`](docs/session-wake.md) and the package README document the cross-process lease, its compare-and-swap takeover, TTL, backoff coverage and failover, the append-merge delivery write, the `wake_next` seen marking and the watch-ring union, the count invariant, the new `leases/` state directory, and the narrowed residual limits (filesystem atomicity including hard links, non-`wake_next` tool snapshots).
+
 ## [0.20.2] — 2026-11-12
 
 > **session-wake gains workflow-run watches, restart adoption and cross-poller dedupe.** Three changes ship together so one reinstall fixes what the 0.20.1 watch loop could not do: it could not watch GitHub Actions, it lost every watch on an OpenCode restart, and two pollers over one state root woke a session for the same event more than once. No behaviour changes for the other packages.

@@ -7,10 +7,32 @@ import {
   LEASE_TTL_FLOOR_MS,
   LeaseStore,
   leaseFileFor,
+  leaseTtlForIdleMs,
   leaseTtlMs,
   newLeaseOwnerID
 } from "../src/lease.js";
-import { fakeLogger, tempDir } from "./helpers.js";
+import { deferred, fakeLogger, tempDir } from "./helpers.js";
+
+type AnyMethod = (...args: unknown[]) => Promise<unknown>;
+type StoreInternals = Record<string, AnyMethod | undefined>;
+
+/**
+ * Replace a private lease-store step for the duration of one test. The method
+ * names differ between the pre-CAS implementation (`removeFile`) and the CAS
+ * implementation (`moveAside`), so a missing method is simply skipped.
+ */
+function overrideMethod(
+  store: LeaseStore,
+  name: string,
+  wrapper: (original: AnyMethod, ...args: unknown[]) => Promise<unknown>
+): void {
+  const internals = store as unknown as StoreInternals;
+  const original = internals[name];
+  if (typeof original !== "function") {
+    return;
+  }
+  internals[name] = (...args) => wrapper(original.bind(store), ...args);
+}
 
 function clock(start = 1_000) {
   let at = start;
@@ -46,6 +68,13 @@ describe("leaseTtlMs", () => {
 
   it("caps failover at two maximum intervals", () => {
     expect(leaseTtlMs(3_600_000, 3_600_000)).toBe(7_200_000);
+  });
+
+  it("extends the TTL to cover a failure backoff", () => {
+    expect(leaseTtlForIdleMs(500_000, 60_000, 600_000)).toBe(530_000);
+    expect(leaseTtlForIdleMs(0, 60_000, 600_000)).toBe(150_000);
+    // Still bounded by the same ceiling as a normal lease.
+    expect(leaseTtlForIdleMs(10_000_000, 60_000, 600_000)).toBe(1_200_000);
   });
 });
 
@@ -111,6 +140,89 @@ describe("LeaseStore", () => {
       clockRef.advance(2);
       expect(await leases.acquire("k", "survivor", 100)).toBe(true);
       expect((await leases.read("k"))?.owner).toBe("survivor");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("lets exactly one of two independent stores take over an expired lease", async () => {
+    const { temp, leases, clockRef } = await setup();
+    try {
+      const dir = join(temp.dir, "leases");
+      const logger = fakeLogger();
+      const key = "race";
+      expect(await leases.acquire(key, "crashed", 100)).toBe(true);
+      clockRef.advance(200);
+
+      const first = new LeaseStore({ dir, logger, now: clockRef.now });
+      const second = new LeaseStore({ dir, logger, now: clockRef.now });
+
+      // Force the exact interleaving that broke the old read → unlink → wx
+      // takeover: both stores read the expired lease, the first publishes its
+      // fresh claim, and only then does the second run its removal step. Before
+      // the compare-and-swap that second removal deleted the first's fresh
+      // lease, so both `wx` creates succeeded. With the CAS the second store
+      // sees the first's claim, restores it, and loses.
+      const bothRead = deferred<void>();
+      let reads = 0;
+      for (const store of [first, second]) {
+        overrideMethod(store, "readRaw", async (original, ...args) => {
+          const result = await original(...args);
+          reads += 1;
+          if (reads === 2) {
+            bothRead.resolve();
+          }
+          await bothRead.promise;
+          return result;
+        });
+      }
+      const firstClaimed = deferred<void>();
+      for (const method of ["createExclusive", "linkClaim"]) {
+        overrideMethod(first, method, async (original, ...args) => {
+          const result = await original(...args);
+          firstClaimed.resolve();
+          return result;
+        });
+      }
+      for (const method of ["removeFile", "moveAside"]) {
+        overrideMethod(second, method, async (original, ...args) => {
+          await firstClaimed.promise;
+          return original(...args);
+        });
+      }
+
+      const outcomes = await Promise.all([
+        first.acquire(key, "owner-a", 100),
+        second.acquire(key, "owner-b", 100)
+      ]);
+      expect(outcomes.filter(Boolean)).toHaveLength(1);
+
+      const winner = outcomes[0] ? "owner-a" : "owner-b";
+      const loserStore = outcomes[0] ? second : first;
+      const loser = outcomes[0] ? "owner-b" : "owner-a";
+      expect((await leases.read(key))?.owner).toBe(winner);
+      // The loser must not be able to renew over the winner's fresh lease.
+      expect(await loserStore.renew(key, loser, 100)).toBe(false);
+      expect((await leases.read(key))?.owner).toBe(winner);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("does not let a renew clobber a takeover", async () => {
+    const { temp, leases, clockRef } = await setup();
+    try {
+      expect(await leases.acquire("k", "owner-a", 100)).toBe(true);
+      clockRef.advance(200);
+      const other = new LeaseStore({
+        dir: join(temp.dir, "leases"),
+        logger: fakeLogger(),
+        now: clockRef.now
+      });
+      expect(await other.acquire("k", "owner-b", 100)).toBe(true);
+
+      expect(await leases.renew("k", "owner-a", 100)).toBe(false);
+      expect((await other.read("k"))?.owner).toBe("owner-b");
     } finally {
       await temp.cleanup();
     }

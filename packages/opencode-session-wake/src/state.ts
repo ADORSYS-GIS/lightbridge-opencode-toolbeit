@@ -944,6 +944,24 @@ export class WatchStore {
   async put(record: WatchRecord): Promise<void> {
     await this.serialized(record.key, async () => {
       await mkdir(this.options.dir, { recursive: true });
+      // `wake_next` may have recorded drained ids while this snapshot was in
+      // flight (in this process too: `recordSeen` is a separate write). Union
+      // the on-disk ring instead of overwriting it; losing a drained id would
+      // let the next poll re-add an event the model already read and wake the
+      // session a second time.
+      const current = await this.readWatchFile(record.key);
+      const seen = [...record.state.seen];
+      if (current) {
+        for (const id of current.state.seen) {
+          if (!seen.includes(id)) {
+            seen.push(id);
+          }
+        }
+      }
+      // Update the caller's snapshot in place: a caller that reuses the record
+      // after `put` must not think a drained id is absent, and keeping the same
+      // object preserves the identity callers already hold.
+      record.state.seen = seen;
       await writeAtomic(this.path(record.key), record);
       this.records.set(record.key, record);
     });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { parseWakeOptions, wakeLeasesDir } from "../src/config.js";
-import type { GitHubTransport } from "../src/github.js";
+import { parseWakeOptions, wakeLeasesDir, type WakeOptions } from "../src/config.js";
+import { TransportFailure, type GitHubTransport } from "../src/github.js";
 import { LeaseStore } from "../src/lease.js";
 import { createPoller } from "../src/poller.js";
 import { createWakeToolInfos } from "../src/tools.js";
@@ -43,6 +43,8 @@ function clock(start = 1_000) {
 interface StackOptions {
   readonly transport?: GitHubTransport;
   readonly ownerID?: string;
+  /** Override the shared options for a test that needs a small ring or queue. */
+  readonly options?: WakeOptions;
 }
 
 /**
@@ -56,6 +58,7 @@ async function stack(dir: string, now: () => number, overrides: StackOptions = {
   const leases = new LeaseStore({ dir: wakeLeasesDir(dir), logger, now });
   const transport = overrides.transport ?? fakeTransport();
   const { deliver, notices } = fakeDeliver();
+  const effective = overrides.options ?? options;
   const poller = createPoller({
     store,
     watches,
@@ -63,12 +66,12 @@ async function stack(dir: string, now: () => number, overrides: StackOptions = {
     transport,
     deliver,
     logger,
-    options,
+    options: effective,
     now,
     sleep: async () => {},
     ...(overrides.ownerID !== undefined ? { ownerID: overrides.ownerID } : {})
   });
-  const infos = createWakeToolInfos({ store, poller, options, logger, now });
+  const infos = createWakeToolInfos({ store, poller, options: effective, logger, now });
   const byName = Object.fromEntries(infos.map((info) => [info.name, info]));
   const tool = (name: string) => {
     const info = byName[name];
@@ -209,28 +212,39 @@ describe("cross-poller dedupe", () => {
     }
   });
 
-  it("does not re-announce an event after wake_next marked it seen", async () => {
+  it("does not re-announce an event after wake_next marked it seen, even after the ring dropped it", async () => {
     const temp = await tempDir();
     const clockRef = clock();
+    // A two-id ring: the first event is evicted by the time the drain happens.
+    const tiny = parseWakeOptions({
+      intervalMs: 60_000,
+      minIntervalMs: 15_000,
+      maxIntervalMs: 600_000,
+      seenLimit: 2,
+      maxPending: 5
+    });
     try {
       const seed = await makeStore(temp.dir);
       const rec = record({ sessionID: "ses_a" });
       await seed.put(rec);
       const key = keyOf(rec);
 
-      const a = await stack(temp.dir, clockRef.now);
+      const a = await stack(temp.dir, clockRef.now, { options: tiny });
       await a.poller.join(rec);
-      a.transport.setComments([page([event("101")])]);
+      a.transport.setComments([page([event("101"), event("102"), event("103")])]);
       await a.poller.tickKey(key);
       expect(a.notices).toHaveLength(1);
+      // 101 has been evicted from both rings before wake_next runs. Without the
+      // shared-ring marking, a replay would re-add it and wake the session.
+      expect(a.watches.get(key)?.state.seen).toEqual(["102", "103"]);
 
       const drained = await exec(a.tool("wake_next"), {}, "ses_a");
-      expect(drained.metadata?.count).toBe(1);
+      expect(drained.metadata?.count).toBe(3);
       expect(a.watches.get(key)?.state.seen).toContain("101");
 
       // A replay of the same page after the next poll is due must not wake.
       clockRef.advance(60_000);
-      a.transport.setComments([page([event("101")])]);
+      a.transport.setComments([page([event("101"), event("102"), event("103")])]);
       const again = await a.poller.tickKey(key);
 
       expect(again.status).toBe("no-change");
@@ -242,8 +256,18 @@ describe("cross-poller dedupe", () => {
     }
   });
 
-  it("keeps the notice count equal to the drainable count for two subscribers", async () => {
+  it("keeps the notice count equal to the drainable count when the queue is capped", async () => {
     const temp = await tempDir();
+    // The queue can hold one event, so three fetched events must produce a
+    // notice of one — the count read from the persisted queue, not from the
+    // fetch result.
+    const tiny = parseWakeOptions({
+      intervalMs: 60_000,
+      minIntervalMs: 15_000,
+      maxIntervalMs: 600_000,
+      seenLimit: 10,
+      maxPending: 1
+    });
     try {
       const seed = await makeStore(temp.dir);
       const recA = record({ sessionID: "ses_a" });
@@ -251,7 +275,7 @@ describe("cross-poller dedupe", () => {
       await seed.put(recA);
       await seed.put(recB);
 
-      const a = await stack(temp.dir, () => 1_000);
+      const a = await stack(temp.dir, () => 1_000, { options: tiny });
       await a.poller.join(recA);
       await a.poller.join(recB);
 
@@ -262,15 +286,15 @@ describe("cross-poller dedupe", () => {
 
       const noticeA = a.notices.find((notice) => notice.sessionID === "ses_a");
       const noticeB = a.notices.find((notice) => notice.sessionID === "ses_b");
-      expect(noticeA?.count).toBe(3);
-      expect(noticeB?.count).toBe(3);
+      expect(noticeA?.count).toBe(1);
+      expect(noticeB?.count).toBe(1);
 
       const drainA = await exec(a.tool("wake_next"), {}, "ses_a");
       const drainB = await exec(a.tool("wake_next"), {}, "ses_b");
       expect(drainA.metadata?.count).toBe(noticeA?.count);
       expect(drainB.metadata?.count).toBe(noticeB?.count);
-      expect(drainA.metadata?.count).toBe(3);
-      expect(drainB.metadata?.count).toBe(3);
+      expect(drainA.metadata?.count).toBe(1);
+      expect(drainB.metadata?.count).toBe(1);
 
       expect(await pendingOnDisk(temp.dir, recA.subscription.id)).toBe(0);
       expect(await pendingOnDisk(temp.dir, recB.subscription.id)).toBe(0);
@@ -323,6 +347,49 @@ describe("cross-poller dedupe", () => {
       // No pending append and no cursor advance: the new owner must be able to
       // deliver this event itself.
       expect(await pendingOnDisk(temp.dir, rec.subscription.id)).toBe(0);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("holds the lease through a failure backoff so a rate-limited owner is not replaced", async () => {
+    const temp = await tempDir();
+    const clockRef = clock();
+    try {
+      const seed = await makeStore(temp.dir);
+      const rec = record({ sessionID: "ses_a" });
+      await seed.put(rec);
+      const key = keyOf(rec);
+
+      const owner = await stack(temp.dir, clockRef.now, { ownerID: "owner" });
+      const other = await stack(temp.dir, clockRef.now, { ownerID: "other" });
+      await owner.poller.join(rec);
+      await other.poller.watchFor(rec.subscription.id);
+
+      // A 429 with a 500 s hint: the normal 60 s interval would give a 150 s
+      // lease, far shorter than the idle period the failure policy asks for.
+      owner.transport.fail(
+        new TransportFailure("rate-limit", "rate limited", { status: 429, retryAfterMs: 500_000 })
+      );
+      const failed = await owner.poller.tickKey(key);
+      expect(failed.status).toBe("failed");
+
+      // Past the old TTL, still inside the backoff: the owner is correctly
+      // idle, so another poller must not take over and issue its own request.
+      clockRef.advance(200_000);
+      other.transport.setComments([page([event("101")])]);
+      const skipped = await other.poller.tickKey(key);
+      expect(skipped.status).toBe("skipped");
+      expect(other.transport.requests.comments).toHaveLength(0);
+      expect(other.notices).toHaveLength(0);
+
+      // Once the backoff and the lease that covers it have passed, the other
+      // poller takes over and delivers the event once.
+      clockRef.advance(400_000);
+      const takeover = await other.poller.tickKey(key);
+      expect(takeover.status).toBe("delivered");
+      expect(other.notices).toHaveLength(1);
+      expect(await pendingOnDisk(temp.dir, rec.subscription.id)).toBe(1);
     } finally {
       await temp.cleanup();
     }
@@ -405,7 +472,53 @@ describe("cross-poller dedupe", () => {
     }
   });
 
-  it("sends no notice when updateState reports the record was removed mid-poll", async () => {
+  it("does not lose a drained id when a poll writes the shared watch afterwards", async () => {
+    const temp = await tempDir();
+    try {
+      const seed = await makeStore(temp.dir);
+      const rec = record({ sessionID: "ses_a" });
+      rec.state.pending.push(event("100"));
+      rec.state.seen.push("100");
+      await seed.put(rec);
+      const key = keyOf(rec);
+
+      const base = fakeTransport();
+      const gate = deferred<void>();
+      const started = deferred<void>();
+      const transport: GitHubTransport = {
+        ...base,
+        listComments: async (request) => {
+          started.resolve();
+          await gate.promise;
+          return base.listComments(request);
+        }
+      };
+      const a = await stack(temp.dir, () => 1_000, { transport });
+      await a.poller.join(rec);
+      // The poll captures the shared watch (empty seen) and starts fetching.
+      a.transport.setComments([page([event("101")])]);
+      const ticking = a.poller.tickKey(key);
+      await started.promise;
+
+      // wake_next drains 100 and records it in the shared seen ring while the
+      // poll is still in flight. The poll then writes its older snapshot; it
+      // must union the ring, not overwrite the drained id.
+      const drained = await exec(a.tool("wake_next"), {}, "ses_a");
+      expect(drained.metadata?.count).toBe(1);
+      expect(a.watches.get(key)?.state.seen).toContain("100");
+
+      gate.resolve();
+      const outcome = await ticking;
+      expect(outcome.delivered).toBe(1);
+      expect(a.watches.get(key)?.state.seen).toContain("100");
+      expect(a.watches.get(key)?.state.seen).toContain("101");
+      expect(await pendingOnDisk(temp.dir, rec.subscription.id)).toBe(1);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("sends no notice when updateState finds the record removed on disk mid-poll", async () => {
     const temp = await tempDir();
     try {
       const seed = await makeStore(temp.dir);
@@ -430,9 +543,12 @@ describe("cross-poller dedupe", () => {
 
       const ticking = a.poller.tickKey(key);
       await started.promise;
-      // Remove the subscription while the fetch is in flight. updateState must
-      // return undefined, and a removed record must never be re-created.
-      await a.store.remove(rec.subscription.id);
+      // Remove the subscription from disk with a *different* store, so this
+      // poller's in-memory snapshot still holds it. updateState must re-read
+      // the file and return undefined; a removed record must never be
+      // re-created from that stale snapshot.
+      const remover = await makeStore(temp.dir);
+      await remover.remove(rec.subscription.id);
       gate.resolve();
       const outcome = await ticking;
 
