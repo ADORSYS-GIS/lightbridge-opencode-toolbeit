@@ -12,6 +12,7 @@ import {
   type WakeCursor,
   type WakeEvent,
   type WakeEventKind,
+  type WakeProject,
   type WakeSourceKind,
   type WakeSubscription,
   type WatchRecord,
@@ -156,6 +157,29 @@ function hasSourceShape(
   );
 }
 
+/**
+ * Parse the optional project identity. A malformed value is treated as absent
+ * (a legacy record) rather than making the whole subscription unreadable: the
+ * cursor and unread events matter more than the identity, and a record with an
+ * unknown project is still adoptable only within this state root.
+ */
+export function parseProject(value: unknown): WakeProject | undefined {
+  const record = asRecord(value);
+  if (!record || typeof record.id !== "string" || record.id.length === 0) {
+    return undefined;
+  }
+  if (typeof record.directory !== "string" || record.directory.length === 0) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    directory: record.directory,
+    ...(typeof record.canonical === "string" && record.canonical.length > 0
+      ? { canonical: record.canonical }
+      : {})
+  };
+}
+
 function isSubscription(value: unknown): value is WakeSubscription {
   const record = asRecord(value);
   return (
@@ -163,6 +187,8 @@ function isSubscription(value: unknown): value is WakeSubscription {
     isSubscriptionID(record.id) &&
     typeof record.sessionID === "string" &&
     record.sessionID.length > 0 &&
+    // A malformed `project` block must not discard the record: `load` drops
+    // only the identity below, keeping the pending events readable.
     WAKE_SOURCE_KINDS.includes(record.kind as WakeSourceKind) &&
     typeof record.owner === "string" &&
     typeof record.repo === "string" &&
@@ -280,6 +306,13 @@ export class SubscriptionStore {
   private seeds: LegacyWatchSeed[] = [];
   private readonly now: () => number;
   private loaded = false;
+  /**
+   * Per-subscription write chains. Adoption and a poller that is finishing a
+   * fetch must never interleave a whole-record write: the poller writes only
+   * `state` through `updateState`, and every write for one id is serialized so
+   * the subscription (owner, filters) is always the current one.
+   */
+  private readonly writeChains = new Map<string, Promise<void>>();
 
   constructor(private readonly options: StoreOptions) {
     this.now = options.now ?? Date.now;
@@ -291,6 +324,28 @@ export class SubscriptionStore {
 
   private path(id: string): string {
     return join(this.options.dir, `${id}.json`);
+  }
+
+  private async serialized<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.writeChains.get(id) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chain = previous.then(
+      () => current,
+      () => current
+    );
+    this.writeChains.set(id, chain);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.writeChains.get(id) === chain) {
+        this.writeChains.delete(id);
+      }
+    }
   }
 
   async load(): Promise<void> {
@@ -323,9 +378,12 @@ export class SubscriptionStore {
           this.options.logger.warn("wake_subscription_unreadable", { id });
           continue;
         }
+        const { project: rawProject, ...subscriptionFields } = record.subscription;
+        const project = parseProject(rawProject);
         const subscription: WakeSubscription = {
-          ...record.subscription,
-          ignoreAuthors: stringList(record.subscription.ignoreAuthors)
+          ...subscriptionFields,
+          ignoreAuthors: stringList(record.subscription.ignoreAuthors),
+          ...(project !== undefined ? { project } : {})
         };
         this.records.set(id, {
           subscription,
@@ -390,23 +448,78 @@ export class SubscriptionStore {
   }
 
   async put(record: SubscriptionRecord): Promise<void> {
-    await mkdir(this.options.dir, { recursive: true });
-    await writeAtomic(this.path(record.subscription.id), record);
-    this.records.set(record.subscription.id, record);
+    const id = record.subscription.id;
+    await this.serialized(id, async () => {
+      await mkdir(this.options.dir, { recursive: true });
+      await writeAtomic(this.path(id), record);
+      this.records.set(id, record);
+    });
+  }
+
+  /**
+   * Persist only the private delivery state of an **existing** subscription,
+   * keeping whatever subscription the store currently holds. A poller that
+   * captured a record before a network fetch must use this, never `put`: an
+   * adoption may have replaced the record in the meantime, and writing the
+   * captured subscription would silently move ownership back.
+   *
+   * Returns the record that was written, or `undefined` when the subscription
+   * was removed while the fetch was in flight (it is never re-created).
+   */
+  async updateState(id: string, state: SubscriberState): Promise<SubscriptionRecord | undefined> {
+    return this.serialized(id, async () => {
+      const current = this.records.get(id);
+      if (!current) {
+        return undefined;
+      }
+      const next: SubscriptionRecord = { subscription: current.subscription, state };
+      await mkdir(this.options.dir, { recursive: true });
+      await writeAtomic(this.path(id), next);
+      this.records.set(id, next);
+      return next;
+    });
+  }
+
+  /**
+   * Atomically check the owner, take up to `limit` pending events and persist
+   * the reduced queue. `wake_next` uses this so an adoption cannot interleave
+   * between the ownership check and the write and leave the new owner without
+   * events the old owner already read.
+   */
+  async takePending(
+    id: string,
+    sessionID: string,
+    limit: number
+  ): Promise<{ subscription: WakeSubscription; events: WakeEvent[] } | undefined> {
+    return this.serialized(id, async () => {
+      const current = this.records.get(id);
+      if (!current || current.subscription.sessionID !== sessionID) {
+        return undefined;
+      }
+      const events = current.state.pending.splice(0, limit);
+      if (events.length > 0) {
+        await mkdir(this.options.dir, { recursive: true });
+        await writeAtomic(this.path(id), current);
+        this.records.set(id, current);
+      }
+      return { subscription: current.subscription, events };
+    });
   }
 
   async remove(id: string): Promise<boolean> {
-    if (!this.records.delete(id)) {
-      return false;
-    }
-    try {
-      await unlink(this.path(id));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
+    return this.serialized(id, async () => {
+      if (!this.records.delete(id)) {
+        return false;
       }
-    }
-    return true;
+      try {
+        await unlink(this.path(id));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+      }
+      return true;
+    });
   }
 }
 

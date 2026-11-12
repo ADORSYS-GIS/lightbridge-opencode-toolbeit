@@ -32,12 +32,26 @@ import type {
   SubscriptionRecord,
   WakeEvent,
   WakeNotice,
+  WakeProject,
   WakeSubscription,
   WatchRecord,
   WatchState
 } from "../src/types.js";
 
 export const DEFAULT_API_BASE = "https://api.github.com";
+
+/** Two distinct project identities for adoption tests. */
+export const PROJECT_A: WakeProject = {
+  id: "prj_a",
+  directory: "/work/a",
+  canonical: "/work/a"
+};
+
+export const PROJECT_B: WakeProject = {
+  id: "prj_b",
+  directory: "/work/b",
+  canonical: "/work/b"
+};
 
 export interface FakeLogger extends Logger {
   readonly events: Array<{ level: string; event: string; fields?: Record<string, unknown> }>;

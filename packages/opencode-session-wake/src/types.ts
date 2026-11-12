@@ -57,10 +57,35 @@ export interface WatchTarget {
   readonly branch?: string;
 }
 
+/**
+ * The project identity a subscription records, captured from the **plugin
+ * instance's** `ctx.location.project` when it is created.
+ *
+ * Storing it is what makes an orphaned watch adoptable by a later session with
+ * the same instance identity after a restart. It is deliberately only an
+ * identity: no path is used to read or write anything outside this plugin's
+ * state directory. It is not a per-session proof — one instance serving several
+ * projects shares this identity.
+ */
+export interface WakeProject {
+  /** Stable host project id (`ctx.location.project.id`). */
+  readonly id: string;
+  /** Absolute project directory (`ctx.location.project.directory`). */
+  readonly directory: string;
+  /** Canonical (worktree-resolved) project directory, when the host exposes it. */
+  readonly canonical?: string;
+}
+
 /** A subscription is owned by exactly one session: the one whose tool call created it. */
 export interface WakeSubscription {
   readonly id: string;
   readonly sessionID: string;
+  /**
+   * Project identity captured at subscribe time. Absent on records written by
+   * older versions, which remain readable and adoptable within the same state
+   * root only (the project cannot be proven).
+   */
+  readonly project?: WakeProject;
   readonly kind: WakeSourceKind;
   readonly owner: string;
   readonly repo: string;
