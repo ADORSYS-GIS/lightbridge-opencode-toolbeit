@@ -37,13 +37,14 @@ Sources (`wake_subscribe.source`):
   sessions.
 - The cursor, per-URL ETags and a bounded `seen` ring are durable under the **state root**; the
   fetcher stops when the last subscriber leaves and its state ages out after 7 days.
-- **Restart-safe ownership.** Every new subscription records the host's project identity. After a
-  restart, `wake_list {"includeOrphans":true}` shows watches left behind by another session in the
-  same project, and `wake_adopt` (one id or `all: true`) / `wake_resume` (all) moves ownership to the
-  calling session. Unread events, cursor, ETags, `seen`, loop state and the shared fetcher are
-  preserved; cross-project adoption is refused. Adoption moves ownership — the old session loses the
-  watch — and there is no automatic startup adoption (`autoResume`), because startup has no calling
-  session.
+- **Restart-safe ownership.** Every new subscription records the **plugin instance's** project
+  identity (`ctx.location`, not the calling session's). After a restart,
+  `wake_list {"includeOrphans":true}` shows watches left behind by another session with the same
+  instance identity, and `wake_adopt` (one id or `all: true`) / `wake_resume` (all) moves ownership
+  to the calling session. Unread events, cursor, ETags, `seen`, loop state and the shared fetcher are
+  preserved; a different instance identity answers "not found for this session". Adoption moves ownership —
+  the old session loses the watch — and there is no automatic startup adoption (`autoResume`),
+  because startup has no calling session. This is instance-scoped, not per-session isolation.
 - New events produce a short **untrusted** notice via `ctx.session.synthetic({ resume: true })`.
   Bodies and summaries are only readable through `wake_next`, never injected.
 - **Loop prevention:** `ignoreAuthors` drops configured logins at fan-out, `markOriginated(id)` is the

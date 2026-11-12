@@ -313,7 +313,7 @@ export function createPoller(deps: PollerDeps): Poller {
     }
     trim(watch.state.seen, options.seenLimit);
 
-    const deliveries: Array<{ record: SubscriptionRecord; count: number }> = [];
+    const deliveries: Array<{ subscriptionID: string; count: number }> = [];
     let suppressed = 0;
 
     for (const subscriber of subscribers) {
@@ -351,14 +351,22 @@ export function createPoller(deps: PollerDeps): Poller {
 
       const decision = decideWake(subscriber.state.loop, options.loop, now());
       subscriber.state.loop = decision.next;
+      // Persist only the private state, re-read by id. An adoption may have
+      // replaced the record while the fetch was in flight; writing the
+      // captured subscription back would revert the owner. A record removed
+      // during the fetch returns `undefined` and is never re-created.
+      const persisted = await store.updateState(subscriber.subscription.id, subscriber.state);
+      if (!persisted) {
+        continue;
+      }
       if (decision.deliver) {
-        deliveries.push({ record: subscriber, count: fresh.length });
+        deliveries.push({ subscriptionID: persisted.subscription.id, count: fresh.length });
       } else {
         suppressed += 1;
         logger.info("wake_suppressed_loop_suspected", {
           key: watch.key,
-          subscriptionID: subscriber.subscription.id,
-          sessionID: subscriber.subscription.sessionID,
+          subscriptionID: persisted.subscription.id,
+          sessionID: persisted.subscription.sessionID,
           reason: decision.reason,
           suppressed: decision.next.suppressed,
           cooldownUntil:
@@ -367,10 +375,6 @@ export function createPoller(deps: PollerDeps): Poller {
               : undefined
         });
       }
-      // Persist the subscriber (pending + loop state) BEFORE the shared cursor
-      // and BEFORE the wake: a crash in between leaves the event readable and
-      // deduped, never lost.
-      await store.put(subscriber);
     }
 
     if (!result.notModified) {
@@ -380,34 +384,44 @@ export function createPoller(deps: PollerDeps): Poller {
     }
     watch.state.consecutiveFailures = 0;
     delete watch.state.lastError;
-    watch.state.nextPollAt = now() + negotiatedIntervalMs(subscribers, options);
-    watch.state.subscribers = subscribers.map((record) => record.subscription.id);
+    // Recompute membership from the store: a subscriber may have unsubscribed
+    // (or been adopted) during the fetch. Using the pre-fetch snapshot would
+    // resurrect a removed id in the watch file and keep the fetcher alive.
+    const currentSubscribers = store.listByKey(watch.key, options.apiBase);
+    watch.state.nextPollAt = now() + negotiatedIntervalMs(currentSubscribers, options);
+    watch.state.subscribers = currentSubscribers.map((record) => record.subscription.id);
     watch.state.lastTouchedAt = now();
     await watches.put(watch);
 
     let delivered = 0;
     for (const delivery of deliveries) {
-      const notice = buildNotice(delivery.record.subscription, delivery.count);
+      // Re-read immediately before building the notice: an adoption during the
+      // fetch must deliver to the current owner, not the captured one.
+      const current = store.get(delivery.subscriptionID);
+      if (!current) {
+        continue;
+      }
+      const notice = buildNotice(current.subscription, delivery.count);
       try {
         await deps.deliver(notice);
         delivered += 1;
         logger.info("wake_notice_delivered", {
           key: watch.key,
-          subscriptionID: delivery.record.subscription.id,
-          source: delivery.record.subscription.kind,
-          sessionID: delivery.record.subscription.sessionID,
+          subscriptionID: current.subscription.id,
+          source: current.subscription.kind,
+          sessionID: current.subscription.sessionID,
           thread: notice.thread,
           count: delivery.count
         });
       } catch (error) {
-        delivery.record.state.lastError = `deliver: ${
+        current.state.lastError = `deliver: ${
           error instanceof Error ? error.message : String(error)
         }`;
-        await store.put(delivery.record);
+        await store.updateState(current.subscription.id, current.state);
         logger.warn("wake_notice_failed", {
           key: watch.key,
-          subscriptionID: delivery.record.subscription.id,
-          sessionID: delivery.record.subscription.sessionID,
+          subscriptionID: current.subscription.id,
+          sessionID: current.subscription.sessionID,
           error: error instanceof Error ? error.message : String(error)
         });
       }
@@ -553,25 +567,34 @@ export function createPoller(deps: PollerDeps): Poller {
       }
       const decision = decideWake(record.state.loop, options.loop, now());
       record.state.loop = decision.next;
-      await store.put(record);
+      // Same rule as a live poll: persist only the private state, never the
+      // captured subscription. An adoption during startup must not be reverted.
+      const persisted = await store.updateState(record.subscription.id, record.state);
+      if (!persisted) {
+        continue;
+      }
       if (!decision.deliver) {
         logger.info("wake_backlog_announce_suppressed", {
-          subscriptionID: record.subscription.id,
+          subscriptionID: persisted.subscription.id,
           reason: decision.reason
         });
         continue;
       }
-      const notice = buildNotice(record.subscription, record.state.pending.length);
+      const current = store.get(persisted.subscription.id);
+      if (!current) {
+        continue;
+      }
+      const notice = buildNotice(current.subscription, current.state.pending.length);
       try {
         await deps.deliver({ ...notice, resume: false });
         logger.info("wake_backlog_announced", {
-          subscriptionID: record.subscription.id,
-          sessionID: record.subscription.sessionID,
-          count: record.state.pending.length
+          subscriptionID: current.subscription.id,
+          sessionID: current.subscription.sessionID,
+          count: current.state.pending.length
         });
       } catch (error) {
         logger.warn("wake_backlog_announce_failed", {
-          subscriptionID: record.subscription.id,
+          subscriptionID: current.subscription.id,
           error: error instanceof Error ? error.message : String(error)
         });
       }

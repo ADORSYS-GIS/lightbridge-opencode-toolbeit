@@ -153,6 +153,38 @@ describe("SubscriptionStore", () => {
     }
   });
 
+  it("drops only a malformed project identity, keeping the record and pending", async () => {
+    const temp = await tempDir();
+    try {
+      const rec = record();
+      const dir = join(temp.dir, "subscriptions");
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, `${rec.subscription.id}.json`),
+        JSON.stringify({
+          subscription: {
+            ...rec.subscription,
+            // Missing `directory`: the identity is unusable, but the watch is
+            // still a valid legacy record and its unread event must survive.
+            project: { id: "prj_only" }
+          },
+          state: { pending: [event("101")], seen: ["101"] }
+        }),
+        "utf8"
+      );
+
+      const store = new SubscriptionStore({ dir, logger: fakeLogger() });
+      await store.load();
+
+      const loaded = store.get(rec.subscription.id);
+      expect(loaded?.subscription.project).toBeUndefined();
+      expect(loaded?.state.pending).toHaveLength(1);
+      expect(loaded?.state.seen).toEqual(["101"]);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
   it("exposes the legacy cursor as a watch seed and keeps the pending state", async () => {
     const temp = await tempDir();
     try {

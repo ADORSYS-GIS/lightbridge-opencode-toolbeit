@@ -58,12 +58,14 @@ export interface WatchTarget {
 }
 
 /**
- * The OpenCode project a subscription belongs to, captured when it is created.
+ * The project identity a subscription records, captured from the **plugin
+ * instance's** `ctx.location.project` when it is created.
  *
- * The host exposes the project on `ctx.location.project`; storing it is what
- * makes an orphaned watch adoptable by a later session in the same project
- * after a restart. It is deliberately only an identity: no path is used to read
- * or write anything outside this plugin's state directory.
+ * Storing it is what makes an orphaned watch adoptable by a later session with
+ * the same instance identity after a restart. It is deliberately only an
+ * identity: no path is used to read or write anything outside this plugin's
+ * state directory. It is not a per-session proof — one instance serving several
+ * projects shares this identity.
  */
 export interface WakeProject {
   /** Stable host project id (`ctx.location.project.id`). */

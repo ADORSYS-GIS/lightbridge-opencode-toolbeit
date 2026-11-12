@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import { sameProject } from "../src/adoption.js";
 import { parseWakeOptions } from "../src/config.js";
+import type { GitHubTransport } from "../src/github.js";
 import { createPoller } from "../src/poller.js";
 import { resolveWakeProject } from "../src/project.js";
 import { parseProject } from "../src/state.js";
 import { createWakeToolInfos } from "../src/tools.js";
 import type { WakeNotice, WakeProject } from "../src/types.js";
 import {
+  deferred,
   event,
   exec,
   fakeLogger,
@@ -29,7 +31,11 @@ const options = parseWakeOptions({
 });
 const NOW = 1_000;
 
-async function harness(dir: string, project: WakeProject | undefined = PROJECT_A) {
+async function harness(
+  dir: string,
+  project: WakeProject | null = PROJECT_A,
+  transportOverride?: GitHubTransport
+) {
   const { store, watches } = await makeStores(dir, () => NOW);
   const transport = fakeTransport();
   const logger = fakeLogger();
@@ -37,7 +43,7 @@ async function harness(dir: string, project: WakeProject | undefined = PROJECT_A
   const poller = createPoller({
     store,
     watches,
-    transport,
+    transport: transportOverride ?? transport,
     deliver: async (notice) => {
       delivered.push(notice);
     },
@@ -51,7 +57,7 @@ async function harness(dir: string, project: WakeProject | undefined = PROJECT_A
     poller,
     options,
     logger,
-    ...(project !== undefined ? { project } : {}),
+    ...(project !== null ? { project } : {}),
     now: () => NOW
   });
   const byName = Object.fromEntries(infos.map((info) => [info.name, info]));
@@ -264,13 +270,81 @@ describe("wake_adopt / wake_resume", () => {
 
       await expect(
         exec(h.tool("wake_adopt"), { id: foreign.subscription.id }, "ses_new")
-      ).rejects.toThrow("another project");
+      ).rejects.toThrow("not found for this session");
       expect(h.store.get(foreign.subscription.id)?.subscription.sessionID).toBe("ses_old");
       expect(h.store.get(foreign.subscription.id)?.state.pending).toHaveLength(1);
 
       const all = await exec(h.tool("wake_adopt"), { all: true }, "ses_new");
       expect(all.metadata?.adopted).toEqual([]);
       expect(h.store.get(foreign.subscription.id)?.subscription.sessionID).toBe("ses_old");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("fails closed when the caller has no project identity", async () => {
+    const temp = await tempDir();
+    try {
+      const h = await harness(temp.dir, null);
+      const withProject = record({ sessionID: "ses_old", project: PROJECT_A });
+      const legacy = record({ sessionID: "ses_old" });
+      await h.store.put(withProject);
+      await h.store.put(legacy);
+
+      await expect(
+        exec(h.tool("wake_adopt"), { id: withProject.subscription.id }, "ses_new")
+      ).rejects.toThrow("not found for this session");
+      await expect(
+        exec(h.tool("wake_adopt"), { id: legacy.subscription.id }, "ses_new")
+      ).rejects.toThrow("not found for this session");
+
+      const all = await exec(h.tool("wake_adopt"), { all: true }, "ses_new");
+      expect(all.metadata?.adopted).toEqual([]);
+      const listed = await exec(h.tool("wake_list"), { includeOrphans: true }, "ses_new");
+      expect(listed.metadata?.orphans).toEqual([]);
+      const resumed = await exec(h.tool("wake_resume"), {}, "ses_new");
+      expect(resumed.metadata?.adopted).toEqual([]);
+      expect(h.store.get(withProject.subscription.id)?.subscription.sessionID).toBe("ses_old");
+      expect(h.store.get(legacy.subscription.id)?.subscription.sessionID).toBe("ses_old");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("computes skipped before moving ownership", async () => {
+    const temp = await tempDir();
+    try {
+      const h = await harness(temp.dir, PROJECT_A);
+      const first = record({ sessionID: "ses_old", project: PROJECT_A });
+      const second = record({ sessionID: "ses_old", project: PROJECT_A, number: 8 });
+      const foreign = record({ sessionID: "ses_old", project: PROJECT_B, number: 9 });
+      for (const rec of [first, second, foreign]) {
+        await h.store.put(rec);
+      }
+
+      const all = await exec(h.tool("wake_adopt"), { all: true }, "ses_new");
+      expect(all.metadata?.adopted).toHaveLength(2);
+      expect(all.metadata?.skipped).toBe(1);
+      expect(h.store.get(first.subscription.id)?.subscription.sessionID).toBe("ses_new");
+      expect(h.store.get(second.subscription.id)?.subscription.sessionID).toBe("ses_new");
+      expect(h.store.get(foreign.subscription.id)?.subscription.sessionID).toBe("ses_old");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("does not let the old session unsubscribe after adoption", async () => {
+    const temp = await tempDir();
+    try {
+      const h = await harness(temp.dir, PROJECT_A);
+      const rec = record({ sessionID: "ses_old", project: PROJECT_A });
+      await h.store.put(rec);
+
+      await exec(h.tool("wake_adopt"), { id: rec.subscription.id }, "ses_new");
+      await expect(
+        exec(h.tool("wake_unsubscribe"), { id: rec.subscription.id }, "ses_old")
+      ).rejects.toThrow("not found for this session");
+      expect(h.store.get(rec.subscription.id)?.subscription.sessionID).toBe("ses_new");
     } finally {
       await temp.cleanup();
     }
@@ -299,6 +373,26 @@ describe("wake_adopt / wake_resume", () => {
         { scope: "legacy-same-state-root", pending: 1, changed: true }
       ]);
       expect(h.store.get(legacy.subscription.id)?.subscription.sessionID).toBe("ses_new");
+      // The pre-upgrade record is legacy only until adopted; adoption stamps
+      // the adopting instance's identity, so another project cannot take it.
+      expect(h.store.get(legacy.subscription.id)?.subscription.project).toEqual(PROJECT_A);
+      const foreignTools = createWakeToolInfos({
+        store: h.store,
+        poller: h.poller,
+        options,
+        logger: h.logger,
+        project: PROJECT_B,
+        now: () => NOW
+      });
+      const foreignAdopt = foreignTools.find((info) => info.name === "wake_adopt");
+      if (!foreignAdopt) {
+        throw new Error("wake_adopt was not registered");
+      }
+      await expect(exec(foreignAdopt, { id: legacy.subscription.id }, "ses_other")).rejects.toThrow(
+        "not found for this session"
+      );
+      expect(h.store.get(legacy.subscription.id)?.subscription.sessionID).toBe("ses_new");
+
       const drained = await exec(h.tool("wake_next"), {}, "ses_new");
       expect(drained.metadata?.count).toBe(1);
     } finally {
@@ -392,6 +486,53 @@ describe("adoption preserves delivery and shared-fetcher state", () => {
       expect(drained.metadata?.count).toBe(2);
       const old = await exec(h.tool("wake_next"), {}, "ses_old");
       expect(old.content).toContain("No thread subscriptions for this session.");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("does not revert an adoption that lands during an in-flight poll", async () => {
+    const temp = await tempDir();
+    try {
+      const base = fakeTransport();
+      base.setComments([page([event("101")])]);
+      const gate = deferred<void>();
+      const started = deferred<void>();
+      const transport: GitHubTransport = {
+        ...base,
+        async listComments(request) {
+          started.resolve(undefined);
+          await gate.promise;
+          return base.listComments(request);
+        }
+      };
+      const h = await harness(temp.dir, PROJECT_A, transport);
+      const rec = record({ sessionID: "ses_old", project: PROJECT_A });
+      await h.store.put(rec);
+      const key = keyOf(rec);
+      await seedWatch(h.watches, rec, { subscribers: [rec.subscription.id] });
+
+      // Start the poll and hold it inside the network fetch. Adoption lands
+      // while the poller still holds the pre-fetch subscriber snapshot.
+      const poll = h.poller.tickKey(key);
+      await started.promise;
+      const adopted = await exec(h.tool("wake_adopt"), { id: rec.subscription.id }, "ses_new");
+      expect(adopted.metadata?.adopted).toMatchObject([
+        { previousSessionID: "ses_old", changed: true }
+      ]);
+      gate.resolve(undefined);
+      await poll;
+
+      // The durable owner is the new session, the event is readable there, and
+      // no notice went to the old session.
+      expect(h.store.get(rec.subscription.id)?.subscription.sessionID).toBe("ses_new");
+      expect(h.store.get(rec.subscription.id)?.state.pending).toHaveLength(1);
+      expect(h.delivered).toHaveLength(1);
+      expect(h.delivered[0]?.sessionID).toBe("ses_new");
+      expect(h.delivered.some((notice) => notice.sessionID === "ses_old")).toBe(false);
+      const drained = await exec(h.tool("wake_next"), {}, "ses_new");
+      expect(drained.metadata?.count).toBe(1);
+      expect(drained.content).toContain("id: 101");
     } finally {
       await temp.cleanup();
     }

@@ -49,9 +49,12 @@ export function sameProject(a: WakeProject, b: WakeProject): boolean {
 /**
  * Decide whether `record` may be adopted by `sessionID` in `project`.
  *
- * A missing `project` on the caller is treated as "cannot prove", so a record
- * that *does* carry a project identity is refused. In the plugin the identity
- * is always resolved from `ctx.location` (or the working directory fallback).
+ * The identity is the **plugin instance's** location (`ctx.location`), not a
+ * per-session proof: one instance serving several projects stamps them all with
+ * the same identity. A missing project identity on the caller is treated as
+ * "cannot prove" and fails closed for every record, including a legacy one. In
+ * the plugin the identity is always resolved from `ctx.location` (or the
+ * working-directory fallback).
  */
 export function adoptionScope(
   record: SubscriptionRecord,
@@ -61,11 +64,11 @@ export function adoptionScope(
   if (record.subscription.sessionID === sessionID) {
     return "owner";
   }
-  if (record.subscription.project === undefined) {
-    return "legacy-same-state-root";
-  }
   if (project === undefined) {
     return "cross-project";
+  }
+  if (record.subscription.project === undefined) {
+    return "legacy-same-state-root";
   }
   return sameProject(record.subscription.project, project) ? "same-project" : "cross-project";
 }

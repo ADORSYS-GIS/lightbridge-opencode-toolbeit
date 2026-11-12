@@ -16,10 +16,11 @@ function nonEmptyString(value: unknown): string | undefined {
  * Resolve the identity a new subscription records for adoption after a restart.
  *
  * The host exposes it as `ctx.location.project` (`id`, `directory`, `canonical`)
- * and `ctx.location.directory`. The project id is the primary identity; the
- * absolute directory is always stored too, because it is the fallback a record
- * written by an older version can be matched by and it is the only identity a
- * host that does not expose a project id can give us.
+ * and `ctx.location.directory`. This is the **plugin instance's** location, not
+ * the calling session's. The project id is the primary identity; the absolute
+ * directory is always stored too, because it is the fallback a record written
+ * by an older version can be matched by and it is the only identity a host that
+ * does not expose a project id gives us.
  *
  * A missing project block falls back to the location directory, then to the
  * process working directory, so a new subscription is never written without an

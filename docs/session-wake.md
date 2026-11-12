@@ -99,7 +99,7 @@ fix is an explicit adoption path, not silent ownership transfer.
 
 ### What is recorded
 
-Every subscription created by this version stores the host's project identity:
+Every subscription created by this version stores the **plugin instance's** project identity:
 
 ```jsonc
 {
@@ -120,22 +120,32 @@ Every subscription created by this version stores the host's project identity:
 }
 ```
 
-`project.id` comes from `ctx.location.project.id`; the absolute directory and canonical directory are
-stored as well. When the host does not expose a project block, the location directory is used, then
-the process working directory, with an id of `directory:<absolute path>`. The identity is only used
-for comparison — nothing outside this plugin's state directory is read or written.
+`project.id` comes from `ctx.location.project.id`; the absolute directory and, when the host exposes
+it, the canonical directory are stored as well. When the host does not expose a project block, the
+location directory is used, then the process working directory, with an id of
+`directory:<absolute path>` (an absolute path from `resolve`, not a `realpath`). The identity is only
+used for comparison — nothing outside this plugin's state directory is read or written.
+
+**This is instance-scoped, not per-session.** `ctx.location` is the plugin instance's location, not
+the calling session's. One host instance serving several projects stamps every subscription it
+creates with the same identity, so adoption is **not** a security boundary between those projects.
+The state directory's permissions and the explicit tool call are the boundary; if you need stronger
+isolation, run one instance/state root per project. The plugin fails closed when it has no identity
+at all (a library caller that omits `project` cannot adopt anything, including legacy records).
 
 **Legacy records** written before this field existed have no `project`. They remain fully readable
 (cursor, pending, ETags, loop state) and are treated as adoptable **within the same state root**,
 because that is the only scope their origin can be attributed to. `wake_list` shows them as
 `project=unknown (legacy)`. A legacy record cannot prove which project created it; if one state root
 is shared by several projects, prefer an explicit `wake_adopt { "id": … }` over `wake_resume` so an
-operator chooses the record.
+operator chooses the record. **A pre-upgrade record is legacy only until it is adopted**: adoption
+stamps the adopting instance's identity on it, and from then on it is project-scoped like any other
+record.
 
 ### Listing orphans
 
 `wake_list` is still scoped to the calling session by default. With `includeOrphans: true` it also
-returns watches owned by **another session in the same project**, clearly marked:
+returns watches owned by **another session with the same plugin-instance identity**, clearly marked:
 
 ```text
 - wake_0123456789abcdef acme/widgets#7 (github.thread, every 60s, pending=2, cursor=…,
@@ -143,8 +153,8 @@ returns watches owned by **another session in the same project**, clearly marked
 ```
 
 Metadata carries `orphans[]` with `owner`, `sessionID`, `owned: false`, `pending`, `project`,
-`adoption.scope` (`same-project` or `legacy-same-state-root`) and `adoption.adoptable`. Cross-project
-records are never listed and never adoptable. **`orphan` means "owned by a different session", not
+`adoption.scope` (`same-project` or `legacy-same-state-root`) and `adoption.adoptable`. Records with a
+different instance identity are never listed and never adoptable. **`orphan` means "owned by a different session", not
 "proven dead"**: the plugin has no liveness signal for another session, which is exactly why adoption
 is explicit and never automatic.
 
@@ -152,11 +162,13 @@ is explicit and never automatic.
 
 ```jsonc
 { "id": "wake_0123456789abcdef" }   // one watch
-{ "all": true }                     // every same-project orphan
+{ "all": true }                     // every same-identity orphan
 {}                                  // wake_resume: same as { "all": true }
 ```
 
-Adoption changes **only** `subscription.sessionID`. Every other value is left unchanged:
+For an identity-carrying record, adoption changes **only** `subscription.sessionID`. A legacy record
+also gets the adopting instance's `project` stamped on it (that is what makes it project-scoped
+afterwards). Every other value is left unchanged:
 
 | Preserved | Why it matters |
 | --- | --- |
@@ -164,7 +176,7 @@ Adoption changes **only** `subscription.sessionID`. Every other value is left un
 | `state.seen` ring and `state.lastError` | Adoption does not re-append or re-deliver an event. (The separate multi-poller duplicate-delivery limitation is unchanged.) |
 | `state.loop` (`wakes`, `suppressed`, `loopSuspected`, `cooldownUntil`) | A crash loop cannot reset its budget by adopting. |
 | shared `watches/<hash>.json` — `cursor`, `etags`, `seen`, `consecutiveFailures`, `nextPollAt`, `subscribers` | The shared fetcher is not reset and does not re-fetch history; the subscription id (the refcount key) is unchanged. |
-| subscription `id`, source, filters, interval, `createdAt` | Adoption is a move, not a re-subscribe. |
+| subscription `id`, source, filters, interval, `createdAt`, existing `project` | Adoption is a move, not a re-subscribe. A legacy record's missing `project` is the one value added. |
 
 Adoption does **not** inject a wake. It reports `pending=N`; call `wake_next` to read the backlog.
 Future polls deliver to the new owner because fan-out reads the record's current `sessionID`. An
@@ -206,11 +218,11 @@ session.
 
 | Tool | Purpose |
 | --- | --- |
-| `wake_subscribe` | Watch a GitHub target with `source` (default `github.thread`). Thread sources take `owner/repo#number`; `github.actions` takes `owner`/`repo` plus optional `workflow` and `branch`. Optional `mentions`, `ignoreAuthors`, `intervalSeconds`. Records the calling session **and its project identity** as the owner and joins the shared fetcher. |
+| `wake_subscribe` | Watch a GitHub target with `source` (default `github.thread`). Thread sources take `owner/repo#number`; `github.actions` takes `owner`/`repo` plus optional `workflow` and `branch`. Optional `mentions`, `ignoreAuthors`, `intervalSeconds`. Records the calling session and the **plugin instance's project identity** as the owner and joins the shared fetcher. |
 | `wake_unsubscribe` | Leave the watch owned by the calling session. |
 | `wake_list` | List the calling session's watches with source, owner, shared cursor, unread count, loop-guard state and last error. Pass `includeOrphans: true` to also list watches left behind by another session **in this project**, marked `owner=… orphan=true` with their unread count and adoption scope. |
-| `wake_adopt` | Adopt one orphaned watch (`id`) or every orphaned watch in this project (`all: true`). Ownership moves to the calling session; unread events, cursor, ETags, `seen`, loop state and the shared fetcher are preserved. Cross-project watches are refused. |
-| `wake_resume` | Convenience for the restart case: adopt **every** same-project orphaned watch in one call (equivalent to `wake_adopt` with `all: true`). |
+| `wake_adopt` | Adopt one orphaned watch (`id`) or every orphaned watch with the same instance identity (`all: true`). Ownership moves to the calling session; unread events, cursor, ETags, `seen`, loop state and the shared fetcher are preserved. Watches with a different instance identity are refused. |
+| `wake_resume` | Convenience for the restart case: adopt **every** same-identity orphaned watch in one call (equivalent to `wake_adopt` with `all: true`). |
 | `wake_next` | Read and consume unread events. Bodies and summaries are returned as untrusted data. |
 
 On new events the plugin calls:
@@ -383,12 +395,15 @@ cheapest first:
   `wake_next` and `wake_unsubscribe` only see watches created by that session; a foreign id answers
   "not found for this session" without revealing the owner. Sharing a fetcher never shares delivery
   state.
-- **Adoption is explicit and project-scoped.** Only `wake_adopt` / `wake_resume` move ownership, and
-  only when the record's stored `project` matches the calling plugin's identity (or the record is a
-  legacy record with no identity, which is limited to this state root). A cross-project id is
-  refused with "belongs to another project" and is never listed by `wake_list`. Adoption changes the
-  owner field only; it does not copy pending events or reset the loop guard. The multi-session
-  trade-off is documented above: the old session loses the watch.
+- **Adoption is explicit and instance-project-scoped.** Only `wake_adopt` / `wake_resume` move
+  ownership, and only when the record's stored `project` matches the calling plugin instance's
+  identity (or the record is a legacy record with no identity, which is limited to this state root).
+  An id with a different instance identity answers "not found for this session" and is never listed
+  by `wake_list`; adoption never reveals whether the id exists elsewhere. Adoption changes the owner
+  field (and stamps a legacy record's missing identity); it does not copy pending events or reset
+  the loop guard. The multi-session trade-off is documented above: the old session loses the watch.
+  Because the identity is the instance's location, this is not a per-session isolation claim when
+  one instance serves several projects.
 - **Bounded blast radius.** `pending` is capped (`maxPending`), `seen` is a ring (`seenLimit`), one
   poll fetches at most `maxPages` pages per source, and one body is truncated to 4 000 characters
   when returned.
@@ -442,8 +457,16 @@ watch keeps its cursor — no partial state is claimed.
   non-owner. **Adoption does not fix this**: "no duplicate wake" in the adoption section means
   adoption itself neither re-delivers nor loses an event within one poller; the multi-poller gap is
   pre-existing and remains. Adoption is also a read-modify-write with no cross-process lock, so two
-  processes adopting the same record concurrently are last-writer-wins. The Phase 3 plan is a lease
-  (or a small local broker) so one process polls a key while the others consume shared state.
+  processes adopting the same record concurrently are last-writer-wins; **in one process the writes
+  are serialized per subscription, but two concurrent `wake_adopt` calls are still last-writer-wins**
+  (the later call takes ownership). The Phase 3 plan is a lease (or a small local broker) so one
+  process polls a key while the others consume shared state.
+- **A second store instance keeps its loaded snapshot (H3).** `SubscriptionStore.load()` is
+  idempotent and does not re-read after the first load, so instance B over the same state root keeps
+  the old `sessionID` after instance A adopts. B can still list, drain and deliver for the old owner
+  until it restarts; tool calls in B do not re-stat the files. This is the same instance-boundary
+  limitation as the duplicate-delivery note above, and it is **not fixed** by adoption. A reload (or
+  a re-stat) on tool calls plus a single-owner lease is the follow-up.
 - **Adoption moves ownership, it does not share it.** After `wake_adopt` / `wake_resume` the previous
   session can no longer list, drain, unsubscribe or receive wakes for that watch. An already-queued
   synthetic notice in the old session cannot be recalled (it can still be seen, but `wake_next`
@@ -452,7 +475,9 @@ watch keeps its cursor — no partial state is claimed.
 - **Legacy records cannot prove their project.** A subscription written before project identity was
   stored has no `project`; it is readable and adoptable within the same state root only, and is shown
   as `project=unknown (legacy)`. If one state root is shared by several projects, adopt such a
-  record by explicit `id` rather than with `wake_resume`.
+  record by explicit `id` rather than with `wake_resume`. Adoption stamps the adopting instance's
+  identity, so the record is legacy only until that first adoption; a different project cannot adopt
+  it afterwards.
 - **`github.timeline` has no server-side `since`.** The plugin pages the tail backwards from
   `Link: rel="last"` until it reaches the cursor, bounded by `maxPages`. If more than `maxPages`
   pages of new events exist, the poll fails closed (`backlog`): raise `maxPages`.
@@ -497,6 +522,7 @@ watch keeps its cursor — no partial state is claimed.
 | `github.actions` against the live GitHub API | Not yet verified live; covered by tests with a fake transport, mapping tests over real workflow-run payload shapes, and a typed `actions: read` failure test |
 | Shared registry (two sessions, one fetcher, one wake each) | **Not yet verified live — required** (steps below) |
 | Restart adoption (`wake_list` orphans → `wake_resume` → `wake_next`, no adoption-induced duplicate) | **Not yet verified live — required** (steps below); covered by the restart-simulation test with two stores over one state directory. This does not cover the separate multi-poller duplicate-delivery gap. |
+| Adoption during an in-flight poll (owner not reverted, notice to the new owner) | **Verified by test** — a deferred transport holds the fetch while `wake_adopt` lands; the durable owner is the new session and no notice goes to the old one. Not yet verified live. |
 | Loop guard / `ignoreAuthors` against a real comment | Not yet verified live |
 
 ### Manual two-session test (required before claiming multi-session behaviour)
@@ -526,11 +552,13 @@ watch keeps its cursor — no partial state is claimed.
    comment must wake only the new session, with no duplicate of the adopted event.
    Also verify the old state survives: the adopted watch's `cursor`/`shared` values in `wake_list`
    must match what they were before the restart.
-10. Cross-project refusal: from a session in a **different** project, `wake_list
-    {"includeOrphans":true}` must not show that watch, and `wake_adopt {"id":"<that id>"}` must fail
-    with "belongs to another project". A legacy record (one written before this version, with no
-    `project` field) must still be listed as `project=unknown (legacy)` and be adoptable in the same
-    state root.
+10. Cross-identity refusal: from a session served by a **different plugin instance/state root**
+    (a different instance identity), `wake_list {"includeOrphans":true}` must not show that watch,
+    and `wake_adopt {"id":"<that id>"}` must fail with "not found for this session". A legacy record
+    (one written before this version, with no `project` field) must still be listed as
+    `project=unknown (legacy)` and be adoptable in the same state root; after adoption it must carry
+    the adopting instance's identity, so a different identity can no longer take it. Remember that
+    one instance serving two projects shares one identity, so this is not a per-session test.
 11. Repeat step 5 with a token that lacks `Checks: read` on a `github.checks` watch: the poll must
     log `wake_poll_failed` with `failure: "forbidden"` and the cursor must not move.
 12. Loop guard: set `loop: {"maxWakes":1,"windowMs":60000,"cooldownMs":300000}` and an

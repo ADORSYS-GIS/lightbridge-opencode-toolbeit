@@ -104,7 +104,8 @@ export function createSessionWakePlugin(
       });
 
       // Captured once: every subscription this instance creates records it, so
-      // a later session in the same project can adopt the watch after a restart.
+      // a later session with the same instance identity can adopt the watch
+      // after a restart. This is the instance's location, not the session's.
       const project =
         factoryOptions.project ??
         resolveWakeProject((ctx as unknown as { location?: unknown }).location);

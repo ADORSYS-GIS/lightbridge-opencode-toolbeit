@@ -46,10 +46,11 @@ export interface WakeToolDeps {
   readonly options: WakeOptions;
   readonly logger: Logger;
   /**
-   * The calling plugin's project identity. Captured once from `ctx.location`
-   * and stored on every new subscription; adoption compares it with the
-   * identity on disk. Absent only for a library caller that does not have one,
-   * in which case adoption of records that *do* carry an identity is refused.
+   * The **plugin instance's** project identity. Captured once from
+   * `ctx.location` (not the calling session's location) and stored on every
+   * new subscription; adoption compares it with the identity on disk. Absent
+   * only for a library caller that does not have one, in which case adoption
+   * fails closed for every record, including a legacy one.
    */
   readonly project?: WakeProject;
   /** Defaults to `Date.now`. */
@@ -305,7 +306,7 @@ export const WAKE_TOOL_SCHEMAS: Record<string, Record<string, unknown>> = {
       includeOrphans: {
         type: "boolean",
         description:
-          "Also list watches left behind by another session in this project (for example after a " +
+          "Also list watches left behind by another session with the same plugin-instance identity (for example after a " +
           "restart) and mark whether this session may adopt them. Own watches are always listed."
       }
     },
@@ -319,7 +320,7 @@ export const WAKE_TOOL_SCHEMAS: Record<string, Record<string, unknown>> = {
       all: {
         type: "boolean",
         description:
-          "Adopt every orphaned watch in this project. Pass either `id` or `all`, not both."
+          "Adopt every orphaned watch with the same plugin-instance identity. Pass either `id` or `all`, not both."
       }
     },
     required: [],
@@ -402,8 +403,10 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
   ): Promise<AdoptedWatch> => {
     const scope = adoptionScope(record, sessionID, deps.project);
     if (scope === "cross-project") {
+      // Same discipline as wake_next / wake_unsubscribe: do not reveal whether
+      // the id exists in another project or does not exist at all.
       throw new WakeToolError({
-        message: `subscription ${record.subscription.id} belongs to another project and cannot be adopted`
+        message: `subscription ${record.subscription.id} not found for this session`
       });
     }
     if (scope === "owner") {
@@ -418,7 +421,15 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
     }
     const previousSessionID = record.subscription.sessionID;
     const next: SubscriptionRecord = {
-      subscription: { ...record.subscription, sessionID },
+      subscription: {
+        ...record.subscription,
+        sessionID,
+        // A pre-upgrade record is legacy only until it is adopted: stamp the
+        // adopting instance's identity so later adoptions are project-scoped.
+        ...(scope === "legacy-same-state-root" && deps.project !== undefined
+          ? { project: deps.project }
+          : {})
+      },
       state: record.state
     };
     await store.put(next);
@@ -440,7 +451,7 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
     };
   };
 
-  /** Every record the calling session may adopt (same project, or legacy same state root). */
+  /** Every record the calling session may adopt (same instance identity, or legacy same state root). */
   const adoptableRecords = (sessionID: string): SubscriptionRecord[] =>
     store
       .list()
@@ -456,17 +467,17 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
     if (changed.length === 0) {
       const already = adopted.length;
       return already > 0
-        ? "No watches needed adoption; every same-project watch is already owned by this session."
+        ? "No watches needed adoption; every same-identity watch is already owned by this session."
         : skipped > 0
-          ? "No adoptable watches in this project; other projects' watches were left untouched."
-          : "No orphaned watches to adopt in this project.";
+          ? "No adoptable watches with this instance identity; other identities were left untouched."
+          : "No orphaned watches to adopt with this instance identity.";
     }
     const lines = changed.map(
       (entry) =>
         `- ${entry.id} ${entry.thread} (previous owner ${entry.previousSessionID}, pending=${entry.pending})`
     );
     return [
-      `Adopted ${changed.length} watch(es) in this project; pending=${pending}.`,
+      `Adopted ${changed.length} watch(es) with this instance identity; pending=${pending}.`,
       ...lines,
       pending > 0
         ? "Call wake_next to read the unread events. Future wakes now go to this session."
@@ -644,7 +655,7 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
       name: "wake_list",
       description:
         "List this session's watches with their shared cursor, unread count, loop-guard state and last error. " +
-        "Pass `includeOrphans: true` to also see watches left behind by another session in this project " +
+        "Pass `includeOrphans: true` to also see watches left behind by another session with the same instance identity " +
         "(for example after a restart) and whether they can be adopted.",
       input: WAKE_TOOL_SCHEMAS.wake_list,
       execute: (rawInput, context) =>
@@ -676,7 +687,7 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
             return {
               content:
                 includeOrphans === true
-                  ? "No thread subscriptions for this session and no adoptable watches in this project."
+                  ? "No thread subscriptions for this session and no adoptable watches with this instance identity."
                   : "No thread subscriptions for this session.",
               metadata: { subscriptions: [], orphans: [] }
             };
@@ -710,7 +721,7 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
               ...lines,
               ...(orphanViews.length > 0
                 ? [
-                    "Orphaned watches are adoptable only in this project. `wake_adopt` (one id or " +
+                    "Orphaned watches are adoptable only with this plugin-instance identity. `wake_adopt` (one id or " +
                       "`all: true`) moves ownership to this session; `wake_resume` adopts every one."
                   ]
                 : [])
@@ -725,10 +736,10 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
     {
       name: "wake_adopt",
       description:
-        "Adopt one watch (`id`) or every orphaned watch in this project (`all: true`) so this session " +
+        "Adopt one watch (`id`) or every orphaned watch with this plugin-instance identity (`all: true`) so this session " +
         "owns it and receives its future wakes. Unread events, the cursor, ETags, the seen ring and the " +
         "loop guard are preserved. Adoption moves ownership: the previous session can no longer read " +
-        "or remove the watch. Cross-project watches are refused.",
+        "or remove the watch. Watches with a different instance identity are refused.",
       input: WAKE_TOOL_SCHEMAS.wake_adopt,
       execute: (rawInput, context) =>
         run(async () => {
@@ -762,12 +773,16 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
             }
             adopted.push(await adoptRecord(record, sessionID));
           } else {
-            for (const record of adoptableRecords(sessionID)) {
-              adopted.push(await adoptRecord(record, sessionID));
-            }
+            // Snapshot the candidates and the non-adoptable remainder BEFORE
+            // any ownership move: adoptRecord changes sessionID, so computing
+            // `skipped` afterwards subtracts adopted records twice.
+            const candidates = adoptableRecords(sessionID);
             skipped =
               store.list().filter((record) => record.subscription.sessionID !== sessionID).length -
-              adopted.length;
+              candidates.length;
+            for (const record of candidates) {
+              adopted.push(await adoptRecord(record, sessionID));
+            }
           }
 
           return {
@@ -789,21 +804,22 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
     {
       name: "wake_resume",
       description:
-        "Adopt every orphaned watch in this project in one call (the restart convenience). Equivalent to " +
+        "Adopt every orphaned watch with this plugin-instance identity in one call (the restart convenience). Equivalent to " +
         "`wake_adopt` with `all: true`; unread events, cursors and shared fetchers are preserved, and " +
-        "cross-project watches are never touched.",
+        "watches with a different instance identity are never touched.",
       input: WAKE_TOOL_SCHEMAS.wake_resume,
       execute: (_rawInput, context) =>
         run(async () => {
           const sessionID = (context as WakeToolContext).sessionID;
           await store.load();
           const adopted: AdoptedWatch[] = [];
-          for (const record of adoptableRecords(sessionID)) {
-            adopted.push(await adoptRecord(record, sessionID));
-          }
+          const candidates = adoptableRecords(sessionID);
           const skipped =
             store.list().filter((record) => record.subscription.sessionID !== sessionID).length -
-            adopted.length;
+            candidates.length;
+          for (const record of candidates) {
+            adopted.push(await adoptRecord(record, sessionID));
+          }
           return {
             content: adoptionSummary(adopted, skipped),
             metadata: {
@@ -841,8 +857,11 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
           }
 
           await store.load();
-          const records = id === undefined ? store.list(sessionID) : [owned(sessionID, id)];
-          if (records.length === 0) {
+          const subscriptionIDs =
+            id === undefined
+              ? store.list(sessionID).map((record) => record.subscription.id)
+              : [owned(sessionID, id).subscription.id];
+          if (subscriptionIDs.length === 0) {
             return {
               content: "No thread subscriptions for this session.",
               metadata: { events: [] }
@@ -851,17 +870,19 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
 
           const drained: Array<{ subscription: WakeSubscription; events: WakeEvent[] }> = [];
           let remaining = limit;
-          for (const record of records) {
+          for (const subscriptionID of subscriptionIDs) {
             if (remaining <= 0) {
               break;
             }
-            const take = record.state.pending.splice(0, remaining);
-            if (take.length === 0) {
+            // Atomic owner check + drain + persist. An adoption cannot slip
+            // between the check and the write and let the old session consume
+            // events the new owner should receive.
+            const taken = await store.takePending(subscriptionID, sessionID, remaining);
+            if (!taken || taken.events.length === 0) {
               continue;
             }
-            remaining -= take.length;
-            drained.push({ subscription: record.subscription, events: take });
-            await store.put(record);
+            remaining -= taken.events.length;
+            drained.push(taken);
           }
 
           const total = drained.reduce((sum, item) => sum + item.events.length, 0);
