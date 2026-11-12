@@ -34,12 +34,15 @@ export function signInPath(name: string): string {
 
 /**
  * The terminal equivalent of {@link signInPath}: `opencode auth login <id>`.
- * `auth.id` is only trimmed by config validation, so an id with spaces or quote
- * characters is single-quoted (POSIX shell rules) to keep the printed command
- * copy-pasteable and unambiguous. Log string only: nothing is executed.
+ * `auth.id` is only trimmed by config validation, so anything that is not a
+ * plain word (letters, digits, `_`, `.`, `@`, `-`, not starting with `-` or `.`)
+ * is single-quoted by POSIX shell rules, which keeps the printed command safe to
+ * paste. Quoting protects the shell only: the host CLI still parses the argument
+ * itself, so an id that starts with `-` reads as a flag and a URL-shaped id reads
+ * as a well-known URL. Log string only: nothing is executed.
  */
 export function signInCommand(integrationID: string): string {
-  const arg = /^[A-Za-z0-9_][A-Za-z0-9_.:@/-]*$/.test(integrationID)
+  const arg = /^[A-Za-z0-9_][A-Za-z0-9_.@-]*$/.test(integrationID)
     ? integrationID
     : `'${integrationID.replaceAll("'", `'\\''`)}'`;
   return `opencode auth login ${arg}`;

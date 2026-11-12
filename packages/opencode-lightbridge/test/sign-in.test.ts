@@ -672,11 +672,26 @@ describe("hard cutover — nothing but the Connect dialog starts a device flow",
     );
   });
 
-  it("signInCommand leaves plain ids bare and single-quotes anything a shell would split", () => {
+  it("signInCommand leaves plain ids bare", () => {
     expect(signInCommand("camer-digital")).toBe("opencode auth login camer-digital");
-    expect(signInCommand("my corp")).toBe("opencode auth login 'my corp'");
-    expect(signInCommand("it's")).toBe("opencode auth login 'it'\\''s'");
-    expect(signInCommand('a"b$c')).toBe("opencode auth login 'a\"b$c'");
+    expect(signInCommand("corp_1.eu@prod")).toBe("opencode auth login corp_1.eu@prod");
+  });
+
+  it.each([
+    ["my corp", "'my corp'"],
+    ["it's", "'it'\\''s'"],
+    ["a'b'c", "'a'\\''b'\\''c'"],
+    ['a"b$c', "'a\"b$c'"],
+    ["a$(x)", "'a$(x)'"],
+    ["a$HOME", "'a$HOME'"],
+    ["a`b", "'a`b'"],
+    ["a;b", "'a;b'"],
+    ["-x", "'-x'"],
+    [".hidden", "'.hidden'"],
+    ["caf\u00e9", "'caf\u00e9'"],
+    ["https://idp.example/realm", "'https://idp.example/realm'"]
+  ])("signInCommand single-quotes %j, which is not a plain word", (id, quoted) => {
+    expect(signInCommand(id)).toBe(`opencode auth login ${quoted}`);
   });
 
   async function startWithFake(runtime: LightbridgeRuntimeLike, auth: Record<string, unknown>) {

@@ -119,7 +119,7 @@ opencode auth login <auth.id>
 The CLI prints the confirmation code and the verification URL, waits while you approve in any
 browser, then prints `Connected to <provider name>`. Pass `--method device` if the host asks which
 method to use. The `lightbridge_sign_in_required` warning names both: the Settings path (with the display
-name) and this command (with the real `auth.id`, shell-quoted if it contains spaces or quotes), and
+name) and this command (with the real `auth.id`, shell-quoted when it is not a plain word), and
 carries the command as a structured `command` field.
 
 ### Accounts, duplicates and signing out
