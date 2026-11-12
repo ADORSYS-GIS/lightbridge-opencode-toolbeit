@@ -294,7 +294,7 @@ describe("wake_next", () => {
 });
 
 describe("registerWakeTools", () => {
-  it("adds all four tools with raw JSON Schema inputs", async () => {
+  it("adds every tool with raw JSON Schema inputs", async () => {
     const { temp, store } = await harness();
     try {
       const added: Array<{ name: string; input: unknown }> = [];
@@ -313,6 +313,8 @@ describe("registerWakeTools", () => {
         "wake_subscribe",
         "wake_unsubscribe",
         "wake_list",
+        "wake_adopt",
+        "wake_resume",
         "wake_next"
       ]);
       expect(added[0]?.input).toMatchObject({

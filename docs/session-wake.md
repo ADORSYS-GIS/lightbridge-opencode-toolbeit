@@ -90,13 +90,126 @@ stops** — `tickDue` skips it and no HTTP request is made. The watch file (curs
 kept for `WATCH_TTL_MS` (7 days) so a later rejoin resumes from the same cursor instead of
 re-delivering history; after that it is aged out on the next plugin start.
 
+## Restart and adoption
+
+Durable watches survive a restart, but ownership is a `sessionID`, and a restart creates a **new**
+session. Before adoption the old record still named the old session, so the new session could not
+list, drain, unsubscribe or receive wakes for it — the event stream was durable but unreachable. The
+fix is an explicit adoption path, not silent ownership transfer.
+
+### What is recorded
+
+Every subscription created by this version stores the host's project identity:
+
+```jsonc
+{
+  "subscription": {
+    "id": "wake_…",
+    "sessionID": "ses_…",
+    "project": { "id": "prj_…", "directory": "/abs/project", "canonical": "/abs/canonical" },
+    "kind": "github.thread",
+    "owner": "acme",
+    "repo": "widgets",
+    "number": 7,
+    "mentions": [],
+    "ignoreAuthors": [],
+    "intervalMs": 60000,
+    "createdAt": "2026-11-12T00:00:00.000Z"
+  },
+  "state": { "pending": [], "seen": [], "loop": { "wakes": [], "suppressed": 0, "loopSuspected": false } }
+}
+```
+
+`project.id` comes from `ctx.location.project.id`; the absolute directory and canonical directory are
+stored as well. When the host does not expose a project block, the location directory is used, then
+the process working directory, with an id of `directory:<absolute path>`. The identity is only used
+for comparison — nothing outside this plugin's state directory is read or written.
+
+**Legacy records** written before this field existed have no `project`. They remain fully readable
+(cursor, pending, ETags, loop state) and are treated as adoptable **within the same state root**,
+because that is the only scope their origin can be attributed to. `wake_list` shows them as
+`project=unknown (legacy)`. A legacy record cannot prove which project created it; if one state root
+is shared by several projects, prefer an explicit `wake_adopt { "id": … }` over `wake_resume` so an
+operator chooses the record.
+
+### Listing orphans
+
+`wake_list` is still scoped to the calling session by default. With `includeOrphans: true` it also
+returns watches owned by **another session in the same project**, clearly marked:
+
+```text
+- wake_0123456789abcdef acme/widgets#7 (github.thread, every 60s, pending=2, cursor=…,
+  shared=1 owner=ses_old orphan=true project=/abs/project wakes=0/5)
+```
+
+Metadata carries `orphans[]` with `owner`, `sessionID`, `owned: false`, `pending`, `project`,
+`adoption.scope` (`same-project` or `legacy-same-state-root`) and `adoption.adoptable`. Cross-project
+records are never listed and never adoptable. **`orphan` means "owned by a different session", not
+"proven dead"**: the plugin has no liveness signal for another session, which is exactly why adoption
+is explicit and never automatic.
+
+### Adopting
+
+```jsonc
+{ "id": "wake_0123456789abcdef" }   // one watch
+{ "all": true }                     // every same-project orphan
+{}                                  // wake_resume: same as { "all": true }
+```
+
+Adoption changes **only** `subscription.sessionID`. Every other value is left unchanged:
+
+| Preserved | Why it matters |
+| --- | --- |
+| `state.pending` (unread events) | The new session can `wake_next` exactly what the old one had not read. |
+| `state.seen` ring and `state.lastError` | No event is re-appended or re-delivered after adoption. |
+| `state.loop` (`wakes`, `suppressed`, `loopSuspected`, `cooldownUntil`) | A crash loop cannot reset its budget by adopting. |
+| shared `watches/<hash>.json` — `cursor`, `etags`, `seen`, `consecutiveFailures`, `nextPollAt`, `subscribers` | The shared fetcher is not reset and does not re-fetch history; the subscription id (the refcount key) is unchanged. |
+| subscription `id`, source, filters, interval, `createdAt` | Adoption is a move, not a re-subscribe. |
+
+Adoption does **not** inject a wake. It reports `pending=N`; call `wake_next` to read the backlog.
+Future polls deliver to the new owner because fan-out reads the record's current `sessionID`. An
+already-queued notice in the old session cannot be recalled, but the old session can no longer read
+the content: `wake_next`, `wake_list` and `wake_unsubscribe` answer "not found for this session".
+
+### Multiple-session trade-off
+
+Adoption **moves** ownership; it does not copy it. If the old session is still alive, it loses the
+watch: it will not receive future wakes, cannot drain pending events, and cannot unsubscribe. This is
+deliberate — two owners would mean two delivery streams and a shared `pending` queue that either
+session could drain, which is worse than an explicit hand-over. Adopt only when the previous session
+is gone (or when you intentionally take over). The plugin never adopts automatically.
+
+### No `autoResume` option
+
+Startup has no calling session: the plugin runs in the host scope before any `Tool.Context` exists,
+and choosing a session to receive every orphaned watch would be nondeterministic (which of several
+sessions? the most recent? a random one?). The plugin therefore does **not** offer `autoResume`; the
+explicit `wake_resume` tool is the restart path. A caller that wants automatic behaviour can invoke
+`wake_resume` at the start of its own turn, which is deterministic because it names the calling
+session.
+
+### Exact behaviour after a restart
+
+1. The old state directory still contains `subscriptions/<id>.json` and `watches/<hash>.json`.
+2. `poller.start()` loads them, reconciles the shared refcounts, and announces any unread backlog to
+   the **recorded** owner with `resume: false` (the old session may no longer exist; the call is
+   harmless).
+3. In the new session, `wake_list` returns nothing by default; `wake_list { "includeOrphans": true }`
+   shows the old watch with `owner=ses_old orphan=true pending=N`.
+4. `wake_resume` (or `wake_adopt`) changes the owner to the new session. Pending stays `N`; cursor,
+   ETags, shared `seen` and the refcount are unchanged.
+5. `wake_next` drains the old pending events. The next poll delivers only genuinely new events, to
+   the new session; the shared `seen` ring prevents a duplicate.
+
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `wake_subscribe` | Watch a GitHub target with `source` (default `github.thread`). Thread sources take `owner/repo#number`; `github.actions` takes `owner`/`repo` plus optional `workflow` and `branch`. Optional `mentions`, `ignoreAuthors`, `intervalSeconds`. Records the calling session as the owner and joins the shared fetcher. |
+| `wake_subscribe` | Watch a GitHub target with `source` (default `github.thread`). Thread sources take `owner/repo#number`; `github.actions` takes `owner`/`repo` plus optional `workflow` and `branch`. Optional `mentions`, `ignoreAuthors`, `intervalSeconds`. Records the calling session **and its project identity** as the owner and joins the shared fetcher. |
 | `wake_unsubscribe` | Leave the watch owned by the calling session. |
-| `wake_list` | List the calling session's watches with source, shared cursor, unread count, loop-guard state and last error. |
+| `wake_list` | List the calling session's watches with source, owner, shared cursor, unread count, loop-guard state and last error. Pass `includeOrphans: true` to also list watches left behind by another session **in this project**, marked `owner=… orphan=true` with their unread count and adoption scope. |
+| `wake_adopt` | Adopt one orphaned watch (`id`) or every orphaned watch in this project (`all: true`). Ownership moves to the calling session; unread events, cursor, ETags, `seen`, loop state and the shared fetcher are preserved. Cross-project watches are refused. |
+| `wake_resume` | Convenience for the restart case: adopt **every** same-project orphaned watch in one call (equivalent to `wake_adopt` with `all: true`). |
 | `wake_next` | Read and consume unread events. Bodies and summaries are returned as untrusted data. |
 
 On new events the plugin calls:
@@ -170,9 +283,10 @@ Two files per watch under the **state root** (ADR-0022):
 (ADR-0005) and mode `0o600`. Nothing is written to the cache root.
 
 **Subscriber** (`subscriptions/`): the subscription (source, owner, repo, number for thread sources,
-workflow/branch for `github.actions`, mentions, `ignoreAuthors`, interval, owning session), `pending`,
-its own `seen` ring, `lastError` (delivery only) and the loop guard (`wakes`, `suppressed`,
-`loopSuspected`, `cooldownUntil`).
+workflow/branch for `github.actions`, mentions, `ignoreAuthors`, interval, owning session, and the
+optional `project` identity used for adoption), `pending`, its own `seen` ring, `lastError` (delivery
+only) and the loop guard (`wakes`, `suppressed`, `loopSuspected`, `cooldownUntil`). A record written
+before project identity existed simply has no `project` key; it is still read.
 
 **Watch** (`watches/`): the key and target, `cursor`, `etags` (by request URL), the shared `seen`
 ring, `consecutiveFailures`, `lastError` (fetch), `lastPollAt`, `nextPollAt`, the subscriber id list
@@ -268,6 +382,12 @@ cheapest first:
   `wake_next` and `wake_unsubscribe` only see watches created by that session; a foreign id answers
   "not found for this session" without revealing the owner. Sharing a fetcher never shares delivery
   state.
+- **Adoption is explicit and project-scoped.** Only `wake_adopt` / `wake_resume` move ownership, and
+  only when the record's stored `project` matches the calling plugin's identity (or the record is a
+  legacy record with no identity, which is limited to this state root). A cross-project id is
+  refused with "belongs to another project" and is never listed by `wake_list`. Adoption changes the
+  owner field only; it does not copy pending events or reset the loop guard. The multi-session
+  trade-off is documented above: the old session loses the watch.
 - **Bounded blast radius.** `pending` is capped (`maxPending`), `seen` is a ring (`seenLimit`), one
   poll fetches at most `maxPages` pages per source, and one body is truncated to 4 000 characters
   when returned.
@@ -306,7 +426,17 @@ watch keeps its cursor — no partial state is claimed.
   sharing one state directory still poll the same key twice and could deliver twice: there is **no
   cross-process leader/lease** yet. The documented Phase 3 plan is a lease file (or a small local
   broker) so one process polls a key while the others consume shared state. Until then, dedupe is
-  per process.
+  per process. Adoption has the same boundary: it is a read-modify-write with no cross-process lock,
+  so two processes adopting the same record concurrently are last-writer-wins.
+- **Adoption moves ownership, it does not share it.** After `wake_adopt` / `wake_resume` the previous
+  session can no longer list, drain, unsubscribe or receive wakes for that watch. An already-queued
+  synthetic notice in the old session cannot be recalled (it can still be seen, but `wake_next`
+  refuses the content). There is no `autoResume`: startup has no calling session, so a deterministic
+  automatic choice is impossible; call `wake_resume` explicitly.
+- **Legacy records cannot prove their project.** A subscription written before project identity was
+  stored has no `project`; it is readable and adoptable within the same state root only, and is shown
+  as `project=unknown (legacy)`. If one state root is shared by several projects, adopt such a
+  record by explicit `id` rather than with `wake_resume`.
 - **`github.timeline` has no server-side `since`.** The plugin pages the tail backwards from
   `Link: rel="last"` until it reaches the cursor, bounded by `maxPages`. If more than `maxPages`
   pages of new events exist, the poll fails closed (`backlog`): raise `maxPages`.
@@ -350,6 +480,7 @@ watch keeps its cursor — no partial state is claimed.
 | `github.timeline` / `github.checks` against the live GitHub API | Not yet verified live; covered by tests with a fake transport and by mapping tests over real GitHub payload shapes |
 | `github.actions` against the live GitHub API | Not yet verified live; covered by tests with a fake transport, mapping tests over real workflow-run payload shapes, and a typed `actions: read` failure test |
 | Shared registry (two sessions, one fetcher, one wake each) | **Not yet verified live — required** (steps below) |
+| Restart adoption (`wake_list` orphans → `wake_resume` → `wake_next`, no duplicate) | **Not yet verified live — required** (steps below); covered by the restart-simulation test with two stores over one state directory |
 | Loop guard / `ignoreAuthors` against a real comment | Not yet verified live |
 
 ### Manual two-session test (required before claiming multi-session behaviour)
@@ -371,18 +502,28 @@ watch keeps its cursor — no partial state is claimed.
    session", and B's watch must still be listed in B.
 8. Unsubscribe B's watch too. The fetcher must stop (no further `wake_notice_delivered` for that
    target) even though session A still has its own watch.
-9. Restart the host while an event is unread, then run `wake_list` in the owning session: the unread
-   count must survive, and the recovered notice must arrive with `resume: false` (it waits for the
-   next wake instead of interrupting the freshly opened session).
-10. Repeat step 5 with a token that lacks `Checks: read` on a `github.checks` watch: the poll must
+9. Restart the host while an event is unread, then open a **new** session in the same project. Before
+   adopting, `wake_list` in the new session must be empty; `wake_list {"includeOrphans":true}` must
+   show the old watch with `owner=<old session> orphan=true pending=<N>`. Run `wake_resume`: it must
+   report the adopted id and `pending=<N>`, and `wake_next` in the new session must return the
+   pending event. The old session must answer "No thread subscriptions for this session." The next
+   comment must wake only the new session, with no duplicate of the adopted event.
+   Also verify the old state survives: the adopted watch's `cursor`/`shared` values in `wake_list`
+   must match what they were before the restart.
+10. Cross-project refusal: from a session in a **different** project, `wake_list
+    {"includeOrphans":true}` must not show that watch, and `wake_adopt {"id":"<that id>"}` must fail
+    with "belongs to another project". A legacy record (one written before this version, with no
+    `project` field) must still be listed as `project=unknown (legacy)` and be adoptable in the same
+    state root.
+11. Repeat step 5 with a token that lacks `Checks: read` on a `github.checks` watch: the poll must
     log `wake_poll_failed` with `failure: "forbidden"` and the cursor must not move.
-11. Loop guard: set `loop: {"maxWakes":1,"windowMs":60000,"cooldownMs":300000}` and an
+12. Loop guard: set `loop: {"maxWakes":1,"windowMs":60000,"cooldownMs":300000}` and an
     `intervalSeconds` of 15, then post two comments in quick succession. Expect one wake, then a
     `wake_list` line with `LOOP_SUSPECTED` and `suppressed=1`, and both events still readable via
     `wake_next`.
-12. `ignoreAuthors`: subscribe with `ignoreAuthors:["<your login>"]`, post as yourself, and expect no
+13. `ignoreAuthors`: subscribe with `ignoreAuthors:["<your login>"]`, post as yourself, and expect no
     wake while another author's comment still wakes you.
-13. `github.actions`: subscribe with
+14. `github.actions`: subscribe with
     `{"source":"github.actions","owner":"<org>","repo":"<repo>","workflow":"<file>.yml"}`. The first
     poll must record the baseline with no wake. Push a commit that starts a run, then watch the
     transitions: `queued` → `in_progress` → `completed / success` should each produce one notice and

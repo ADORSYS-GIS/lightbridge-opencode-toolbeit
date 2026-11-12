@@ -12,6 +12,7 @@ import {
   type WakeCursor,
   type WakeEvent,
   type WakeEventKind,
+  type WakeProject,
   type WakeSourceKind,
   type WakeSubscription,
   type WatchRecord,
@@ -156,6 +157,29 @@ function hasSourceShape(
   );
 }
 
+/**
+ * Parse the optional project identity. A malformed value is treated as absent
+ * (a legacy record) rather than making the whole subscription unreadable: the
+ * cursor and unread events matter more than the identity, and a record with an
+ * unknown project is still adoptable only within this state root.
+ */
+export function parseProject(value: unknown): WakeProject | undefined {
+  const record = asRecord(value);
+  if (!record || typeof record.id !== "string" || record.id.length === 0) {
+    return undefined;
+  }
+  if (typeof record.directory !== "string" || record.directory.length === 0) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    directory: record.directory,
+    ...(typeof record.canonical === "string" && record.canonical.length > 0
+      ? { canonical: record.canonical }
+      : {})
+  };
+}
+
 function isSubscription(value: unknown): value is WakeSubscription {
   const record = asRecord(value);
   return (
@@ -163,6 +187,7 @@ function isSubscription(value: unknown): value is WakeSubscription {
     isSubscriptionID(record.id) &&
     typeof record.sessionID === "string" &&
     record.sessionID.length > 0 &&
+    (record.project === undefined || parseProject(record.project) !== undefined) &&
     WAKE_SOURCE_KINDS.includes(record.kind as WakeSourceKind) &&
     typeof record.owner === "string" &&
     typeof record.repo === "string" &&
@@ -323,9 +348,12 @@ export class SubscriptionStore {
           this.options.logger.warn("wake_subscription_unreadable", { id });
           continue;
         }
+        const { project: rawProject, ...subscriptionFields } = record.subscription;
+        const project = parseProject(rawProject);
         const subscription: WakeSubscription = {
-          ...record.subscription,
-          ignoreAuthors: stringList(record.subscription.ignoreAuthors)
+          ...subscriptionFields,
+          ignoreAuthors: stringList(record.subscription.ignoreAuthors),
+          ...(project !== undefined ? { project } : {})
         };
         this.records.set(id, {
           subscription,

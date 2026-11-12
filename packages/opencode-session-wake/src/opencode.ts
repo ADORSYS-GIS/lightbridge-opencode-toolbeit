@@ -21,9 +21,10 @@ import {
   runInHost
 } from "./logging.js";
 import { createPoller, type Poller } from "./poller.js";
+import { resolveWakeProject } from "./project.js";
 import { SubscriptionStore, WatchStore } from "./state.js";
 import { registerWakeTools } from "./tools.js";
-import type { WakeNotice } from "./types.js";
+import type { WakeNotice, WakeProject } from "./types.js";
 
 /** Stable plugin id. v2 requires one and keys storage/registrations by it. */
 export const PLUGIN_ID = "vymalo.session-wake";
@@ -43,6 +44,8 @@ export interface SessionWakePluginFactoryOptions {
   readonly fetchImpl?: typeof fetch;
   /** Override the STATE directory (tests, or a caller with its own state). */
   readonly stateDir?: string;
+  /** Override the project identity recorded on new subscriptions (tests). */
+  readonly project?: WakeProject;
   readonly now?: () => number;
   readonly sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly random?: () => number;
@@ -99,6 +102,12 @@ export function createSessionWakePlugin(
         ...(ctx.options as Record<string, unknown>),
         ...(factoryOptions.stateDir !== undefined ? { stateDir: factoryOptions.stateDir } : {})
       });
+
+      // Captured once: every subscription this instance creates records it, so
+      // a later session in the same project can adopt the watch after a restart.
+      const project =
+        factoryOptions.project ??
+        resolveWakeProject((ctx as unknown as { location?: unknown }).location);
 
       const stateDir = options.stateDir ?? resolveWakeStateDir(resolveStateRoot());
       const store = new SubscriptionStore({
@@ -167,7 +176,7 @@ export function createSessionWakePlugin(
       factoryOptions.onPoller?.(poller);
 
       yield* ctx.tool.transform((editor) => {
-        registerWakeTools(editor, { store, poller, options, logger: log });
+        registerWakeTools(editor, { store, poller, options, logger: log, project });
       });
 
       // Started in the plugin scope and stopped when the scope closes, so the
@@ -179,6 +188,8 @@ export function createSessionWakePlugin(
 
       log.info("session_wake_started", {
         stateDir,
+        projectID: project.id,
+        projectDirectory: project.directory,
         intervalMs: options.intervalMs,
         minIntervalMs: options.minIntervalMs,
         maxIntervalMs: options.maxIntervalMs,

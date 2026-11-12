@@ -1,13 +1,26 @@
+import { join } from "node:path";
+
 import { Effect, Fiber } from "effect";
 import { describe, expect, it, vi } from "vitest";
 
 import { createSessionWakePlugin, PLUGIN_ID } from "../src/opencode.js";
 import { SubscriptionStore } from "../src/state.js";
 import type { WakeEvent } from "../src/types.js";
-import { fakeLogger, fakeTransport, makeStore, page, record, tempDir, waitFor } from "./helpers.js";
+import {
+  exec,
+  fakeLogger,
+  fakeTransport,
+  makeStore,
+  page,
+  PROJECT_A,
+  record,
+  tempDir,
+  waitFor
+} from "./helpers.js";
 
 interface RegisteredTool {
   name: string;
+  execute?: (input: unknown, context: never) => Effect.Effect<unknown, unknown>;
 }
 
 /**
@@ -30,6 +43,14 @@ function fakeContext(options: Record<string, unknown> = {}) {
   );
   const context = {
     options,
+    location: {
+      directory: PROJECT_A.directory,
+      project: {
+        id: PROJECT_A.id,
+        directory: PROJECT_A.directory,
+        canonical: PROJECT_A.canonical
+      }
+    },
     tool: {
       transform: (fn: (editor: { add: (tool: RegisteredTool) => void }) => void) =>
         Effect.sync(() => {
@@ -60,8 +81,40 @@ describe("createSessionWakePlugin", () => {
         "wake_subscribe",
         "wake_unsubscribe",
         "wake_list",
+        "wake_adopt",
+        "wake_resume",
         "wake_next"
       ]);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("records the host project identity on a new subscription", async () => {
+    const temp = await tempDir();
+    try {
+      const { context, tools } = fakeContext({ stateDir: temp.dir });
+      const plugin = createSessionWakePlugin({ logger: fakeLogger(), transport: fakeTransport() });
+      const fiber = Effect.runFork(Effect.scoped(plugin.effect(context as never)));
+      await waitFor(() => tools.length > 0);
+
+      const subscribe = tools.find((tool) => tool.name === "wake_subscribe");
+      if (!subscribe?.execute) {
+        throw new Error("wake_subscribe was not registered");
+      }
+      await exec(
+        { execute: subscribe.execute },
+        { owner: "acme", repo: "widgets", number: 7 },
+        "ses_owner"
+      );
+      await Effect.runPromise(Fiber.interrupt(fiber));
+
+      const store = new SubscriptionStore({
+        dir: join(temp.dir, "subscriptions"),
+        logger: fakeLogger()
+      });
+      await store.load();
+      expect(store.list("ses_owner")[0]?.subscription.project).toEqual(PROJECT_A);
     } finally {
       await temp.cleanup();
     }

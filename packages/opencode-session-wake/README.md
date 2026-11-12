@@ -18,7 +18,8 @@ subscribed to it when something changes — no webhook, no relay, no GitHub writ
 }
 ```
 
-Tools: `wake_subscribe`, `wake_unsubscribe`, `wake_list`, `wake_next`.
+Tools: `wake_subscribe`, `wake_unsubscribe`, `wake_list`, `wake_adopt`, `wake_resume`,
+`wake_next`.
 
 Sources (`wake_subscribe.source`):
 
@@ -36,6 +37,13 @@ Sources (`wake_subscribe.source`):
   sessions.
 - The cursor, per-URL ETags and a bounded `seen` ring are durable under the **state root**; the
   fetcher stops when the last subscriber leaves and its state ages out after 7 days.
+- **Restart-safe ownership.** Every new subscription records the host's project identity. After a
+  restart, `wake_list {"includeOrphans":true}` shows watches left behind by another session in the
+  same project, and `wake_adopt` (one id or `all: true`) / `wake_resume` (all) moves ownership to the
+  calling session. Unread events, cursor, ETags, `seen`, loop state and the shared fetcher are
+  preserved; cross-project adoption is refused. Adoption moves ownership — the old session loses the
+  watch — and there is no automatic startup adoption (`autoResume`), because startup has no calling
+  session.
 - New events produce a short **untrusted** notice via `ctx.session.synthetic({ resume: true })`.
   Bodies and summaries are only readable through `wake_next`, never injected.
 - **Loop prevention:** `ignoreAuthors` drops configured logins at fan-out, `markOriginated(id)` is the

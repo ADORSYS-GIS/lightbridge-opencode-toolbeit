@@ -86,6 +86,7 @@ export {
   initialWatchState,
   isSubscriptionID,
   newSubscriptionID,
+  parseProject,
   SubscriptionStore,
   subscriptionLabel,
   targetLabel,
@@ -96,6 +97,16 @@ export {
   type LegacyWatchSeed,
   type StoreOptions
 } from "./state.js";
+
+export {
+  adoptionScope,
+  isAdoptable,
+  projectLabel,
+  sameProject,
+  type AdoptionScope
+} from "./adoption.js";
+
+export { resolveWakeProject } from "./project.js";
 
 export {
   createWakeToolInfos,
@@ -119,6 +130,7 @@ export {
   type WakeEvent,
   type WakeEventKind,
   type WakeNotice,
+  type WakeProject,
   type WakeSourceKind,
   type WakeSubscription,
   type WatchRecord,
