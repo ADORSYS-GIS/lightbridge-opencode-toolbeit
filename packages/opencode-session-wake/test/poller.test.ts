@@ -338,6 +338,9 @@ describe("createPoller — shared registry", () => {
       transport.setComments([page([event("101")])]);
       await poller.tick(a.subscription.id);
       expect(notices).toHaveLength(1);
+      // A restart means the old poller is gone: a graceful stop releases the
+      // watch lease immediately. A crash is covered by lease expiry instead.
+      await poller.stop();
 
       const reopenedStore = new SubscriptionStore({
         dir: `${temp.dir}/subscriptions`,
@@ -516,7 +519,7 @@ describe("createPoller — shared registry", () => {
       await store.put(a);
 
       await poller.start();
-      poller.stop();
+      await poller.stop();
 
       expect(notices).toHaveLength(1);
       expect(notices[0]?.resume).toBe(false);
@@ -877,7 +880,7 @@ describe("createPoller — migration and lifecycle", () => {
       });
 
       await poller.start();
-      poller.stop();
+      await poller.stop();
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       const watch = watches.get(keyOf(rec));
@@ -932,7 +935,7 @@ describe("createPoller — migration and lifecycle", () => {
       await watches.put(watch);
 
       await poller.start();
-      poller.stop();
+      await poller.stop();
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(watches.get(keyOf(only))).toBeUndefined();

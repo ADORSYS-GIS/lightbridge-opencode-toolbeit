@@ -209,6 +209,30 @@ function stringList(value: unknown): string[] {
     : [];
 }
 
+/**
+ * Trim a `seen` ring to `limit`, **never evicting a kept id**. Drained ids are
+ * kept because they are the strongest proof that `wake_next` already handed the
+ * event to the model: evicting one before the next poll would let that poll
+ * re-add the event and wake the session a second time. If every remaining id is
+ * kept, the ring is allowed to exceed the cap rather than lose that proof; the
+ * next trim (with a different keep set) drops the oldest ids normally.
+ */
+export function trimSeenRing(list: string[], limit: number, keep: readonly string[] = []): void {
+  if (list.length <= limit) {
+    return;
+  }
+  const protectedIDs = new Set(keep);
+  let excess = list.length - limit;
+  for (let index = 0; index < list.length && excess > 0; ) {
+    if (protectedIDs.has(list[index] ?? "")) {
+      index += 1;
+      continue;
+    }
+    list.splice(index, 1);
+    excess -= 1;
+  }
+}
+
 function parseLoop(value: unknown): LoopState {
   const record = asRecord(value);
   if (!record) {
@@ -295,6 +319,16 @@ export interface StoreOptions {
   readonly logger: Logger;
   /** Defaults to `Date.now`. */
   readonly now?: () => number;
+}
+
+/** How `updateState` merges a poll's delta with the on-disk queue. */
+export interface UpdateStateOptions {
+  /** Events this poll appended; appended to the on-disk queue. */
+  readonly appended?: readonly WakeEvent[];
+  /** Cap for the merged queue (the configured `maxPending`). */
+  readonly maxPending?: number;
+  /** Cap for the merged `seen` ring (the configured `seenLimit`). */
+  readonly seenLimit?: number;
 }
 
 /**
@@ -428,6 +462,43 @@ export class SubscriptionStore {
     return this.seeds;
   }
 
+  /**
+   * Re-read every subscription from disk. The lease holder must see
+   * subscriptions another process created after this store loaded — otherwise
+   * the single poller would only ever serve its own sessions and every other
+   * session on the shared watch would starve. Called once per poll, not per
+   * event: the state root is small and local.
+   */
+  async reload(): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.options.dir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        this.records.clear();
+        return;
+      }
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) {
+        continue;
+      }
+      const id = entry.slice(0, -".json".length);
+      if (!isSubscriptionID(id)) {
+        continue;
+      }
+      const record = await this.readRecord(id);
+      if (record) {
+        this.records.set(id, record);
+      }
+    }
+    // Deliberately do not delete ids that are absent from this directory
+    // listing: a `put` may be between its rename and its in-memory set, and a
+    // removal racing a poll is already handled by `refresh`/`takePending`
+    // (they read the file and drop the record when it is gone).
+  }
+
   list(sessionID?: string): SubscriptionRecord[] {
     const all = [...this.records.values()];
     const filtered =
@@ -457,22 +528,112 @@ export class SubscriptionStore {
   }
 
   /**
+   * Read one subscription back from disk. Two plugin instances over one STATE
+   * root each keep an in-memory snapshot; the one that is not writing (a
+   * tool call in the non-owner process, or a poller that has just taken over a
+   * lease) must refresh before acting on that snapshot, or it will resurrect an
+   * owner/pending/seen value another process has already changed.
+   *
+   * Returns `undefined` for a missing or unreadable file and removes it from the
+   * in-memory map, so a removed subscription is never re-created from a stale
+   * snapshot.
+   */
+  async refresh(id: string): Promise<SubscriptionRecord | undefined> {
+    return this.serialized(id, async () => {
+      const record = await this.readRecord(id);
+      if (record) {
+        this.records.set(id, record);
+      } else {
+        this.records.delete(id);
+      }
+      return record;
+    });
+  }
+
+  private async readRecord(id: string): Promise<SubscriptionRecord | undefined> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(this.path(id), "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return undefined;
+      }
+      this.options.logger.warn("wake_subscription_unreadable", {
+        id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return undefined;
+    }
+    const record = asRecord(parsed);
+    if (!record || !isSubscription(record.subscription)) {
+      this.options.logger.warn("wake_subscription_unreadable", { id });
+      return undefined;
+    }
+    const { project: rawProject, ...subscriptionFields } = record.subscription;
+    const project = parseProject(rawProject);
+    return {
+      subscription: {
+        ...subscriptionFields,
+        ignoreAuthors: stringList(record.subscription.ignoreAuthors),
+        ...(project !== undefined ? { project } : {})
+      },
+      state: parseSubscriberState(record.state)
+    };
+  }
+
+  /**
    * Persist only the private delivery state of an **existing** subscription,
    * keeping whatever subscription the store currently holds. A poller that
    * captured a record before a network fetch must use this, never `put`: an
    * adoption may have replaced the record in the meantime, and writing the
    * captured subscription would silently move ownership back.
    *
-   * Returns the record that was written, or `undefined` when the subscription
-   * was removed while the fetch was in flight (it is never re-created).
+   * The owner is re-read from disk, not taken from the in-memory snapshot: a
+   * poller in another process may have adopted the record while this poll was
+   * in flight. Returns the record that was written, or `undefined` when the
+   * subscription was removed (it is never re-created).
+   *
+   * Pending events are **merged, not replaced**. `appended` names the events
+   * this poll added; they are appended to the on-disk queue. Everything else
+   * in `state.pending` is already on disk (and is kept there) or was drained by
+   * a concurrent `wake_next` (and must not be resurrected). This is what makes
+   * the subscriber write an append of one durable delta rather than a
+   * last-writer-wins copy of the whole queue.
    */
-  async updateState(id: string, state: SubscriberState): Promise<SubscriptionRecord | undefined> {
+  async updateState(
+    id: string,
+    state: SubscriberState,
+    options: UpdateStateOptions = {}
+  ): Promise<SubscriptionRecord | undefined> {
     return this.serialized(id, async () => {
-      const current = this.records.get(id);
+      const current = await this.readRecord(id);
       if (!current) {
+        this.records.delete(id);
         return undefined;
       }
-      const next: SubscriptionRecord = { subscription: current.subscription, state };
+      const onDisk = new Set(current.state.pending.map((event) => event.id));
+      const alreadySeen = new Set(current.state.seen);
+      const additions = (options.appended ?? state.pending).filter(
+        (event) => !onDisk.has(event.id) && !alreadySeen.has(event.id)
+      );
+      const pending = [...current.state.pending, ...additions];
+      if (options.maxPending !== undefined && pending.length > options.maxPending) {
+        pending.splice(0, pending.length - options.maxPending);
+      }
+      // Union the seen rings: a concurrent drain may have added ids after this
+      // poll captured its snapshot, and losing them would let a later poll
+      // re-evaluate an event the model already read.
+      const seen = [...current.state.seen];
+      for (const eventID of state.seen) {
+        if (!seen.includes(eventID)) {
+          seen.push(eventID);
+        }
+      }
+      trimSeenRing(seen, options.seenLimit ?? seen.length);
+      const next: SubscriptionRecord = {
+        subscription: current.subscription,
+        state: { ...state, pending, seen }
+      };
       await mkdir(this.options.dir, { recursive: true });
       await writeAtomic(this.path(id), next);
       this.records.set(id, next);
@@ -492,8 +653,17 @@ export class SubscriptionStore {
     limit: number
   ): Promise<{ subscription: WakeSubscription; events: WakeEvent[] } | undefined> {
     return this.serialized(id, async () => {
-      const current = this.records.get(id);
-      if (!current || current.subscription.sessionID !== sessionID) {
+      // Read the queue from disk, not from the snapshot: a poller in another
+      // process may have appended an event since this store loaded. Without
+      // this, `wake_next` can answer "No unread comments" while `wake_list`
+      // shows `pending=1` — the live anomaly this method must not reproduce.
+      const current = await this.readRecord(id);
+      if (!current) {
+        this.records.delete(id);
+        return undefined;
+      }
+      this.records.set(id, current);
+      if (current.subscription.sessionID !== sessionID) {
         return undefined;
       }
       const events = current.state.pending.splice(0, limit);
@@ -572,6 +742,12 @@ export class WatchStore {
   private readonly records = new Map<string, WatchRecord>();
   private readonly now: () => number;
   private loaded = false;
+  /**
+   * Per-watch write chains. A poller writing cursor/`seen` and a tool call
+   * recording a drained id must not interleave two whole-file writes inside one
+   * process. (Across processes the lease is the guard; see `lease.ts`.)
+   */
+  private readonly writeChains = new Map<string, Promise<void>>();
 
   constructor(private readonly options: StoreOptions) {
     this.now = options.now ?? Date.now;
@@ -583,6 +759,28 @@ export class WatchStore {
 
   private path(key: string): string {
     return join(this.options.dir, watchFileFor(key));
+  }
+
+  private async serialized<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.writeChains.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chain = previous.then(
+      () => current,
+      () => current
+    );
+    this.writeChains.set(key, chain);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.writeChains.get(key) === chain) {
+        this.writeChains.delete(key);
+      }
+    }
   }
 
   async load(): Promise<void> {
@@ -652,23 +850,118 @@ export class WatchStore {
     return [...this.records.values()];
   }
 
+  private async readWatchFile(key: string): Promise<WatchRecord | undefined> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(this.path(key), "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return undefined;
+      }
+      this.options.logger.warn("wake_watch_unreadable", {
+        key,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return undefined;
+    }
+    const record = asRecord(parsed);
+    const target = asRecord(record?.target);
+    if (
+      !record ||
+      typeof record.key !== "string" ||
+      record.key !== key ||
+      !target ||
+      typeof target.apiBase !== "string" ||
+      !WAKE_SOURCE_KINDS.includes(target.kind as WakeSourceKind) ||
+      typeof target.owner !== "string" ||
+      typeof target.repo !== "string" ||
+      !hasSourceShape(target.kind as WakeSourceKind, target)
+    ) {
+      this.options.logger.warn("wake_watch_unreadable", { key });
+      return undefined;
+    }
+    return {
+      key,
+      target: {
+        apiBase: target.apiBase,
+        kind: target.kind as WakeSourceKind,
+        owner: target.owner,
+        repo: target.repo,
+        ...(typeof target.number === "number" ? { number: target.number } : {}),
+        ...(typeof target.workflow === "string" ? { workflow: target.workflow } : {}),
+        ...(typeof target.branch === "string" ? { branch: target.branch } : {})
+      },
+      state: parseWatchState(record.state, this.now())
+    };
+  }
+
+  /**
+   * Re-read one watch from disk. A poller that may have just taken over a lease,
+   * or a tool call in a non-owner process, must not act on the snapshot loaded
+   * at startup: another process may have advanced the cursor, added `seen` ids
+   * or changed the subscriber list.
+   */
+  async refresh(key: string): Promise<WatchRecord | undefined> {
+    return this.serialized(key, async () => {
+      const record = await this.readWatchFile(key);
+      if (record) {
+        this.records.set(key, record);
+      } else {
+        this.records.delete(key);
+      }
+      return record;
+    });
+  }
+
+  /**
+   * Add ids to the shared `seen` ring and persist immediately. `wake_next` calls
+   * this after a successful drain so a later poll — in this process or another
+   * one that has taken over the lease — cannot re-add an event the model has
+   * already read. `keep` protects the drained ids from the `seenLimit` trim.
+   */
+  async recordSeen(key: string, ids: readonly string[], limit: number): Promise<boolean> {
+    if (ids.length === 0) {
+      return false;
+    }
+    return this.serialized(key, async () => {
+      const current = await this.readWatchFile(key);
+      if (!current) {
+        return false;
+      }
+      for (const id of ids) {
+        if (!current.state.seen.includes(id)) {
+          current.state.seen.push(id);
+        }
+      }
+      trimSeenRing(current.state.seen, limit, ids);
+      await mkdir(this.options.dir, { recursive: true });
+      await writeAtomic(this.path(key), current);
+      this.records.set(key, current);
+      return true;
+    });
+  }
+
   async put(record: WatchRecord): Promise<void> {
-    await mkdir(this.options.dir, { recursive: true });
-    await writeAtomic(this.path(record.key), record);
-    this.records.set(record.key, record);
+    await this.serialized(record.key, async () => {
+      await mkdir(this.options.dir, { recursive: true });
+      await writeAtomic(this.path(record.key), record);
+      this.records.set(record.key, record);
+    });
   }
 
   async remove(key: string): Promise<boolean> {
-    if (!this.records.delete(key)) {
-      return false;
-    }
-    try {
-      await unlink(this.path(key));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
+    return this.serialized(key, async () => {
+      if (!this.records.delete(key)) {
+        return false;
       }
-    }
-    return true;
+      try {
+        await unlink(this.path(key));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+      }
+      return true;
+    });
   }
 }

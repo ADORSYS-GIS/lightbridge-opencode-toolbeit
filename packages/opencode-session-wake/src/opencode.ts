@@ -6,11 +6,13 @@ import {
   parseWakeOptions,
   resolveStateRoot,
   resolveWakeStateDir,
+  wakeLeasesDir,
   wakeSubscriptionsDir,
   wakeWatchesDir,
   type WakeOptions
 } from "./config.js";
 import { createGitHubTransport, type GitHubTransport } from "./github.js";
+import { LeaseStore } from "./lease.js";
 import {
   captureHostContext,
   createEffectLogger,
@@ -121,6 +123,13 @@ export function createSessionWakePlugin(
         logger: log,
         now: factoryOptions.now
       });
+      // One lease per watch key, beside the watch files. It is the cross-process
+      // single-writer guard: only the owner of a live lease may fetch or wake.
+      const leases = new LeaseStore({
+        dir: wakeLeasesDir(stateDir),
+        logger: log,
+        now: factoryOptions.now
+      });
 
       const tokenSource =
         factoryOptions.tokenSource ??
@@ -166,6 +175,7 @@ export function createSessionWakePlugin(
       const poller = createPoller({
         store,
         watches,
+        leases,
         transport,
         deliver,
         logger: log,
@@ -184,7 +194,7 @@ export function createSessionWakePlugin(
       // timer can never outlive the host that owns it.
       yield* Effect.acquireRelease(
         Effect.promise(() => poller.start()),
-        () => Effect.sync(() => poller.stop())
+        () => Effect.promise(() => poller.stop())
       );
 
       log.info("session_wake_started", {
