@@ -1,12 +1,13 @@
 import type { WakeOptions } from "./config.js";
 import { GITHUB_PAGE_SIZE, TransportFailure, type GitHubTransport } from "./github.js";
 import type { Logger } from "./logging.js";
-import type { SubscriptionState, WakeCursor, WakeEvent, WakeSubscription } from "./types.js";
+import type { SourceState, WakeCursor, WakeEvent, WatchTarget } from "./types.js";
 
 /** Everything a source needs for one poll. Pure strategy: no timers, no storage. */
 export interface SourceContext {
-  readonly subscription: WakeSubscription;
-  readonly state: SubscriptionState;
+  /** The shared fetch target — not a subscription: one fetcher serves many. */
+  readonly target: WatchTarget;
+  readonly state: SourceState;
   readonly transport: GitHubTransport;
   readonly options: WakeOptions;
   readonly logger: Logger;
@@ -31,24 +32,24 @@ function repoPath(owner: string, repo: string): string {
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
 }
 
-function threadURL(subscription: WakeSubscription, page: number, since: string): string {
-  return `${repoPath(subscription.owner, subscription.repo)}/issues/${
-    subscription.number
+function threadURL(target: WatchTarget, page: number, since: string): string {
+  return `${repoPath(target.owner, target.repo)}/issues/${
+    target.number
   }/comments?per_page=${GITHUB_PAGE_SIZE}&page=${page}&since=${since}`;
 }
 
-function timelineURL(subscription: WakeSubscription, page: number): string {
-  return `${repoPath(subscription.owner, subscription.repo)}/issues/${
-    subscription.number
+function timelineURL(target: WatchTarget, page: number): string {
+  return `${repoPath(target.owner, target.repo)}/issues/${
+    target.number
   }/timeline?per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
 }
 
-function pullURL(subscription: WakeSubscription): string {
-  return `${repoPath(subscription.owner, subscription.repo)}/pulls/${subscription.number}`;
+function pullURL(target: WatchTarget): string {
+  return `${repoPath(target.owner, target.repo)}/pulls/${target.number}`;
 }
 
-function checksURL(subscription: WakeSubscription, ref: string, page: number): string {
-  return `${repoPath(subscription.owner, subscription.repo)}/commits/${encodeURIComponent(
+function checksURL(target: WatchTarget, ref: string, page: number): string {
+  return `${repoPath(target.owner, target.repo)}/commits/${encodeURIComponent(
     ref
   )}/check-runs?per_page=${GITHUB_PAGE_SIZE}&page=${page}`;
 }
@@ -79,9 +80,9 @@ function advanceCursor(
  * the first slice so existing watches keep their cursor and their dedupe history.
  */
 async function pollThread(context: SourceContext): Promise<SourceResult> {
-  const { subscription, state, transport, options } = context;
+  const { target, state, transport, options } = context;
   const since = state.cursor.lastSeenAt;
-  const firstURL = threadURL(subscription, 1, since);
+  const firstURL = threadURL(target, 1, since);
   const cached = state.etags?.[firstURL];
 
   const events: WakeEvent[] = [];
@@ -92,9 +93,9 @@ async function pollThread(context: SourceContext): Promise<SourceResult> {
 
   while (hasNextPage && page <= options.maxPages) {
     const response = await transport.listComments({
-      owner: subscription.owner,
-      repo: subscription.repo,
-      number: subscription.number,
+      owner: target.owner,
+      repo: target.repo,
+      number: target.number,
       page,
       since,
       ...(page === 1 && cached !== undefined ? { etag: cached } : {})
@@ -122,7 +123,7 @@ async function pollThread(context: SourceContext): Promise<SourceResult> {
 
   const cursor = advanceCursor(state.cursor, events);
   // The validator is only reusable when the next request repeats the same URL.
-  const nextURL = threadURL(subscription, 1, cursor.lastSeenAt);
+  const nextURL = threadURL(target, 1, cursor.lastSeenAt);
   return {
     events,
     cursor,
@@ -161,16 +162,16 @@ function coversBoundary(
  * there is no `last` page; otherwise the boundary must be found from the tail.
  */
 async function pollTimeline(context: SourceContext): Promise<SourceResult> {
-  const { subscription, state, transport, options } = context;
+  const { target, state, transport, options } = context;
   const since = state.cursor.lastSeenAt;
   const cursorID = state.cursor.lastEventID;
-  const firstURL = timelineURL(subscription, 1);
+  const firstURL = timelineURL(target, 1);
   const cached = state.etags?.[firstURL];
 
   const first = await transport.listTimeline({
-    owner: subscription.owner,
-    repo: subscription.repo,
-    number: subscription.number,
+    owner: target.owner,
+    repo: target.repo,
+    number: target.number,
     page: 1,
     ...(cached !== undefined ? { etag: cached } : {})
   });
@@ -199,9 +200,9 @@ async function pollTimeline(context: SourceContext): Promise<SourceResult> {
         page === 1
           ? { events: first.events }
           : await transport.listTimeline({
-              owner: subscription.owner,
-              repo: subscription.repo,
-              number: subscription.number,
+              owner: target.owner,
+              repo: target.repo,
+              number: target.number,
               page
             });
       pages.unshift([...response.events]);
@@ -239,14 +240,12 @@ async function pollTimeline(context: SourceContext): Promise<SourceResult> {
  * separate `actions: read` scope and would report the same CI twice.
  */
 async function pollChecks(context: SourceContext): Promise<SourceResult> {
-  const { subscription, state, transport, options, now } = context;
+  const { target, state, transport, options, now } = context;
   const pull = await transport.getPullRequest({
-    owner: subscription.owner,
-    repo: subscription.repo,
-    number: subscription.number,
-    ...(state.etags?.[pullURL(subscription)] !== undefined
-      ? { etag: state.etags[pullURL(subscription)] }
-      : {})
+    owner: target.owner,
+    repo: target.repo,
+    number: target.number,
+    ...(state.etags?.[pullURL(target)] !== undefined ? { etag: state.etags[pullURL(target)] } : {})
   });
 
   const headSHA = pull.notModified ? state.cursor.headSHA : pull.headSHA;
@@ -270,7 +269,7 @@ async function pollChecks(context: SourceContext): Promise<SourceResult> {
     });
   }
 
-  const checksFirstURL = checksURL(subscription, headSHA, 1);
+  const checksFirstURL = checksURL(target, headSHA, 1);
   const cachedChecks = state.etags?.[checksFirstURL];
   const runs: WakeEvent[] = [];
   let firstPageETag: string | undefined;
@@ -281,8 +280,8 @@ async function pollChecks(context: SourceContext): Promise<SourceResult> {
 
   while (hasNextPage && page <= options.maxPages) {
     const response = await transport.listCheckRuns({
-      owner: subscription.owner,
-      repo: subscription.repo,
+      owner: target.owner,
+      repo: target.repo,
       ref: headSHA,
       page,
       ...(page === 1 && cachedChecks !== undefined ? { etag: cachedChecks } : {})
@@ -306,9 +305,9 @@ async function pollChecks(context: SourceContext): Promise<SourceResult> {
 
   const cursor = advanceCursor(state.cursor, events, { headSHA });
   const etags: Record<string, string> = {};
-  const pullETag = pull.notModified ? state.etags?.[pullURL(subscription)] : pull.etag;
+  const pullETag = pull.notModified ? state.etags?.[pullURL(target)] : pull.etag;
   if (pullETag !== undefined) {
-    etags[pullURL(subscription)] = pullETag;
+    etags[pullURL(target)] = pullETag;
   }
   const checksETag = checksNotModified
     ? cachedChecks
@@ -328,9 +327,9 @@ async function pollChecks(context: SourceContext): Promise<SourceResult> {
   };
 }
 
-/** Dispatch to the adapter for this subscription's source kind. */
+/** Dispatch to the adapter for this watch target's source kind. */
 export function pollSource(context: SourceContext): Promise<SourceResult> {
-  switch (context.subscription.kind) {
+  switch (context.target.kind) {
     case "github.thread":
       return pollThread(context);
     case "github.timeline":
@@ -338,7 +337,7 @@ export function pollSource(context: SourceContext): Promise<SourceResult> {
     case "github.checks":
       return pollChecks(context);
     default: {
-      const kind: never = context.subscription.kind;
+      const kind: never = context.target.kind;
       return Promise.reject(
         new TransportFailure("malformed", `unsupported source kind: ${String(kind)}`)
       );

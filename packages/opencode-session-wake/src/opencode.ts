@@ -4,8 +4,10 @@ import { Effect } from "effect";
 import { createTokenSource, type TokenSource } from "./auth.js";
 import {
   parseWakeOptions,
-  resolveWakeStateDir,
   resolveStateRoot,
+  resolveWakeStateDir,
+  wakeSubscriptionsDir,
+  wakeWatchesDir,
   type WakeOptions
 } from "./config.js";
 import { createGitHubTransport, type GitHubTransport } from "./github.js";
@@ -19,7 +21,7 @@ import {
   runInHost
 } from "./logging.js";
 import { createPoller, type Poller } from "./poller.js";
-import { SubscriptionStore } from "./state.js";
+import { SubscriptionStore, WatchStore } from "./state.js";
 import { registerWakeTools } from "./tools.js";
 import type { WakeNotice } from "./types.js";
 
@@ -99,7 +101,16 @@ export function createSessionWakePlugin(
       });
 
       const stateDir = options.stateDir ?? resolveWakeStateDir(resolveStateRoot());
-      const store = new SubscriptionStore({ dir: stateDir, logger: log, now: factoryOptions.now });
+      const store = new SubscriptionStore({
+        dir: wakeSubscriptionsDir(stateDir),
+        logger: log,
+        now: factoryOptions.now
+      });
+      const watches = new WatchStore({
+        dir: wakeWatchesDir(stateDir),
+        logger: log,
+        now: factoryOptions.now
+      });
 
       const tokenSource =
         factoryOptions.tokenSource ??
@@ -144,6 +155,7 @@ export function createSessionWakePlugin(
 
       const poller = createPoller({
         store,
+        watches,
         transport,
         deliver,
         logger: log,

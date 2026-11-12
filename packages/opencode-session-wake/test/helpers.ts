@@ -17,14 +17,25 @@ import type {
   TimelineRequest
 } from "../src/github.js";
 import type { Logger } from "../src/logging.js";
-import { initialState, SubscriptionStore, newSubscriptionID } from "../src/state.js";
+import {
+  initialSubscriberState,
+  initialWatchState,
+  newSubscriptionID,
+  SubscriptionStore,
+  targetOf,
+  watchKey,
+  WatchStore
+} from "../src/state.js";
 import type {
   SubscriptionRecord,
   WakeEvent,
   WakeNotice,
-  WakeSourceKind,
-  WakeSubscription
+  WakeSubscription,
+  WatchRecord,
+  WatchState
 } from "../src/types.js";
+
+export const DEFAULT_API_BASE = "https://api.github.com";
 
 export interface FakeLogger extends Logger {
   readonly events: Array<{ level: string; event: string; fields?: Record<string, unknown> }>;
@@ -77,18 +88,68 @@ export function subscription(over: Partial<WakeSubscription> = {}): WakeSubscrip
     repo: "widgets",
     number: 7,
     mentions: [],
+    ignoreAuthors: [],
     intervalMs: 60_000,
     createdAt: "2026-01-01T00:00:00Z",
     ...over
   };
 }
 
-export function record(over: Partial<WakeSubscription> = {}, at = 1_000): SubscriptionRecord {
-  return { subscription: subscription(over), state: initialState(at) };
+export function record(over: Partial<WakeSubscription> = {}): SubscriptionRecord {
+  return { subscription: subscription(over), state: initialSubscriberState() };
 }
 
-export function kinded(kind: WakeSourceKind, over: Partial<WakeSubscription> = {}) {
-  return record({ kind, ...over });
+/** The shared watch key a subscription belongs to. */
+export function keyOf(record: SubscriptionRecord, apiBase = DEFAULT_API_BASE): string {
+  return watchKey(targetOf(record.subscription, apiBase));
+}
+
+/** Persist a watch for a subscription with the given state overrides. */
+export async function seedWatch(
+  watches: WatchStore,
+  record: SubscriptionRecord,
+  over: Partial<WatchState> = {}
+): Promise<WatchRecord> {
+  const key = keyOf(record);
+  const existing = watches.get(key);
+  const watch: WatchRecord = {
+    key,
+    target: targetOf(record.subscription, DEFAULT_API_BASE),
+    state: {
+      ...initialWatchState(1_000, [record.subscription.id]),
+      ...(existing?.state ?? {}),
+      ...over
+    }
+  };
+  await watches.put(watch);
+  return watch;
+}
+
+/** Both stores over one temp root, loaded and ready. */
+export async function makeStores(
+  dir: string,
+  now = () => 1_000
+): Promise<{ store: SubscriptionStore; watches: WatchStore }> {
+  const store = new SubscriptionStore({
+    dir: join(dir, "subscriptions"),
+    logger: fakeLogger(),
+    now
+  });
+  const watches = new WatchStore({ dir: join(dir, "watches"), logger: fakeLogger(), now });
+  await store.load();
+  await watches.load();
+  return { store, watches };
+}
+
+/** A subscriber store over a temp root, loaded and ready. */
+export async function makeStore(dir: string, now = () => 1_000): Promise<SubscriptionStore> {
+  const store = new SubscriptionStore({
+    dir: join(dir, "subscriptions"),
+    logger: fakeLogger(),
+    now
+  });
+  await store.load();
+  return store;
 }
 
 /**
@@ -188,13 +249,6 @@ export function timelinePage(events: WakeEvent[], over: Partial<TimelinePage> = 
 
 export function checksPage(events: WakeEvent[], over: Partial<CheckRunsPage> = {}): CheckRunsPage {
   return { notModified: false, events, hasNextPage: false, ...over };
-}
-
-/** A store over a temp dir, loaded and ready. */
-export async function makeStore(dir: string, now = () => 1_000): Promise<SubscriptionStore> {
-  const store = new SubscriptionStore({ dir, logger: fakeLogger(), now });
-  await store.load();
-  return store;
 }
 
 /** The wake seam as a test double: records every notice it is given. */

@@ -3,27 +3,24 @@ import { describe, expect, it } from "vitest";
 import { parseWakeOptions } from "../src/config.js";
 import { TransportFailure } from "../src/github.js";
 import { pollSource } from "../src/sources.js";
-import { initialState } from "../src/state.js";
-import type {
-  SubscriptionState,
-  WakeEvent,
-  WakeSourceKind,
-  WakeSubscription
-} from "../src/types.js";
-import { checksPage, fakeLogger, fakeTransport, subscription, timelinePage } from "./helpers.js";
+import type { SourceState } from "../src/types.js";
+import type { WakeEvent, WakeSourceKind } from "../src/types.js";
+import { checksPage, fakeLogger, fakeTransport, timelinePage } from "./helpers.js";
 
 const SINCE = "2026-01-01T00:00:00Z";
 
-function context(
-  kind: WakeSourceKind,
-  state: SubscriptionState,
-  over: Partial<WakeSubscription> = {}
-) {
+function context(kind: WakeSourceKind, state: SourceState) {
   const transport = fakeTransport();
   return {
     transport,
     context: {
-      subscription: subscription({ kind, ...over }),
+      target: {
+        apiBase: "https://api.github.com",
+        kind,
+        owner: "acme",
+        repo: "widgets",
+        number: 7
+      },
       state,
       transport,
       options: parseWakeOptions({ maxPages: 3 }),
@@ -33,8 +30,8 @@ function context(
   };
 }
 
-function state(over: Partial<SubscriptionState> = {}): SubscriptionState {
-  return { ...initialState(1_000), cursor: { lastSeenAt: SINCE }, ...over };
+function state(over: Partial<SourceState> = {}): SourceState {
+  return { cursor: { lastSeenAt: SINCE }, ...over };
 }
 
 function reviewEvent(id: string, at = "2026-01-01T00:10:00Z"): WakeEvent {

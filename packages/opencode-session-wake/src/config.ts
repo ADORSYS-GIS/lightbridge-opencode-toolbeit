@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 import type { Logger } from "./logging.js";
+import { DEFAULT_LOOP_POLICY, normalizeAuthors, type LoopPolicy } from "./loop.js";
 /** Everything the plugin needs to run, resolved once at registration time. */
 export interface WakeOptions {
   /** Poll interval for one subscription, before backoff. */
@@ -19,6 +20,10 @@ export interface WakeOptions {
   readonly apiBase: string;
   /** `gh auth token` by default; a user-supplied command replaces it. */
   readonly tokenCommand: readonly string[];
+  /** Authors dropped at fan-out for every watch (lowercase logins). */
+  readonly ignoreAuthors: readonly string[];
+  /** Wake-rate guard applied per `(session, watch)`. */
+  readonly loop: LoopPolicy;
   /** Override the state root (tests, or a caller that keeps its own state). */
   readonly stateDir?: string;
 }
@@ -72,9 +77,24 @@ export function resolveStateRoot(
   return absolute(env.XDG_STATE_HOME) ?? join(home, ".local", "state");
 }
 
-/** `<stateRoot>/opencode-session-wake/subscriptions`. */
+/**
+ * This plugin's state directory: `<stateRoot>/opencode-session-wake`. It holds
+ * `subscriptions/` (one file per subscriber) and `watches/` (one file per shared
+ * fetch key). The subscriptions path is unchanged from the first slice, so
+ * pre-registry state is found and migrated in place.
+ */
 export function resolveWakeStateDir(stateRoot: string = resolveStateRoot()): string {
-  return join(stateRoot, STATE_NAMESPACE, "subscriptions");
+  return join(stateRoot, STATE_NAMESPACE);
+}
+
+/** `<stateDir>/subscriptions` — one file per subscriber. */
+export function wakeSubscriptionsDir(stateDir: string): string {
+  return join(stateDir, "subscriptions");
+}
+
+/** `<stateDir>/watches` — one file per shared fetch key. */
+export function wakeWatchesDir(stateDir: string): string {
+  return join(stateDir, "watches");
 }
 
 function stringArray(value: unknown): readonly string[] | undefined {
@@ -114,9 +134,38 @@ export function parseWakeOptions(raw: Record<string, unknown> = {}): WakeOptions
         ? raw.apiBase.replace(/\/+$/, "")
         : DEFAULT_API_BASE,
     tokenCommand,
+    ignoreAuthors: parseIgnoreAuthors(raw.ignoreAuthors),
+    loop: parseLoopPolicy(raw.loop),
     ...(typeof raw.stateDir === "string" && raw.stateDir.length > 0
       ? { stateDir: raw.stateDir }
       : {})
+  };
+}
+
+function parseIgnoreAuthors(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return normalizeAuthors(value.filter((entry): entry is string => typeof entry === "string"));
+}
+
+/**
+ * The wake-rate guard. A malformed value falls back to the safe default rather
+ * than disabling the guard: a typo must not open the loop.
+ */
+function parseLoopPolicy(value: unknown): LoopPolicy {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return DEFAULT_LOOP_POLICY;
+  }
+  const raw = value as Record<string, unknown>;
+  const cooldown = raw.cooldownMs;
+  return {
+    maxWakes: positiveInt(raw.maxWakes, DEFAULT_LOOP_POLICY.maxWakes),
+    windowMs: positiveInt(raw.windowMs, DEFAULT_LOOP_POLICY.windowMs),
+    cooldownMs:
+      typeof cooldown === "number" && Number.isFinite(cooldown) && cooldown >= 0
+        ? Math.floor(cooldown)
+        : DEFAULT_LOOP_POLICY.cooldownMs
   };
 }
 

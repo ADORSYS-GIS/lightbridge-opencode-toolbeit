@@ -8,7 +8,9 @@ import {
   DEFAULT_TOKEN_COMMAND,
   parseWakeOptions,
   resolveStateRoot,
-  resolveWakeStateDir
+  resolveWakeStateDir,
+  wakeSubscriptionsDir,
+  wakeWatchesDir
 } from "../src/config.js";
 import { fakeLogger } from "./helpers.js";
 
@@ -46,7 +48,13 @@ describe("resolveStateRoot", () => {
   });
 
   it("namespaces the directory under the state root", () => {
-    expect(resolveWakeStateDir("/state")).toBe("/state/opencode-session-wake/subscriptions");
+    expect(resolveWakeStateDir("/state")).toBe("/state/opencode-session-wake");
+    expect(wakeSubscriptionsDir("/state/opencode-session-wake")).toBe(
+      "/state/opencode-session-wake/subscriptions"
+    );
+    expect(wakeWatchesDir("/state/opencode-session-wake")).toBe(
+      "/state/opencode-session-wake/watches"
+    );
   });
 });
 
@@ -88,6 +96,28 @@ describe("parseWakeOptions", () => {
     expect(options.apiBase).toBe("https://api.github.com");
     expect(options.tokenCommand).toEqual(DEFAULT_TOKEN_COMMAND);
     expect(options.stateDir).toBeUndefined();
+  });
+
+  it("parses the loop guard and defaults it safely", () => {
+    const defaults = parseWakeOptions();
+    expect(defaults.loop.maxWakes).toBeGreaterThan(0);
+    expect(defaults.loop.windowMs).toBeGreaterThanOrEqual(60_000);
+
+    const custom = parseWakeOptions({
+      loop: { maxWakes: 2, windowMs: 30_000, cooldownMs: 0 }
+    });
+    expect(custom.loop).toEqual({ maxWakes: 2, windowMs: 30_000, cooldownMs: 0 });
+
+    const malformed = parseWakeOptions({ loop: { maxWakes: -1, windowMs: "soon" } });
+    expect(malformed.loop).toEqual(defaults.loop);
+    expect(parseWakeOptions({ loop: "nope" }).loop).toEqual(defaults.loop);
+  });
+
+  it("normalizes ignoreAuthors and drops non-strings", () => {
+    const options = parseWakeOptions({ ignoreAuthors: ["@Alice", "github-actions[bot]", 42] });
+    expect(options.ignoreAuthors).toEqual(["alice", "github-actions[bot]"]);
+    expect(parseWakeOptions({ ignoreAuthors: "alice" }).ignoreAuthors).toEqual([]);
+    expect(parseWakeOptions().ignoreAuthors).toEqual([]);
   });
 
   it("accepts a custom token command and state dir", () => {

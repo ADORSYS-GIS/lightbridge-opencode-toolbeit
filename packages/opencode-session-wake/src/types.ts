@@ -27,6 +27,19 @@ export const WAKE_SOURCE_KINDS: readonly WakeSourceKind[] = [
 /** This plugin's log tiers. */
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
+/**
+ * What one shared fetcher polls. This — not the subscription — is the unit of
+ * work: two sessions watching the same target share one poller, one cursor and
+ * one set of ETags.
+ */
+export interface WatchTarget {
+  readonly apiBase: string;
+  readonly kind: WakeSourceKind;
+  readonly owner: string;
+  readonly repo: string;
+  readonly number: number;
+}
+
 /** A subscription is owned by exactly one session: the one whose tool call created it. */
 export interface WakeSubscription {
   readonly id: string;
@@ -37,6 +50,8 @@ export interface WakeSubscription {
   readonly number: number;
   /** Handles to filter on (`@name`); empty means "everything". */
   readonly mentions: readonly string[];
+  /** Authors whose events are dropped at fan-out (lowercase logins, no `@`). */
+  readonly ignoreAuthors: readonly string[];
   readonly intervalMs: number;
   readonly createdAt: string;
 }
@@ -84,35 +99,63 @@ export interface WakeCursor {
   headSHA?: string;
 }
 
-/**
- * A cached conditional-request validator. Keyed by the exact request URL it was
- * earned for: a changed `since`, page or head sha makes the URL different, so a
- * stale validator can never be sent.
- */
-export interface WakeETag {
-  readonly url: string;
-  readonly value: string;
-}
-
-/** Per-subscription mutable state, persisted beside the subscription. */
-export interface SubscriptionState {
+/** The part of a watch's state the source strategies read and write. */
+export interface SourceState {
   cursor: WakeCursor;
   /** Validators by request URL. A source replaces this map wholesale on success. */
   etags?: Record<string, string>;
-  /** Observed but not yet read by the model; survives a restart. */
-  pending: WakeEvent[];
-  /** Bounded ring of event ids already accepted, so a replayed page cannot duplicate. */
+}
+
+/**
+ * Shared fetch state for one watch key: one cursor, one ETag map, one dedupe
+ * ring, one backoff — regardless of how many sessions subscribe to it.
+ */
+export interface WatchState extends SourceState {
+  /** Event ids the shared fetcher has already accepted. */
   seen: string[];
   consecutiveFailures: number;
   lastError?: string;
   lastPollAt?: string;
   nextPollAt: number;
+  /** Subscription ids attached to this watch. Rebuilt from the subscriber store on load. */
+  subscribers: string[];
+  /** When the last subscriber left (age-out), or the last join. */
+  lastTouchedAt: number;
 }
 
-/** What is persisted for one subscription: the watch and its state, in one atomic write. */
+/** One shared fetcher: its key, what it polls, and its state. */
+export interface WatchRecord {
+  readonly key: string;
+  readonly target: WatchTarget;
+  state: WatchState;
+}
+
+/** Loop guard state for one `(session, watch)` pair — i.e. one subscriber. */
+export interface LoopState {
+  /** Timestamps (ms) of recent delivered wakes, oldest first. */
+  wakes: number[];
+  /** Wakes coalesced away since the last delivery. */
+  suppressed: number;
+  /** True while the wake rate is over budget or a cooldown is running. */
+  loopSuspected: boolean;
+  cooldownUntil?: number;
+}
+
+/** Per-subscriber delivery state. Isolated per session even on a shared fetcher. */
+export interface SubscriberState {
+  /** Observed but not yet read by the model; survives a restart. */
+  pending: WakeEvent[];
+  /** Bounded ring of event ids this subscriber has already accepted. */
+  seen: string[];
+  /** Last delivery (not fetch) error for this subscriber. */
+  lastError?: string;
+  loop: LoopState;
+}
+
+/** A subscription plus its private delivery state. */
 export interface SubscriptionRecord {
   readonly subscription: WakeSubscription;
-  state: SubscriptionState;
+  state: SubscriberState;
 }
 
 /** The notice injected into the owning session. Deliberately body-free. */

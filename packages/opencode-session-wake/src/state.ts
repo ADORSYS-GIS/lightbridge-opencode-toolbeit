@@ -1,16 +1,22 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { initialLoopState } from "./loop.js";
 import type { Logger } from "./logging.js";
 import {
   WAKE_SOURCE_KINDS,
+  type LoopState,
+  type SubscriberState,
   type SubscriptionRecord,
-  type SubscriptionState,
+  type WakeCursor,
   type WakeEvent,
   type WakeEventKind,
   type WakeSourceKind,
-  type WakeSubscription
+  type WakeSubscription,
+  type WatchRecord,
+  type WatchState,
+  type WatchTarget
 } from "./types.js";
 
 /** Ids this plugin generates; also the only ids it will accept back from a tool call. */
@@ -24,15 +30,57 @@ export function isSubscriptionID(value: unknown): value is string {
   return typeof value === "string" && ID_PATTERN.test(value);
 }
 
-/** Fresh state for a new watch: nothing pending, cursor at "now" so no backlog is dumped. */
-export function initialState(now: number): SubscriptionState {
+/**
+ * The fetch identity of a watch: two sessions watching the same target share
+ * one fetcher, one cursor and one ETag map. Owner/repo are lower-cased because
+ * GitHub treats them case-insensitively — `Acme/Widgets` and `acme/widgets` must
+ * not become two pollers.
+ */
+export function watchKey(target: WatchTarget): string {
+  return [
+    target.apiBase,
+    target.kind,
+    target.owner.toLowerCase(),
+    target.repo.toLowerCase(),
+    String(target.number)
+  ].join("|");
+}
+
+/** Path-safe, stable file name for a watch key. */
+export function watchFileFor(key: string): string {
+  return `${createHash("sha256").update(key).digest("hex").slice(0, 16)}.json`;
+}
+
+/** Fresh delivery state for a subscriber: nothing pending, no loop history. */
+export function initialSubscriberState(): SubscriberState {
+  return { pending: [], seen: [], loop: initialLoopState() };
+}
+
+/**
+ * Fresh fetch state for a watch: cursor at "now" so no backlog is dumped, and
+ * an immediate first poll.
+ */
+export function initialWatchState(now: number, subscribers: string[] = []): WatchState {
   return {
     cursor: { lastSeenAt: new Date(now).toISOString() },
-    pending: [],
     seen: [],
     consecutiveFailures: 0,
-    nextPollAt: now
+    nextPollAt: now,
+    subscribers: [...subscribers],
+    lastTouchedAt: now
   };
+}
+
+/** State read from a pre-registry subscription file, used to seed its watch. */
+export interface LegacyWatchSeed {
+  readonly target: Omit<WatchTarget, "apiBase">;
+  readonly cursor: WakeCursor;
+  readonly etags?: Record<string, string>;
+  readonly seen: string[];
+  readonly consecutiveFailures: number;
+  readonly lastError?: string;
+  readonly lastPollAt?: string;
+  readonly nextPollAt: number;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -81,54 +129,101 @@ function isSubscription(value: unknown): value is WakeSubscription {
     typeof record.number === "number" &&
     Array.isArray(record.mentions) &&
     record.mentions.every((mention) => typeof mention === "string") &&
+    (record.ignoreAuthors === undefined ||
+      (Array.isArray(record.ignoreAuthors) &&
+        record.ignoreAuthors.every((author) => typeof author === "string"))) &&
     typeof record.intervalMs === "number" &&
     typeof record.createdAt === "string"
   );
 }
 
-/**
- * Rebuild state from whatever is on disk. A corrupt field falls back rather
- * than throwing: a hand-edited cursor must not take the poller down, but a
- * corrupt *subscription* is dropped (we cannot guess what it watched).
- */
-function parseState(value: unknown, now: number): SubscriptionState {
-  const base = initialState(now);
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function parseLoop(value: unknown): LoopState {
   const record = asRecord(value);
+  if (!record) {
+    return initialLoopState();
+  }
+  const wakes = Array.isArray(record.wakes)
+    ? record.wakes.filter((at): at is number => typeof at === "number" && Number.isFinite(at))
+    : [];
+  return {
+    wakes,
+    suppressed: typeof record.suppressed === "number" ? record.suppressed : 0,
+    loopSuspected: record.loopSuspected === true,
+    ...(typeof record.cooldownUntil === "number" ? { cooldownUntil: record.cooldownUntil } : {})
+  };
+}
+
+function parseSubscriberState(value: unknown): SubscriberState {
+  const record = asRecord(value);
+  if (!record) {
+    return initialSubscriberState();
+  }
+  return {
+    pending: Array.isArray(record.pending) ? record.pending.filter(isEvent) : [],
+    seen: stringList(record.seen),
+    ...(typeof record.lastError === "string" ? { lastError: record.lastError } : {}),
+    loop: parseLoop(record.loop)
+  };
+}
+
+function parseCursor(value: unknown, fallback: string): WakeCursor {
+  const record = asRecord(value);
+  return {
+    lastSeenAt: typeof record?.lastSeenAt === "string" ? record.lastSeenAt : fallback,
+    ...(typeof record?.lastEventID === "string" ? { lastEventID: record.lastEventID } : {}),
+    ...(typeof record?.headSHA === "string" ? { headSHA: record.headSHA } : {})
+  };
+}
+
+function parseEtags(value: unknown): Record<string, string> | undefined {
+  const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  const etags: Record<string, string> = {};
+  for (const [url, tag] of Object.entries(record)) {
+    if (typeof tag === "string") {
+      etags[url] = tag;
+    }
+  }
+  return Object.keys(etags).length > 0 ? etags : undefined;
+}
+
+function parseWatchState(value: unknown, now: number): WatchState {
+  const record = asRecord(value);
+  const base = initialWatchState(now);
   if (!record) {
     return base;
   }
-  const cursor = asRecord(record.cursor);
-  const pending = Array.isArray(record.pending) ? record.pending.filter(isEvent) : [];
-  const seen = Array.isArray(record.seen)
-    ? record.seen.filter((id): id is string => typeof id === "string")
-    : [];
-  const etags = asRecord(record.etags);
-  const validEtags: Record<string, string> = {};
-  for (const [url, value] of Object.entries(etags ?? {})) {
-    if (typeof value === "string") {
-      validEtags[url] = value;
-    }
-  }
-
+  const etags = parseEtags(record.etags);
   return {
-    cursor: {
-      lastSeenAt:
-        typeof cursor?.lastSeenAt === "string" ? cursor.lastSeenAt : base.cursor.lastSeenAt,
-      ...(typeof cursor?.lastEventID === "string" ? { lastEventID: cursor.lastEventID } : {}),
-      ...(typeof cursor?.headSHA === "string" ? { headSHA: cursor.headSHA } : {})
-    },
-    ...(Object.keys(validEtags).length > 0 ? { etags: validEtags } : {}),
-    pending,
-    seen,
+    cursor: parseCursor(record.cursor, base.cursor.lastSeenAt),
+    ...(etags !== undefined ? { etags } : {}),
+    seen: stringList(record.seen),
     consecutiveFailures:
       typeof record.consecutiveFailures === "number" ? record.consecutiveFailures : 0,
     ...(typeof record.lastError === "string" ? { lastError: record.lastError } : {}),
     ...(typeof record.lastPollAt === "string" ? { lastPollAt: record.lastPollAt } : {}),
-    nextPollAt: typeof record.nextPollAt === "number" ? record.nextPollAt : now
+    nextPollAt: typeof record.nextPollAt === "number" ? record.nextPollAt : now,
+    subscribers: stringList(record.subscribers),
+    lastTouchedAt: typeof record.lastTouchedAt === "number" ? record.lastTouchedAt : now
   };
 }
 
-export interface SubscriptionStoreOptions {
+/** Atomic per-writer temp + rename (ADR-0005), mode `0o600`. */
+async function writeAtomic(path: string, value: unknown): Promise<void> {
+  const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  await rename(temp, path);
+}
+
+export interface StoreOptions {
   readonly dir: string;
   readonly logger: Logger;
   /** Defaults to `Date.now`. */
@@ -136,21 +231,16 @@ export interface SubscriptionStoreOptions {
 }
 
 /**
- * One JSON file per subscription under the STATE root, written atomically
- * (per-writer temp + rename, ADR-0005) with `0o600` — a thread watch is not a
- * secret, but the directory also holds nothing the user would want world
- * readable, and the mode keeps a future field from leaking by accident.
- *
- * The in-memory map is the read path; every mutation is flushed before it is
- * reported as done, so a crash cannot lose a cursor the caller believes is
- * advanced.
+ * One JSON file per **subscriber** under the STATE root. The subscriber owns the
+ * session, its filters and its private unread/loop state — never the cursor.
  */
 export class SubscriptionStore {
   private readonly records = new Map<string, SubscriptionRecord>();
+  private seeds: LegacyWatchSeed[] = [];
   private readonly now: () => number;
   private loaded = false;
 
-  constructor(private readonly options: SubscriptionStoreOptions) {
+  constructor(private readonly options: StoreOptions) {
     this.now = options.now ?? Date.now;
   }
 
@@ -162,7 +252,6 @@ export class SubscriptionStore {
     return join(this.options.dir, `${id}.json`);
   }
 
-  /** Read every subscription file. Called once by the plugin, and by `wake_list` after a restart. */
   async load(): Promise<void> {
     if (this.loaded) {
       return;
@@ -172,8 +261,7 @@ export class SubscriptionStore {
     try {
       entries = await readdir(this.options.dir);
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return;
       }
       throw error;
@@ -194,10 +282,37 @@ export class SubscriptionStore {
           this.options.logger.warn("wake_subscription_unreadable", { id });
           continue;
         }
+        const subscription: WakeSubscription = {
+          ...record.subscription,
+          ignoreAuthors: stringList(record.subscription.ignoreAuthors)
+        };
         this.records.set(id, {
-          subscription: record.subscription,
-          state: parseState(record.state, this.now())
+          subscription,
+          state: parseSubscriberState(record.state)
         });
+
+        // Pre-registry records carried the cursor themselves. Keep the delivery
+        // state, and hand the fetch state to the registry so the watch resumes
+        // from the same cursor instead of re-delivering history.
+        const legacy = asRecord(record.state);
+        if (legacy && asRecord(legacy.cursor)) {
+          this.seeds.push({
+            target: {
+              kind: subscription.kind,
+              owner: subscription.owner,
+              repo: subscription.repo,
+              number: subscription.number
+            },
+            cursor: parseCursor(legacy.cursor, new Date(this.now()).toISOString()),
+            ...(parseEtags(legacy.etags) ? { etags: parseEtags(legacy.etags) } : {}),
+            seen: stringList(legacy.seen),
+            consecutiveFailures:
+              typeof legacy.consecutiveFailures === "number" ? legacy.consecutiveFailures : 0,
+            ...(typeof legacy.lastError === "string" ? { lastError: legacy.lastError } : {}),
+            ...(typeof legacy.lastPollAt === "string" ? { lastPollAt: legacy.lastPollAt } : {}),
+            nextPollAt: typeof legacy.nextPollAt === "number" ? legacy.nextPollAt : this.now()
+          });
+        }
       } catch (error) {
         this.options.logger.warn("wake_subscription_unreadable", {
           id,
@@ -205,6 +320,11 @@ export class SubscriptionStore {
         });
       }
     }
+  }
+
+  /** Fetch state found in pre-registry files; consumed once by the registry. */
+  legacySeeds(): LegacyWatchSeed[] {
+    return this.seeds;
   }
 
   list(sessionID?: string): SubscriptionRecord[] {
@@ -218,16 +338,17 @@ export class SubscriptionStore {
     );
   }
 
+  listByKey(key: string, apiBase: string): SubscriptionRecord[] {
+    return this.list().filter((record) => watchKey(targetOf(record.subscription, apiBase)) === key);
+  }
+
   get(id: string): SubscriptionRecord | undefined {
     return this.records.get(id);
   }
 
   async put(record: SubscriptionRecord): Promise<void> {
     await mkdir(this.options.dir, { recursive: true });
-    const target = this.path(record.subscription.id);
-    const temp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-    await writeFile(temp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-    await rename(temp, target);
+    await writeAtomic(this.path(record.subscription.id), record);
     this.records.set(record.subscription.id, record);
   }
 
@@ -237,6 +358,124 @@ export class SubscriptionStore {
     }
     try {
       await unlink(this.path(id));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+    }
+    return true;
+  }
+}
+
+/** The watch target a subscription belongs to, under the current `apiBase`. */
+export function targetOf(subscription: WakeSubscription, apiBase: string): WatchTarget {
+  return {
+    apiBase,
+    kind: subscription.kind,
+    owner: subscription.owner,
+    repo: subscription.repo,
+    number: subscription.number
+  };
+}
+
+/**
+ * One JSON file per **watch key**: the shared cursor, ETags, dedupe ring and
+ * backoff that every subscriber of that target reads through.
+ */
+export class WatchStore {
+  private readonly records = new Map<string, WatchRecord>();
+  private readonly now: () => number;
+  private loaded = false;
+
+  constructor(private readonly options: StoreOptions) {
+    this.now = options.now ?? Date.now;
+  }
+
+  get dir(): string {
+    return this.options.dir;
+  }
+
+  private path(key: string): string {
+    return join(this.options.dir, watchFileFor(key));
+  }
+
+  async load(): Promise<void> {
+    if (this.loaded) {
+      return;
+    }
+    this.loaded = true;
+    let entries: string[];
+    try {
+      entries = await readdir(this.options.dir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) {
+        continue;
+      }
+      try {
+        const parsed: unknown = JSON.parse(await readFile(join(this.options.dir, entry), "utf8"));
+        const record = asRecord(parsed);
+        const target = asRecord(record?.target);
+        if (
+          !record ||
+          typeof record.key !== "string" ||
+          !target ||
+          typeof target.apiBase !== "string" ||
+          !WAKE_SOURCE_KINDS.includes(target.kind as WakeSourceKind) ||
+          typeof target.owner !== "string" ||
+          typeof target.repo !== "string" ||
+          typeof target.number !== "number"
+        ) {
+          this.options.logger.warn("wake_watch_unreadable", { file: entry });
+          continue;
+        }
+        const key = record.key;
+        this.records.set(key, {
+          key,
+          target: {
+            apiBase: target.apiBase,
+            kind: target.kind as WakeSourceKind,
+            owner: target.owner,
+            repo: target.repo,
+            number: target.number
+          },
+          state: parseWatchState(record.state, this.now())
+        });
+      } catch (error) {
+        this.options.logger.warn("wake_watch_unreadable", {
+          file: entry,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }
+
+  get(key: string): WatchRecord | undefined {
+    return this.records.get(key);
+  }
+
+  list(): WatchRecord[] {
+    return [...this.records.values()];
+  }
+
+  async put(record: WatchRecord): Promise<void> {
+    await mkdir(this.options.dir, { recursive: true });
+    await writeAtomic(this.path(record.key), record);
+    this.records.set(record.key, record);
+  }
+
+  async remove(key: string): Promise<boolean> {
+    if (!this.records.delete(key)) {
+      return false;
+    }
+    try {
+      await unlink(this.path(key));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;

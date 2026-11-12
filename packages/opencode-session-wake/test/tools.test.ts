@@ -1,8 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { parseWakeOptions } from "../src/config.js";
+import { createPoller } from "../src/poller.js";
 import { createWakeToolInfos, MAX_BODY_CHARS, registerWakeTools } from "../src/tools.js";
-import { event, exec, fakeLogger, makeStore, record, tempDir } from "./helpers.js";
+import {
+  event,
+  exec,
+  fakeLogger,
+  fakeTransport,
+  keyOf,
+  makeStores,
+  record,
+  tempDir
+} from "./helpers.js";
 
 const options = parseWakeOptions({
   intervalMs: 60_000,
@@ -12,14 +22,20 @@ const options = parseWakeOptions({
 
 async function harness() {
   const temp = await tempDir();
-  const store = await makeStore(temp.dir);
-  const tick = vi.fn(async (id: string) => ({
-    subscriptionID: id,
-    status: "skipped" as const,
-    newEvents: 0
-  }));
+  const { store, watches } = await makeStores(temp.dir);
+  const transport = fakeTransport();
   const logger = fakeLogger();
-  const infos = createWakeToolInfos({ store, poller: { tick }, options, logger, now: () => 1_000 });
+  const poller = createPoller({
+    store,
+    watches,
+    transport,
+    deliver: async () => {},
+    logger,
+    options,
+    now: () => 1_000,
+    sleep: async () => {}
+  });
+  const infos = createWakeToolInfos({ store, poller, options, logger, now: () => 1_000 });
   const byName = Object.fromEntries(infos.map((info) => [info.name, info]));
   const tool = (name: keyof typeof byName) => {
     const info = byName[name];
@@ -28,12 +44,12 @@ async function harness() {
     }
     return info;
   };
-  return { temp, store, tick, logger, infos, tool };
+  return { temp, store, watches, transport, poller, logger, infos, tool };
 }
 
 describe("wake_subscribe", () => {
   it("creates a watch owned by the calling session", async () => {
-    const { temp, store, tick, tool } = await harness();
+    const { temp, store, watches, tool } = await harness();
     try {
       const result = await exec(
         tool("wake_subscribe"),
@@ -47,8 +63,8 @@ describe("wake_subscribe", () => {
       expect(records[0]?.subscription.mentions).toEqual([]);
       expect(result.content).toContain("acme/widgets#7");
       expect(result.metadata?.created).toBe(true);
-      // The first check runs immediately so an auth problem surfaces now.
-      expect(tick).toHaveBeenCalledTimes(1);
+      // The subscription joined a shared fetcher for its key.
+      expect(watches.get(keyOf(records[0] as never))).toBeDefined();
     } finally {
       await temp.cleanup();
     }
@@ -282,14 +298,17 @@ describe("registerWakeTools", () => {
     const { temp, store } = await harness();
     try {
       const added: Array<{ name: string; input: unknown }> = [];
+      const { store: toolStore, watches, poller } = await harness();
       registerWakeTools(
         {
           add: (tool) => {
             added.push({ name: tool.name, input: tool.input });
           }
         },
-        { store, poller: { tick: vi.fn() }, options, logger: fakeLogger() }
+        { store: toolStore, poller, options, logger: fakeLogger() }
       );
+      void store;
+      void watches;
       expect(added.map((t) => t.name)).toEqual([
         "wake_subscribe",
         "wake_unsubscribe",
@@ -461,6 +480,99 @@ describe("wake_next — non-comment events", () => {
       await expect(exec(tool("wake_next"), { id: other.subscription.id }, "ses_a")).rejects.toThrow(
         "not found for this session"
       );
+    } finally {
+      await temp.cleanup();
+    }
+  });
+});
+
+describe("loop prevention through the tools", () => {
+  it("stores a normalized ignoreAuthors list per watch", async () => {
+    const { temp, store, tool } = await harness();
+    try {
+      await exec(
+        tool("wake_subscribe"),
+        {
+          owner: "acme",
+          repo: "widgets",
+          number: 7,
+          ignoreAuthors: ["@Alice", "github-actions[bot]"]
+        },
+        "ses_owner"
+      );
+      expect(store.list("ses_owner")[0]?.subscription.ignoreAuthors).toEqual([
+        "alice",
+        "github-actions[bot]"
+      ]);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("surfaces loop_suspected and the cooldown in wake_list", async () => {
+    const { temp, store, tool } = await harness();
+    try {
+      const rec = record();
+      rec.state.loop = {
+        wakes: [1_000, 1_000],
+        suppressed: 3,
+        loopSuspected: true,
+        cooldownUntil: 60_000
+      };
+      await store.put(rec);
+
+      const listed = await exec(tool("wake_list"), {}, "ses_owner");
+
+      expect(listed.content).toContain("LOOP_SUSPECTED");
+      expect(listed.content).toContain("suppressed=3");
+      expect(listed.content).toContain("cooldownUntil=1970-01-01T00:01:00.000Z");
+      expect(listed.metadata?.subscriptions).toMatchObject([
+        { loop: { loopSuspected: true, suppressed: 3, maxWakes: options.loop.maxWakes } }
+      ]);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("shows how many sessions share one watch", async () => {
+    const { temp, tool } = await harness();
+    try {
+      await exec(tool("wake_subscribe"), { owner: "acme", repo: "widgets", number: 7 }, "ses_a");
+      await exec(tool("wake_subscribe"), { owner: "acme", repo: "widgets", number: 7 }, "ses_b");
+
+      const listedA = await exec(tool("wake_list"), {}, "ses_a");
+      const listedB = await exec(tool("wake_list"), {}, "ses_b");
+
+      expect(listedA.content).toContain("shared=2");
+      expect(listedB.content).toContain("shared=2");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("unsubscribing one session keeps the other's watch and shared fetcher", async () => {
+    const { temp, store, watches, tool } = await harness();
+    try {
+      const mine = await exec(
+        tool("wake_subscribe"),
+        { owner: "acme", repo: "widgets", number: 7 },
+        "ses_a"
+      );
+      await exec(tool("wake_subscribe"), { owner: "acme", repo: "widgets", number: 7 }, "ses_b");
+      const mineMeta = mine.metadata?.subscription as { id?: string } | undefined;
+      const mineId = mineMeta?.id;
+      if (!mineId) {
+        throw new Error("subscribe returned no subscription id");
+      }
+
+      await exec(tool("wake_unsubscribe"), { id: mineId }, "ses_a");
+
+      const remaining = store.list("ses_b");
+      expect(remaining).toHaveLength(1);
+      expect(watches.get(keyOf(remaining[0] as never))?.state.subscribers).toEqual([
+        remaining[0]?.subscription.id
+      ]);
+      expect(store.get(mineId)).toBeUndefined();
     } finally {
       await temp.cleanup();
     }

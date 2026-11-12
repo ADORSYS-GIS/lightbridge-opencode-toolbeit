@@ -1,21 +1,49 @@
 import type { WakeOptions } from "./config.js";
 import { TransportFailure, type GitHubTransport } from "./github.js";
+import { decideWake, isIgnoredAuthor, normalizeAuthors, OriginatedSet } from "./loop.js";
 import type { Logger } from "./logging.js";
 import { pollSource, type SourceResult } from "./sources.js";
-import type { SubscriptionStore } from "./state.js";
-import type { SubscriptionRecord, WakeEvent, WakeNotice, WakeSubscription } from "./types.js";
+import {
+  initialWatchState,
+  type SubscriptionStore,
+  targetOf,
+  watchKey,
+  type WatchStore,
+  type LegacyWatchSeed
+} from "./state.js";
+import type {
+  SubscriptionRecord,
+  WakeEvent,
+  WakeNotice,
+  WakeSubscription,
+  WatchRecord,
+  WatchTarget
+} from "./types.js";
 
-export type PollStatus = "skipped" | "not-modified" | "no-change" | "delivered" | "failed";
+export type PollStatus =
+  | "skipped"
+  | "not-modified"
+  | "no-change"
+  | "delivered"
+  | "suppressed"
+  | "failed";
 
 export interface PollOutcome {
-  readonly subscriptionID: string;
+  /** The shared watch key that was polled. */
+  readonly key: string;
   readonly status: PollStatus;
+  /** New events the shared fetcher observed. */
   readonly newEvents: number;
+  /** Subscribers whose wake notice was actually injected. */
+  readonly delivered: number;
+  /** Subscribers whose notice was coalesced by the loop guard. */
+  readonly suppressed: number;
   readonly failure?: TransportFailure["kind"];
 }
 
 export interface PollerDeps {
   readonly store: SubscriptionStore;
+  readonly watches: WatchStore;
   readonly transport: GitHubTransport;
   /** The wake seam. The plugin wires this to `ctx.session.synthetic`; tests use a fake. */
   readonly deliver: (notice: WakeNotice) => Promise<void>;
@@ -27,19 +55,35 @@ export interface PollerDeps {
 }
 
 export interface Poller {
-  /** Load subscriptions, recover any backlog, then poll on a timer until `stop`. */
+  /** Load both stores, migrate pre-registry state, recover backlogs, then poll. */
   start(): Promise<void>;
   stop(): void;
-  /** Poll one subscription now. Concurrent calls for the same id share one run. */
+  /** Attach a subscriber to its shared watch (creating the watch if needed). */
+  join(record: SubscriptionRecord): Promise<void>;
+  /** Detach a subscriber. Returns false when it did not exist. */
+  leave(subscriptionID: string): Promise<boolean>;
+  /** Poll the watch a subscription belongs to. Concurrent calls share one run. */
   tick(subscriptionID: string): Promise<PollOutcome>;
-  /** Poll every subscription whose `nextPollAt` has passed. */
+  /** Poll one shared watch by key. */
+  tickKey(key: string): Promise<PollOutcome>;
+  /** Poll every watch that has subscribers and is due. */
   tickDue(): Promise<PollOutcome[]>;
+  /** The watch a subscription reads through (created lazily). */
+  watchFor(subscriptionID: string): Promise<WatchRecord | undefined>;
+  /**
+   * Record an event id this toolchain produced. A future GitHub write path calls
+   * this with the returned comment id so the next fan-out suppresses the wake
+   * its own write would cause. Nothing calls it today — the plugin is read-only.
+   */
+  markOriginated(eventID: string): void;
 }
 
 /** The loop never sleeps longer than this, so a fresh subscription starts promptly. */
 const MAX_IDLE_WAIT_MS = 1_000;
 const BACKOFF_BASE_MS = 2_000;
 const BACKOFF_JITTER = 0.2;
+/** A watch with no subscribers is kept this long, then its cursor is dropped. */
+export const WATCH_TTL_MS: number = 7 * 24 * 60 * 60_000;
 
 function sleepFor(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -123,6 +167,23 @@ export function backoffMs(
   return Math.min(options.maxIntervalMs, Math.round(base * (1 + BACKOFF_JITTER * random())));
 }
 
+/**
+ * The shared poll interval for a key: the **shortest** interval any subscriber
+ * asked for, clamped to the global bounds. The freshest subscriber wins; when it
+ * leaves, the next poll relaxes to the next shortest. This is a deliberate
+ * trade-off — one poller cannot honour two intervals — and it is documented.
+ */
+export function negotiatedIntervalMs(
+  subscribers: readonly SubscriptionRecord[],
+  options: Pick<WakeOptions, "intervalMs" | "minIntervalMs" | "maxIntervalMs">
+): number {
+  const wanted = subscribers
+    .map((record) => record.subscription.intervalMs)
+    .filter((ms) => Number.isFinite(ms) && ms > 0);
+  const shortest = wanted.length > 0 ? Math.min(...wanted) : options.intervalMs;
+  return Math.min(options.maxIntervalMs, Math.max(options.minIntervalMs, shortest));
+}
+
 function toFailure(error: unknown): TransportFailure {
   if (error instanceof TransportFailure) {
     return error;
@@ -133,48 +194,81 @@ function toFailure(error: unknown): TransportFailure {
   );
 }
 
+function trim(list: string[], limit: number): void {
+  if (list.length > limit) {
+    list.splice(0, list.length - limit);
+  }
+}
+
 /**
- * One poller per plugin instance. It owns the timer, the per-subscription
- * in-flight guard and the failure/backoff policy; the source strategy lives in
- * `sources.ts` and delivery is injected, so the engine never imports the plugin
- * API.
+ * One registry per plugin instance. It owns the timer, one shared fetch state
+ * per watch key, the per-subscriber fan-out, the loop guard and the failure
+ * policy. Source strategies live in `sources.ts`; delivery is injected, so the
+ * engine never imports the plugin API.
  */
 export function createPoller(deps: PollerDeps): Poller {
   const now = deps.now ?? Date.now;
   const random = deps.random ?? Math.random;
   const sleep = deps.sleep ?? sleepFor;
-  const { store, transport, logger, options } = deps;
+  const { store, watches, transport, logger, options } = deps;
+  const originated = new OriginatedSet(now);
 
   const inflight = new Map<string, Promise<PollOutcome>>();
   let running = false;
   let controller: AbortController | undefined;
   let loop: Promise<void> | undefined;
 
-  function finishFailure(record: SubscriptionRecord, failure: TransportFailure): void {
-    const at = now();
-    record.state.consecutiveFailures += 1;
-    record.state.lastError = `${failure.kind}: ${failure.message}`;
-    record.state.lastPollAt = new Date(at).toISOString();
-    record.state.nextPollAt =
-      at + backoffMs(record.state.consecutiveFailures, options, failure.retryAfterMs, random);
+  function keyOf(subscription: WakeSubscription): string {
+    return watchKey(targetOf(subscription, options.apiBase));
   }
 
-  async function runTick(subscriptionID: string): Promise<PollOutcome> {
-    const record = store.get(subscriptionID);
-    if (!record) {
-      return { subscriptionID, status: "skipped", newEvents: 0 };
+  async function ensureWatch(record: SubscriptionRecord): Promise<WatchRecord> {
+    const key = keyOf(record.subscription);
+    const existing = watches.get(key);
+    if (existing) {
+      if (!existing.state.subscribers.includes(record.subscription.id)) {
+        existing.state.subscribers.push(record.subscription.id);
+        await watches.put(existing);
+      }
+      return existing;
     }
-    if (record.state.nextPollAt > now()) {
-      return { subscriptionID, status: "skipped", newEvents: 0 };
-    }
+    const target: WatchTarget = targetOf(record.subscription, options.apiBase);
+    const watch: WatchRecord = {
+      key,
+      target,
+      state: initialWatchState(now(), [record.subscription.id])
+    };
+    await watches.put(watch);
+    return watch;
+  }
 
-    const { subscription } = record;
+  function finishFailure(watch: WatchRecord, failure: TransportFailure): void {
+    const at = now();
+    watch.state.consecutiveFailures += 1;
+    watch.state.lastError = `${failure.kind}: ${failure.message}`;
+    watch.state.lastPollAt = new Date(at).toISOString();
+    watch.state.nextPollAt =
+      at + backoffMs(watch.state.consecutiveFailures, options, failure.retryAfterMs, random);
+  }
+
+  function ignoredAuthors(subscription: WakeSubscription): string[] {
+    return [
+      ...new Set([...options.ignoreAuthors, ...normalizeAuthors(subscription.ignoreAuthors)])
+    ];
+  }
+
+  async function pollWatch(watch: WatchRecord): Promise<PollOutcome> {
+    const subscribers = store.listByKey(watch.key, options.apiBase);
+    if (subscribers.length === 0) {
+      // Refcount 0: the fetcher stops. The cursor is kept for a later rejoin.
+      return { key: watch.key, status: "skipped", newEvents: 0, delivered: 0, suppressed: 0 };
+    }
 
     let result: SourceResult;
     try {
       result = await pollSource({
-        subscription,
-        state: record.state,
+        target: watch.target,
+        state: watch.state,
         transport,
         options,
         logger,
@@ -182,122 +276,287 @@ export function createPoller(deps: PollerDeps): Poller {
       });
     } catch (error) {
       const failure = toFailure(error);
-      finishFailure(record, failure);
-      // Cursor, pending and etags are untouched: a failed poll must never look
-      // like an empty thread, or the events it could not read are lost for good.
-      await store.put(record);
+      finishFailure(watch, failure);
+      // Cursor, etags, seen and every subscriber's pending are untouched: a
+      // failed poll must never look like an empty thread.
+      await watches.put(watch);
       logger.warn("wake_poll_failed", {
-        subscriptionID,
-        source: subscription.kind,
-        thread: `${subscription.owner}/${subscription.repo}#${subscription.number}`,
+        key: watch.key,
+        source: watch.target.kind,
+        thread: `${watch.target.owner}/${watch.target.repo}#${watch.target.number}`,
         failure: failure.kind,
         status: failure.status,
-        consecutiveFailures: record.state.consecutiveFailures,
-        nextPollAt: new Date(record.state.nextPollAt).toISOString()
+        subscribers: subscribers.length,
+        consecutiveFailures: watch.state.consecutiveFailures,
+        nextPollAt: new Date(watch.state.nextPollAt).toISOString()
       });
-      return { subscriptionID, status: "failed", newEvents: 0, failure: failure.kind };
+      return {
+        key: watch.key,
+        status: "failed",
+        newEvents: 0,
+        delivered: 0,
+        suppressed: 0,
+        failure: failure.kind
+      };
     }
 
-    const fresh: WakeEvent[] = [];
+    // Compute the new events ONCE, then fan out. Shared dedupe lives here.
+    const newEvents: WakeEvent[] = [];
     for (const event of result.events) {
-      if (record.state.seen.includes(event.id)) {
+      if (watch.state.seen.includes(event.id)) {
         continue;
       }
-      // Marked seen even when filtered or suppressed: a re-fetch of the same
-      // page must not re-evaluate (or re-deliver) an event.
-      record.state.seen.push(event.id);
-      if (result.baseline === true) {
-        // First `github.checks` observation: record what exists, do not wake.
-        continue;
-      }
-      if (!matchesMention(event, subscription.mentions)) {
-        continue;
-      }
-      fresh.push(event);
+      watch.state.seen.push(event.id);
+      newEvents.push(event);
     }
+    trim(watch.state.seen, options.seenLimit);
 
-    if (record.state.seen.length > options.seenLimit) {
-      record.state.seen.splice(0, record.state.seen.length - options.seenLimit);
-    }
+    const deliveries: Array<{ record: SubscriptionRecord; count: number }> = [];
+    let suppressed = 0;
 
-    if (fresh.length > 0) {
-      record.state.pending.push(...fresh);
-      if (record.state.pending.length > options.maxPending) {
-        record.state.pending.splice(0, record.state.pending.length - options.maxPending);
+    for (const subscriber of subscribers) {
+      const fresh: WakeEvent[] = [];
+      for (const event of newEvents) {
+        if (subscriber.state.seen.includes(event.id)) {
+          continue;
+        }
+        // Marked seen even when filtered or coalesced: a re-fetch of the same
+        // page must not re-evaluate (or re-deliver) an event.
+        subscriber.state.seen.push(event.id);
+        if (result.baseline === true) {
+          continue;
+        }
+        if (originated.has(event.id)) {
+          continue;
+        }
+        if (!matchesMention(event, subscriber.subscription.mentions)) {
+          continue;
+        }
+        if (isIgnoredAuthor(event, ignoredAuthors(subscriber.subscription))) {
+          continue;
+        }
+        fresh.push(event);
       }
+      trim(subscriber.state.seen, options.seenLimit);
+      if (fresh.length === 0) {
+        continue;
+      }
+
+      subscriber.state.pending.push(...fresh);
+      if (subscriber.state.pending.length > options.maxPending) {
+        subscriber.state.pending.splice(0, subscriber.state.pending.length - options.maxPending);
+      }
+
+      const decision = decideWake(subscriber.state.loop, options.loop, now());
+      subscriber.state.loop = decision.next;
+      if (decision.deliver) {
+        deliveries.push({ record: subscriber, count: fresh.length });
+      } else {
+        suppressed += 1;
+        logger.info("wake_suppressed_loop_suspected", {
+          key: watch.key,
+          subscriptionID: subscriber.subscription.id,
+          sessionID: subscriber.subscription.sessionID,
+          reason: decision.reason,
+          suppressed: decision.next.suppressed,
+          cooldownUntil:
+            decision.next.cooldownUntil !== undefined
+              ? new Date(decision.next.cooldownUntil).toISOString()
+              : undefined
+        });
+      }
+      // Persist the subscriber (pending + loop state) BEFORE the shared cursor
+      // and BEFORE the wake: a crash in between leaves the event readable and
+      // deduped, never lost.
+      await store.put(subscriber);
     }
 
     if (!result.notModified) {
-      record.state.cursor = result.cursor;
-      record.state.etags = result.etags;
-      record.state.lastPollAt = new Date(now()).toISOString();
+      watch.state.cursor = result.cursor;
+      watch.state.etags = result.etags;
+      watch.state.lastPollAt = new Date(now()).toISOString();
     }
-    record.state.consecutiveFailures = 0;
-    delete record.state.lastError;
-    record.state.nextPollAt = now() + subscription.intervalMs;
-    // Persist BEFORE the wake: a crash in between leaves the events pending and
-    // readable, never re-fetched and re-delivered.
-    await store.put(record);
+    watch.state.consecutiveFailures = 0;
+    delete watch.state.lastError;
+    watch.state.nextPollAt = now() + negotiatedIntervalMs(subscribers, options);
+    watch.state.subscribers = subscribers.map((record) => record.subscription.id);
+    watch.state.lastTouchedAt = now();
+    await watches.put(watch);
 
-    if (fresh.length > 0) {
-      const notice = buildNotice(subscription, fresh.length);
+    let delivered = 0;
+    for (const delivery of deliveries) {
+      const notice = buildNotice(delivery.record.subscription, delivery.count);
       try {
         await deps.deliver(notice);
+        delivered += 1;
         logger.info("wake_notice_delivered", {
-          subscriptionID,
-          source: subscription.kind,
-          sessionID: subscription.sessionID,
+          key: watch.key,
+          subscriptionID: delivery.record.subscription.id,
+          source: delivery.record.subscription.kind,
+          sessionID: delivery.record.subscription.sessionID,
           thread: notice.thread,
-          count: fresh.length
+          count: delivery.count
         });
       } catch (error) {
-        // The events are already durable; `wake_next` can still read them.
+        delivery.record.state.lastError = `deliver: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        await store.put(delivery.record);
         logger.warn("wake_notice_failed", {
-          subscriptionID,
-          sessionID: subscription.sessionID,
+          key: watch.key,
+          subscriptionID: delivery.record.subscription.id,
+          sessionID: delivery.record.subscription.sessionID,
           error: error instanceof Error ? error.message : String(error)
         });
       }
     }
 
+    const base = { key: watch.key, newEvents: newEvents.length, delivered, suppressed };
     if (result.notModified) {
-      return { subscriptionID, status: "not-modified", newEvents: 0 };
+      return { ...base, status: "not-modified" };
     }
-    return {
-      subscriptionID,
-      status: fresh.length > 0 ? "delivered" : "no-change",
-      newEvents: fresh.length
-    };
+    if (delivered > 0) {
+      return { ...base, status: "delivered" };
+    }
+    if (suppressed > 0) {
+      return { ...base, status: "suppressed" };
+    }
+    return { ...base, status: "no-change" };
+  }
+
+  async function tickKey(key: string): Promise<PollOutcome> {
+    const existing = inflight.get(key);
+    if (existing) {
+      // Two sessions (or two overlapping ticks) must not poll or deliver twice:
+      // they share the one in-flight run for this key.
+      return existing;
+    }
+    const watch = watches.get(key);
+    if (!watch) {
+      return { key, status: "skipped", newEvents: 0, delivered: 0, suppressed: 0 };
+    }
+    const promise = pollWatch(watch).finally(() => {
+      inflight.delete(key);
+    });
+    inflight.set(key, promise);
+    return promise;
   }
 
   async function tick(subscriptionID: string): Promise<PollOutcome> {
-    const existing = inflight.get(subscriptionID);
-    if (existing) {
-      // Two overlapping ticks must not both deliver: they share one run.
-      return existing;
+    const record = store.get(subscriptionID);
+    if (!record) {
+      return {
+        key: subscriptionID,
+        status: "skipped",
+        newEvents: 0,
+        delivered: 0,
+        suppressed: 0
+      };
     }
-    const promise = runTick(subscriptionID).finally(() => {
-      inflight.delete(subscriptionID);
-    });
-    inflight.set(subscriptionID, promise);
-    return promise;
+    const watch = await ensureWatch(record);
+    if (watch.state.nextPollAt > now()) {
+      return {
+        key: watch.key,
+        status: "skipped",
+        newEvents: 0,
+        delivered: 0,
+        suppressed: 0
+      };
+    }
+    return tickKey(watch.key);
   }
 
   async function tickDue(): Promise<PollOutcome[]> {
     const at = now();
-    const due = store.list().filter((record) => record.state.nextPollAt <= at);
-    return Promise.all(due.map((record) => tick(record.subscription.id)));
+    const due = watches
+      .list()
+      .filter((watch) => watch.state.subscribers.length > 0 && watch.state.nextPollAt <= at);
+    return Promise.all(due.map((watch) => tickKey(watch.key)));
+  }
+
+  /** Merge a pre-registry cursor into a watch, keeping the earlier boundary. */
+  async function seedWatch(seed: LegacyWatchSeed): Promise<void> {
+    const target: WatchTarget = { ...seed.target, apiBase: options.apiBase };
+    const key = watchKey(target);
+    const existing = watches.get(key);
+    if (!existing) {
+      await watches.put({
+        key,
+        target,
+        state: {
+          ...initialWatchState(now(), []),
+          cursor: seed.cursor,
+          ...(seed.etags !== undefined ? { etags: seed.etags } : {}),
+          seen: [...seed.seen],
+          consecutiveFailures: seed.consecutiveFailures,
+          ...(seed.lastError !== undefined ? { lastError: seed.lastError } : {}),
+          ...(seed.lastPollAt !== undefined ? { lastPollAt: seed.lastPollAt } : {}),
+          nextPollAt: seed.nextPollAt
+        }
+      });
+      return;
+    }
+    // Two legacy subscribers on one key: keep the earlier cursor so no event is
+    // skipped, and let each subscriber's own `seen` ring prevent duplicates.
+    if (seed.cursor.lastSeenAt < existing.state.cursor.lastSeenAt) {
+      existing.state.cursor = seed.cursor;
+    }
+    for (const id of seed.seen) {
+      if (!existing.state.seen.includes(id)) {
+        existing.state.seen.push(id);
+      }
+    }
+    existing.state.nextPollAt = Math.min(existing.state.nextPollAt, seed.nextPollAt);
+  }
+
+  async function reconcileMembership(): Promise<void> {
+    const byKey = new Map<string, string[]>();
+    for (const record of store.list()) {
+      const key = keyOf(record.subscription);
+      byKey.set(key, [...(byKey.get(key) ?? []), record.subscription.id]);
+      await ensureWatch(record);
+    }
+    for (const watch of watches.list()) {
+      const members = byKey.get(watch.key) ?? [];
+      if (
+        members.length !== watch.state.subscribers.length ||
+        members.some((id) => !watch.state.subscribers.includes(id))
+      ) {
+        watch.state.subscribers = members;
+        await watches.put(watch);
+      }
+    }
+  }
+
+  async function pruneStaleWatches(): Promise<void> {
+    const at = now();
+    for (const watch of watches.list()) {
+      if (watch.state.subscribers.length === 0 && at - watch.state.lastTouchedAt > WATCH_TTL_MS) {
+        await watches.remove(watch.key);
+        logger.info("wake_watch_aged_out", { key: watch.key });
+      }
+    }
   }
 
   /**
    * A restart finds events that were persisted but never read. They are
    * announced with `resume: false`: the host documents that such a notice waits
-   * for the next wake instead of resurrecting a session the user just opened
-   * (the alternative, `resume: true`, is for events that arrive live).
+   * for the next wake instead of resurrecting a session the user just opened.
+   * The loop guard applies here too, so a crash loop cannot re-announce forever.
    */
   async function recover(): Promise<void> {
     for (const record of store.list()) {
       if (record.state.pending.length === 0) {
+        continue;
+      }
+      const decision = decideWake(record.state.loop, options.loop, now());
+      record.state.loop = decision.next;
+      await store.put(record);
+      if (!decision.deliver) {
+        logger.info("wake_backlog_announce_suppressed", {
+          subscriptionID: record.subscription.id,
+          reason: decision.reason
+        });
         continue;
       }
       const notice = buildNotice(record.subscription, record.state.pending.length);
@@ -320,6 +579,7 @@ export function createPoller(deps: PollerDeps): Poller {
   async function runLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
       try {
+        originated.prune();
         await tickDue();
       } catch (error) {
         logger.warn("wake_poll_loop_failed", {
@@ -327,9 +587,10 @@ export function createPoller(deps: PollerDeps): Poller {
         });
       }
       const at = now();
-      const waits = store
+      const waits = watches
         .list()
-        .map((record) => Math.max(0, record.state.nextPollAt - at))
+        .filter((watch) => watch.state.subscribers.length > 0)
+        .map((watch) => Math.max(0, watch.state.nextPollAt - at))
         .filter((wait) => Number.isFinite(wait));
       const wait = waits.length > 0 ? Math.min(...waits) : MAX_IDLE_WAIT_MS;
       await sleep(Math.min(MAX_IDLE_WAIT_MS, wait), signal);
@@ -342,6 +603,12 @@ export function createPoller(deps: PollerDeps): Poller {
         return;
       }
       await store.load();
+      await watches.load();
+      for (const seed of store.legacySeeds()) {
+        await seedWatch(seed);
+      }
+      await reconcileMembership();
+      await pruneStaleWatches();
       running = true;
       controller = new AbortController();
       await recover();
@@ -353,7 +620,44 @@ export function createPoller(deps: PollerDeps): Poller {
       controller?.abort();
       controller = undefined;
     },
+    async join(record) {
+      await store.put(record);
+      const watch = await ensureWatch(record);
+      watch.state.lastTouchedAt = now();
+      const members = store.listByKey(watch.key, options.apiBase);
+      watch.state.nextPollAt = Math.min(
+        watch.state.nextPollAt,
+        now() + negotiatedIntervalMs(members, options)
+      );
+      await watches.put(watch);
+    },
+    async leave(subscriptionID) {
+      const record = store.get(subscriptionID);
+      if (!record) {
+        return false;
+      }
+      const key = keyOf(record.subscription);
+      await store.remove(subscriptionID);
+      const watch = watches.get(key);
+      if (watch) {
+        watch.state.subscribers = watch.state.subscribers.filter((id) => id !== subscriptionID);
+        watch.state.lastTouchedAt = now();
+        await watches.put(watch);
+      }
+      return true;
+    },
     tick,
-    tickDue
+    tickKey,
+    tickDue,
+    async watchFor(subscriptionID) {
+      const record = store.get(subscriptionID);
+      if (!record) {
+        return undefined;
+      }
+      return ensureWatch(record);
+    },
+    markOriginated(eventID) {
+      originated.mark(eventID);
+    }
   };
 }

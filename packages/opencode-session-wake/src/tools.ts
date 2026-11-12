@@ -5,13 +5,14 @@ import { clampInterval, type WakeOptions } from "./config.js";
 import type { Logger } from "./logging.js";
 import type { Poller } from "./poller.js";
 import {
-  initialState,
+  initialSubscriberState,
   isSubscriptionID,
   newSubscriptionID,
   type SubscriptionStore
 } from "./state.js";
 import { WAKE_SOURCE_KINDS, type WakeSourceKind } from "./types.js";
-import type { SubscriptionRecord, WakeEvent, WakeSubscription } from "./types.js";
+import type { SubscriptionRecord, WakeEvent, WakeSubscription, WatchRecord } from "./types.js";
+import { normalizeAuthors } from "./loop.js";
 
 /** The tool-registration editor the host hands to a `tool.transform` callback. */
 type ToolEditor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0];
@@ -39,7 +40,7 @@ export interface WakeToolContext {
 
 export interface WakeToolDeps {
   readonly store: SubscriptionStore;
-  readonly poller: Pick<Poller, "tick">;
+  readonly poller: Pick<Poller, "join" | "leave" | "tick" | "watchFor">;
   readonly options: WakeOptions;
   readonly logger: Logger;
   /** Defaults to `Date.now`. */
@@ -126,21 +127,41 @@ function threadOf(subscription: WakeSubscription): string {
   return `${subscription.owner}/${subscription.repo}#${subscription.number}`;
 }
 
-function describeSubscription(record: SubscriptionRecord): Record<string, unknown> {
+function describeSubscription(
+  record: SubscriptionRecord,
+  watch: WatchRecord | undefined,
+  options: WakeOptions,
+  now: number
+): Record<string, unknown> {
   const { subscription, state } = record;
+  const recentWakes = state.loop.wakes.filter((at) => now - at < options.loop.windowMs).length;
   return {
     id: subscription.id,
     sessionID: subscription.sessionID,
     source: subscription.kind,
     thread: threadOf(subscription),
     mentions: subscription.mentions,
+    ignoreAuthors: subscription.ignoreAuthors,
     intervalMs: subscription.intervalMs,
     pending: state.pending.length,
-    cursor: state.cursor,
-    lastPollAt: state.lastPollAt ?? null,
-    nextPollAt: new Date(state.nextPollAt).toISOString(),
-    consecutiveFailures: state.consecutiveFailures,
-    lastError: state.lastError ?? null
+    cursor: watch?.state.cursor ?? null,
+    lastPollAt: watch?.state.lastPollAt ?? null,
+    nextPollAt: watch ? new Date(watch.state.nextPollAt).toISOString() : null,
+    consecutiveFailures: watch?.state.consecutiveFailures ?? 0,
+    lastError: state.lastError ?? watch?.state.lastError ?? null,
+    sharedWatch: watch?.key ?? null,
+    subscribers: watch?.state.subscribers.length ?? 0,
+    loop: {
+      recentWakes,
+      maxWakes: options.loop.maxWakes,
+      windowMs: options.loop.windowMs,
+      suppressed: state.loop.suppressed,
+      loopSuspected: state.loop.loopSuspected,
+      cooldownUntil:
+        state.loop.cooldownUntil !== undefined
+          ? new Date(state.loop.cooldownUntil).toISOString()
+          : null
+    }
   };
 }
 
@@ -168,6 +189,13 @@ export const WAKE_TOOL_SCHEMAS: Record<string, Record<string, unknown>> = {
         items: { type: "string" },
         description:
           "Only wake for comments that mention one of these handles. Omit for every comment."
+      },
+      ignoreAuthors: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Logins whose events are dropped (e.g. your own user, `github-actions[bot]`). " +
+          "Use this to stop a wake/comment loop when an agent writes to the watched thread."
       },
       intervalSeconds: {
         type: "number",
@@ -265,6 +293,7 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
             throw new WakeToolError({ message: "`number` must be a positive integer" });
           }
           const mentions = normalizeMentions(args.mentions);
+          const ignoreAuthors = normalizeAuthors(normalizeMentions(args.ignoreAuthors));
           const sessionID = (context as WakeToolContext).sessionID;
 
           await store.load();
@@ -276,12 +305,17 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
                 record.subscription.owner === owner &&
                 record.subscription.repo === repo &&
                 record.subscription.number === number &&
-                record.subscription.mentions.join(",") === mentions.join(",")
+                record.subscription.mentions.join(",") === mentions.join(",") &&
+                record.subscription.ignoreAuthors.join(",") === ignoreAuthors.join(",")
             );
           if (duplicate) {
+            const watch = await deps.poller.watchFor(duplicate.subscription.id);
             return {
               content: `Already subscribed to ${threadOf(duplicate.subscription)} (${source}) as ${duplicate.subscription.id}.`,
-              metadata: { subscription: describeSubscription(duplicate), created: false }
+              metadata: {
+                subscription: describeSubscription(duplicate, watch, options, now()),
+                created: false
+              }
             };
           }
 
@@ -294,16 +328,25 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
             repo,
             number,
             mentions,
+            ignoreAuthors,
             intervalMs,
             createdAt: new Date(now()).toISOString()
           };
-          const record: SubscriptionRecord = { subscription, state: initialState(now()) };
-          await store.put(record);
+          const record: SubscriptionRecord = {
+            subscription,
+            state: initialSubscriberState()
+          };
+          // `join` attaches this subscriber to the shared fetcher for its key.
+          // Two sessions on the same target now share one poller and one cursor.
+          await deps.poller.join(record);
+          const watch = await deps.poller.watchFor(subscription.id);
           logger.info("wake_subscribed", {
             subscriptionID: subscription.id,
             sessionID,
             thread: threadOf(subscription),
-            intervalMs
+            intervalMs,
+            sharedWatch: watch?.key,
+            subscribers: watch?.state.subscribers.length
           });
 
           // Check once now so an auth or access problem surfaces in this turn
@@ -322,7 +365,10 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
               `(every ${Math.round(intervalMs / 1000)}s${
                 mentions.length > 0 ? `, mentions: ${mentions.map((m) => `@${m}`).join(", ")}` : ""
               }).`,
-            metadata: { subscription: describeSubscription(record), created: true }
+            metadata: {
+              subscription: describeSubscription(record, watch, options, now()),
+              created: true
+            }
           };
         })
     },
@@ -336,7 +382,9 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
           const args = asRecord(rawInput);
           const id = requiredString(args, "id");
           const record = owned((context as WakeToolContext).sessionID, id);
-          await store.remove(id);
+          // `leave` detaches the subscriber and decrements the shared fetcher's
+          // refcount; at 0 the poller stops, without touching other sessions.
+          await deps.poller.leave(id);
           logger.info("wake_unsubscribed", {
             subscriptionID: id,
             thread: threadOf(record.subscription)
@@ -350,7 +398,7 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
     {
       name: "wake_list",
       description:
-        "List this session's thread watches with their cursor, unread count and last error.",
+        "List this session's watches with their shared cursor, unread count, loop-guard state and last error.",
       input: WAKE_TOOL_SCHEMAS.wake_list,
       execute: (_rawInput, context) =>
         run(async () => {
@@ -362,18 +410,40 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
               metadata: { subscriptions: [] }
             };
           }
-          const lines = records.map((record) => {
-            const view = describeSubscription(record);
+          const views = [];
+          for (const record of records) {
+            const watch = await deps.poller.watchFor(record.subscription.id);
+            views.push({
+              record,
+              watch,
+              view: describeSubscription(record, watch, options, now())
+            });
+          }
+          const lines = views.map(({ record, watch, view }) => {
             const error = view.lastError ? ` lastError=${String(view.lastError)}` : "";
+            const loop = view.loop as {
+              recentWakes: number;
+              maxWakes: number;
+              suppressed: number;
+              loopSuspected: boolean;
+              cooldownUntil: string | null;
+            };
+            const guard = loop.loopSuspected
+              ? ` LOOP_SUSPECTED wakes=${loop.recentWakes}/${loop.maxWakes}` +
+                (loop.suppressed > 0 ? ` suppressed=${loop.suppressed}` : "") +
+                (loop.cooldownUntil ? ` cooldownUntil=${loop.cooldownUntil}` : "")
+              : ` wakes=${loop.recentWakes}/${loop.maxWakes}`;
             return (
-              `- ${record.subscription.id} ${view.thread} ` +
-              `(every ${Math.round(record.subscription.intervalMs / 1000)}s, ` +
-              `pending=${record.state.pending.length}, cursor=${record.state.cursor.lastSeenAt}${error})`
+              `- ${record.subscription.id} ${String(view.thread)} ` +
+              `(${record.subscription.kind}, every ${Math.round(record.subscription.intervalMs / 1000)}s, ` +
+              `pending=${record.state.pending.length}, ` +
+              `cursor=${watch?.state.cursor.lastSeenAt ?? "unset"}, ` +
+              `shared=${watch?.state.subscribers.length ?? 0}${guard}${error})`
             );
           });
           return {
             content: lines.join("\n"),
-            metadata: { subscriptions: records.map(describeSubscription) }
+            metadata: { subscriptions: views.map((entry) => entry.view) }
           };
         })
     },

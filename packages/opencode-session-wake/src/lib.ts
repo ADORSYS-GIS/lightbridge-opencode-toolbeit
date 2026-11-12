@@ -19,6 +19,8 @@ export {
   resolveStateRoot,
   resolveWakeStateDir,
   STATE_NAMESPACE,
+  wakeSubscriptionsDir,
+  wakeWatchesDir,
   type WakeOptions
 } from "./config.js";
 
@@ -50,16 +52,27 @@ export {
 } from "./github.js";
 
 export {
-  pollSource,
-  type SourceContext,
-  type SourceResult
-} from "./sources.js";
+  DEFAULT_LOOP_POLICY,
+  decideWake,
+  initialLoopState,
+  isIgnoredAuthor,
+  normalizeAuthors,
+  ORIGINATED_TTL_MS,
+  OriginatedSet,
+  type LoopPolicy,
+  type WakeDecision,
+  type WakeSuppressionReason
+} from "./loop.js";
+
+export { pollSource, type SourceContext, type SourceResult } from "./sources.js";
 
 export {
   backoffMs,
   buildNotice,
   createPoller,
   matchesMention,
+  negotiatedIntervalMs,
+  WATCH_TTL_MS,
   type Poller,
   type PollerDeps,
   type PollOutcome,
@@ -67,11 +80,17 @@ export {
 } from "./poller.js";
 
 export {
-  initialState,
+  initialSubscriberState,
+  initialWatchState,
   isSubscriptionID,
   newSubscriptionID,
   SubscriptionStore,
-  type SubscriptionStoreOptions
+  targetOf,
+  watchFileFor,
+  watchKey,
+  WatchStore,
+  type LegacyWatchSeed,
+  type StoreOptions
 } from "./state.js";
 
 export {
@@ -88,15 +107,19 @@ export {
 
 export {
   WAKE_SOURCE_KINDS,
+  type LoopState,
+  type SourceState,
+  type SubscriberState,
   type SubscriptionRecord,
-  type SubscriptionState,
   type WakeCursor,
-  type WakeETag,
   type WakeEvent,
   type WakeEventKind,
   type WakeNotice,
   type WakeSourceKind,
-  type WakeSubscription
+  type WakeSubscription,
+  type WatchRecord,
+  type WatchState,
+  type WatchTarget
 } from "./types.js";
 
 export {
