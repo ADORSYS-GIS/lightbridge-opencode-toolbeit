@@ -1,6 +1,6 @@
 {
   "name": "@vymalo/opencode-session-wake",
-  "version": "0.20.1",
+  "version": "0.20.2",
   "description": "OpenCode plugin that watches a GitHub issue/PR thread and wakes the session that subscribed to it: durable per-subscription cursor under the state root, dedupe by comment id, no GitHub writes, and an untrusted-content notice delivered through ctx.session.synthetic.",
   "license": "MIT",
   "author": "vymalo contributors",
