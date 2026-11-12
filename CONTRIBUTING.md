@@ -125,13 +125,13 @@ Two entry points per published package: `"."` → `dist/index.js` (kept intentio
 
 ## Releasing (maintainers)
 
-Versions are bumped **manually** — no changesets. All sixteen workspace packages sit on **one
+Versions are bumped **manually** — no changesets. All seventeen workspace packages sit on **one
 version line** and are bumped together in a single PR that also adds the `CHANGELOG.md` entry: the
-thirteen published ones (`opencode-auth-core`, `opencode-core-otel`, `opencode-provider-sync`,
-`opencode-oauth2`, `opencode-models-info`, `opencode-ratelimit`, `opencode-browser`,
-`opencode-browser-mcp`, `opencode-devtools`, `opencode-devtools-mcp`, `opencode-otel`,
-`opencode-repo-auth`, `opencode-lightbridge`) plus three private (workspace root, `plugin-bundle`,
-`browser-extension`).
+fourteen published ones (`opencode-auth-core`, `opencode-core-otel`, `opencode-provider-sync`,
+`opencode-oauth2`, `opencode-models-info`, `opencode-ratelimit`, `opencode-session-wake`,
+`opencode-browser`, `opencode-browser-mcp`, `opencode-devtools`, `opencode-devtools-mcp`,
+`opencode-otel`, `opencode-repo-auth`, `opencode-lightbridge`) plus three private (workspace root,
+`plugin-bundle`, `browser-extension`).
 
 After that PR merges, a maintainer publishes by dispatching the workflow:
 
@@ -139,7 +139,7 @@ After that PR merges, a maintainer publishes by dispatching the workflow:
 gh workflow run publish.yml -f dry_run=false
 ```
 
-It runs the gate, publishes the thirteen npm packages with provenance (shared libraries — auth-core,
+It runs the gate, publishes the fourteen npm packages with provenance (shared libraries — auth-core,
 core-otel, provider-sync — before the plugins that depend on them), attaches the extension zips,
 and `wxt submit`s to the Chrome Web Store + Firefox AMO (each gated on its own store secrets, so a
 store with no credentials is skipped rather than failing). `-f dry_run=true` validates everything,
