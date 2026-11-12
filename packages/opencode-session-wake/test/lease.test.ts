@@ -209,7 +209,7 @@ describe("LeaseStore", () => {
     }
   });
 
-  it("does not let a renew clobber a takeover", async () => {
+  it("refuses to renew a lease another owner already holds", async () => {
     const { temp, leases, clockRef } = await setup();
     try {
       expect(await leases.acquire("k", "owner-a", 100)).toBe(true);
@@ -223,6 +223,125 @@ describe("LeaseStore", () => {
 
       expect(await leases.renew("k", "owner-a", 100)).toBe(false);
       expect((await other.read("k"))?.owner).toBe("owner-b");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("does not let a renew that read before a takeover overwrite the taker", async () => {
+    const { temp, leases, clockRef } = await setup();
+    try {
+      const dir = join(temp.dir, "leases");
+      const logger = fakeLogger();
+      const key = "renew-race";
+      expect(await leases.acquire(key, "owner-a", 100)).toBe(true);
+      clockRef.advance(200);
+
+      const renewer = new LeaseStore({ dir, logger, now: clockRef.now });
+      const taker = new LeaseStore({ dir, logger, now: clockRef.now });
+
+      // Hold the renew after its read, before its compare-and-swap. The old
+      // implementation wrote the whole record unconditionally at this point and
+      // overwrote the takeover; the CAS must see the taker's record instead.
+      const renewRead = deferred<void>();
+      const releaseRenew = deferred<void>();
+      let reads = 0;
+      overrideMethod(renewer, "readRaw", async (original, ...args) => {
+        const result = await original(...args);
+        reads += 1;
+        if (reads === 1) {
+          renewRead.resolve();
+          await releaseRenew.promise;
+        }
+        return result;
+      });
+
+      const renewing = renewer.renew(key, "owner-a", 100);
+      await renewRead.promise;
+      // The renew has read the expired lease but has not written. A takeover
+      // publishes its own claim in that window.
+      expect(await taker.acquire(key, "owner-b", 100)).toBe(true);
+      releaseRenew.resolve();
+
+      expect(await renewing).toBe(false);
+      expect((await taker.read(key))?.owner).toBe("owner-b");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("documents the take-aside window: a third poller can leave two claimants", async () => {
+    const { temp, leases, clockRef } = await setup();
+    try {
+      const dir = join(temp.dir, "leases");
+      const logger = fakeLogger();
+      const key = "three-way";
+      expect(await leases.acquire(key, "crashed", 100)).toBe(true);
+      clockRef.advance(200);
+
+      const first = new LeaseStore({ dir, logger, now: clockRef.now });
+      const second = new LeaseStore({ dir, logger, now: clockRef.now });
+      const third = new LeaseStore({ dir, logger, now: clockRef.now });
+
+      // First and second both read the same expired record.
+      const bothRead = deferred<void>();
+      let reads = 0;
+      for (const store of [first, second]) {
+        overrideMethod(store, "readRaw", async (original, ...args) => {
+          const result = await original(...args);
+          reads += 1;
+          if (reads === 2) {
+            bothRead.resolve();
+          }
+          await bothRead.promise;
+          return result;
+        });
+      }
+
+      // First publishes its claim, then second takes that fresh claim aside.
+      const firstClaimed = deferred<void>();
+      for (const method of ["createExclusive", "linkClaim"]) {
+        overrideMethod(first, method, async (original, ...args) => {
+          const result = await original(...args);
+          firstClaimed.resolve();
+          return result;
+        });
+      }
+      const secondMoved = deferred<void>();
+      for (const method of ["removeFile", "moveAside"]) {
+        overrideMethod(second, method, async (original, ...args) => {
+          await firstClaimed.promise;
+          const result = await original(...args);
+          secondMoved.resolve();
+          return result;
+        });
+      }
+
+      // Third starts only after second has moved first's fresh claim aside, so
+      // it sees a free slot. Second's restore is held until third has claimed.
+      const thirdClaimed = deferred<void>();
+      overrideMethod(second, "restore", async (original, ...args) => {
+        await thirdClaimed.promise;
+        return original(...args);
+      });
+
+      const firstOutcome = first.acquire(key, "owner-a", 100);
+      const secondOutcome = second.acquire(key, "owner-b", 100);
+      const thirdOutcome = (async () => {
+        await secondMoved.promise;
+        const result = await third.acquire(key, "owner-c", 100);
+        thirdClaimed.resolve();
+        return result;
+      })();
+
+      const outcomes = await Promise.all([firstOutcome, secondOutcome, thirdOutcome]);
+      // Documented limitation: first and third both believe they hold the
+      // lease. First's claim was deleted by second's cleanup, so the file on
+      // disk is third's; first's next renew fails and it does not deliver.
+      expect(outcomes).toEqual([true, false, true]);
+      expect((await leases.read(key))?.owner).toBe("owner-c");
+      expect(await first.renew(key, "owner-a", 100)).toBe(false);
+      expect((await leases.read(key))?.owner).toBe("owner-c");
     } finally {
       await temp.cleanup();
     }

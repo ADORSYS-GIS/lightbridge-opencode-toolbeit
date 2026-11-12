@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { parseWakeOptions, wakeLeasesDir, type WakeOptions } from "../src/config.js";
 import { TransportFailure, type GitHubTransport } from "../src/github.js";
-import { LeaseStore } from "../src/lease.js";
+import { LeaseStore, leaseTtlForIdleMs, leaseTtlMs } from "../src/lease.js";
 import { createPoller } from "../src/poller.js";
 import { createWakeToolInfos } from "../src/tools.js";
 import type { WakeNotice } from "../src/types.js";
@@ -390,6 +390,39 @@ describe("cross-poller dedupe", () => {
       expect(takeover.status).toBe("delivered");
       expect(other.notices).toHaveLength(1);
       expect(await pendingOnDisk(temp.dir, rec.subscription.id)).toBe(1);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("returns the lease to the normal TTL after a successful poll following a backoff", async () => {
+    const temp = await tempDir();
+    const clockRef = clock();
+    try {
+      const seed = await makeStore(temp.dir);
+      const rec = record({ sessionID: "ses_a" });
+      await seed.put(rec);
+      const key = keyOf(rec);
+      const owner = await stack(temp.dir, clockRef.now, { ownerID: "owner" });
+      await owner.poller.join(rec);
+
+      const normalTtl = leaseTtlMs(60_000, 600_000);
+      const backoffTtl = leaseTtlForIdleMs(500_000, 60_000, 600_000);
+
+      owner.transport.fail(
+        new TransportFailure("rate-limit", "rate limited", { status: 429, retryAfterMs: 500_000 })
+      );
+      expect((await owner.poller.tickKey(key)).status).toBe("failed");
+      // The failure holds the lease across the 500 s backoff, not just the
+      // normal 150 s TTL.
+      expect((await owner.leases.read(key))?.expiresAt).toBe(clockRef.now() + backoffTtl);
+
+      // The next poll is due at the end of the backoff. A success renews with
+      // the normal TTL again; it must not keep the inflated backoff value.
+      clockRef.advance(500_000);
+      owner.transport.setComments([page([event("101")])]);
+      expect((await owner.poller.tickKey(key)).status).toBe("delivered");
+      expect((await owner.leases.read(key))?.expiresAt).toBe(clockRef.now() + normalTtl);
     } finally {
       await temp.cleanup();
     }

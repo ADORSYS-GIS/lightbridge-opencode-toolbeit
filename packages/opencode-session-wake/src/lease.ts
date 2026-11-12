@@ -146,6 +146,13 @@ export function leaseFileFor(key: string): string {
  * deleted the first one's fresh lease and both claims succeeded. `renew` and
  * `release` use the same discipline, so a renewal cannot clobber a takeover.
  *
+ * The window between `rename` and `link` is **not** a global lock. A third
+ * caller that reads the slot while a fresh claim is taken aside can claim it;
+ * the mover's restore then loses (`EEXIST`) and deletes the file it moved. The
+ * first and third callers both believe they hold the lease until their next
+ * renew; the first's renew fails, so it must not deliver. Only the two-caller
+ * race over one expired record is fully closed.
+ *
  * Known boundary: on a filesystem that does not honour atomic exclusive create,
  * hard links or rename (some network shares), two claims can still both
  * succeed. This lease is therefore a single-writer guard, not a distributed

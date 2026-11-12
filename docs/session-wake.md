@@ -316,8 +316,11 @@ session id or a token). A **free slot** is claimed with an atomic exclusive crea
 written to a unique temp file, the current file is moved aside atomically with `rename`, its content
 is compared with the exact record this caller read, and only then is the claim published with
 `link` (which fails with `EEXIST` if another poller won the slot). A file that does not match is put
-back with `link`; a takeover therefore never deletes the winner's fresh lease. `renew` and `release`
-use the same discipline, so a renewal cannot clobber a takeover. A lease that is unreadable but
+back with `link`; a **two-poller** takeover therefore does not delete the winner's fresh claim.
+`renew` and `release` use the same discipline, so a renewal cannot clobber a takeover. The
+take-aside window is not a global lock: a third poller can still claim the slot while another poller
+has a fresh claim moved aside (see the take-aside-window limitation under Delivery guarantees). A
+lease that is unreadable but
 **fresh** is treated as a claim still being written (fail closed); only an unreadable file older
 than one TTL is reclaimed as corrupt leftovers.
 
@@ -374,8 +377,12 @@ No token is ever written to these files.
 - **One live poller per watch.** A per-watch lease (`owner` + expiry) is acquired before the fetch
   and renewed on every poll. A poller that cannot acquire it skips the whole poll — no HTTP request,
   no pending append, no notice — and backs off in memory. A free slot is claimed with an atomic
-  exclusive create; an expired lease is taken over by compare-and-swap, so two pollers that both see
-  the same expired record cannot both win (and neither can delete the other's fresh claim). The TTL
+  exclusive create; an expired lease is taken over by compare-and-swap, so **two pollers that both
+  see the same expired record cannot both win**. The take-aside window is **not** a global lock: a
+  third poller that reads the slot while another poller has moved a fresh claim aside can claim it;
+  the mover's restore then loses to that claim (`EEXIST`) and deletes the file it moved aside, so the
+  first and third pollers can both believe they hold the lease until their next `renew` (the first's
+  `renew` fails, so it does not deliver). Only the two-poller race is fully closed. The TTL
   is `clamp(2 × negotiated interval + 30 s, 60 s, 2 × maxIntervalMs)`: two intervals tolerate a
   delayed poll, the floor keeps a fast test interval from expiring mid-poll, and the ceiling bounds
   crash failover. A failed poll **extends the lease to cover its backoff** (still under the same
@@ -491,6 +498,14 @@ watch keeps its cursor — no partial state is claimed.
   subscriber `seen` ring are the guards there, not a transaction. Two processes adopting the same
   record concurrently remain last-writer-wins (in one process the writes are serialized per
   subscription).
+- **The lease take-aside window is not a global lock.** The compare-and-swap closes the two-poller
+  race over one expired record, but it cannot make "move the old file aside, publish the new one"
+  atomic against an arbitrary number of pollers. A third poller that reads the slot during the
+  window sees a free slot and claims it; the poller that moved the first fresh claim aside then gets
+  `EEXIST` on restore and deletes the file it moved. The first and third pollers both believe they
+  hold the lease until their next `renew`; the first's `renew` then fails, so it skips the poll and
+  does not deliver. Closing this fully would need a separate per-key lock or a compare-and-swap
+  primitive the filesystem does not expose.
 - **Tool calls other than `wake_next` keep their loaded snapshot.** `wake_next` re-reads the
   subscription and the watch from disk, and the poller reloads both stores at the start of every
   poll, so the observed "pending=1 but No unread comments" case is fixed. `wake_list` and
