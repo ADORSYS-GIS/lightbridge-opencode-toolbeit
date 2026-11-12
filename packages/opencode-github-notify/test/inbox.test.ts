@@ -98,6 +98,15 @@ describe("next — exactly once per session", () => {
   it("reports a watch that has not been polled yet", async () => {
     const [batch] = await inbox().next(S1, 20);
     expect(batch).toMatchObject({ pendingBaseline: true, events: [] });
+    expect(batch?.lastError).toBeUndefined();
+  });
+
+  it("says why a watch has no state when its first poll failed", async () => {
+    gh.fail({ status: 404 });
+    await pollWatch(WATCH, pollDeps(dir, gh), force);
+    const [batch] = await inbox().next(S1, 20);
+    expect(batch).toMatchObject({ pendingBaseline: true });
+    expect(batch?.lastError).toMatch(/^not_found: /);
   });
 
   it("reports events evicted before the session read them, and moves past them", async () => {

@@ -111,11 +111,38 @@ export interface LockOptions {
   readonly staleMs?: number;
 }
 
-async function lockAgeMs(path: string): Promise<number | undefined> {
+/** Is a process with this pid running on this machine? `undefined` when it cannot be told. */
+export function isProcessAlive(pid: number): boolean | undefined {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return undefined;
+  }
   try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as { acquiredAt?: unknown };
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // ESRCH: no such process. EPERM: it exists but belongs to another user.
+    const code = errorCode(error);
+    return code === "ESRCH" ? false : code === "EPERM" ? true : undefined;
+  }
+}
+
+interface Holder {
+  readonly ageMs: number;
+  readonly pid?: number;
+}
+
+/** Who holds a lock and for how long; `undefined` when the lock vanished meanwhile. */
+async function lockHolder(path: string): Promise<Holder | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as {
+      acquiredAt?: unknown;
+      pid?: unknown;
+    };
     if (typeof parsed.acquiredAt === "number") {
-      return Date.now() - parsed.acquiredAt;
+      return {
+        ageMs: Date.now() - parsed.acquiredAt,
+        ...(typeof parsed.pid === "number" ? { pid: parsed.pid } : {})
+      };
     }
   } catch (error) {
     if (errorCode(error) === "ENOENT") {
@@ -123,9 +150,9 @@ async function lockAgeMs(path: string): Promise<number | undefined> {
     }
   }
   try {
-    return Date.now() - (await stat(path)).mtimeMs;
+    return { ageMs: Date.now() - (await stat(path)).mtimeMs };
   } catch (error) {
-    return errorCode(error) === "ENOENT" ? undefined : Number.POSITIVE_INFINITY;
+    return errorCode(error) === "ENOENT" ? undefined : { ageMs: Number.POSITIVE_INFINITY };
   }
 }
 
@@ -134,7 +161,12 @@ async function lockAgeMs(path: string): Promise<number | undefined> {
  * lock this one is STRICT: when it cannot be taken it returns `undefined` and the caller
  * must not touch the guarded state. That is safe here because skipping a poll or asking
  * the model to retry loses nothing, whereas proceeding unlocked could deliver a comment
- * twice. A holder that died is detected by age and its lock is broken.
+ * twice.
+ *
+ * A dead holder's lock is broken at once: every holder runs on this machine and records
+ * its pid, and a process that exits mid-poll (OpenCode closed, `opencode run` finished)
+ * would otherwise block polling for every other session until `staleMs`. Seen on a real
+ * v2.2.7 host. Age remains the fallback when liveness cannot be determined.
  */
 export async function tryLock(path: string, options: LockOptions = {}): Promise<Lock | undefined> {
   const staleMs = options.staleMs ?? DEFAULT_LOCK_STALE_MS;
@@ -156,11 +188,15 @@ export async function tryLock(path: string, options: LockOptions = {}): Promise<
       }
     }
 
-    const age = await lockAgeMs(path);
-    if (age === undefined) {
+    const holder = await lockHolder(path);
+    if (holder === undefined) {
       continue;
     }
-    if (age > staleMs) {
+    const dead =
+      holder.pid !== undefined &&
+      holder.pid !== process.pid &&
+      isProcessAlive(holder.pid) === false;
+    if (dead || holder.ageMs > staleMs) {
       await unlink(path).catch(() => {});
       continue;
     }

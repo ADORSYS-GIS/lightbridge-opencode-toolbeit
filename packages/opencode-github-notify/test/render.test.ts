@@ -91,6 +91,17 @@ describe("rendering", () => {
     expect(text).toContain("a/b#1: WARNING 3 event(s) were evicted");
     expect(text).toContain("a/b#2: 4 more event(s) waiting");
     expect(text).toContain("a/b#3: not polled yet");
+    const failed = renderBatches([
+      {
+        watch: "a/b#4",
+        events: [],
+        missed: 0,
+        remaining: 0,
+        pendingBaseline: true,
+        lastError: "not_found: 404"
+      }
+    ]);
+    expect(failed).toContain("a/b#4: no thread state yet, the last poll failed (not_found: 404)");
   });
 
   it("renders recent and status", () => {
@@ -115,9 +126,11 @@ describe("rendering", () => {
         lastPoll: { at: "t3", ok: true }
       }
     ]);
-    expect(status).toContain("a/b#1: 0 pending for this session; poll not polled yet");
-    expect(status).toContain("FAILING (unauthorized: 401)");
-    expect(status).toContain("Thread state is NOT current");
-    expect(status).toContain("a/b#3: 0 pending for this session; poll ok at t3");
+    expect(status.split("\n")).toEqual([
+      "a/b#1: 0 pending for this session; not polled yet",
+      "a/b#2: 2 pending for this session; poll FAILING (unauthorized: 401) since t1; " +
+        "3 consecutive failure(s); last success never; thread state is NOT current; next poll t2",
+      "a/b#3: 0 pending for this session; poll ok at t3"
+    ]);
   });
 });

@@ -42,7 +42,12 @@ export function renderBatches(batches: readonly WatchBatch[]): string {
 
   for (const batch of batches) {
     if (batch.pendingBaseline) {
-      lines.push(`${batch.watch}: not polled yet; nothing to deliver.`);
+      lines.push(
+        batch.lastError
+          ? `${batch.watch}: no thread state yet, the last poll failed (${batch.lastError}). ` +
+              "Comments on it cannot be delivered until it succeeds; see github_messages_status."
+          : `${batch.watch}: not polled yet; nothing to deliver.`
+      );
     }
     if (batch.missed > 0) {
       lines.push(
@@ -85,17 +90,23 @@ export function renderStatus(statuses: readonly WatchStatus[]): string {
   }
   return statuses
     .map((status) => {
-      const health = !status.lastPoll
-        ? "not polled yet"
-        : status.lastPoll.ok
-          ? `ok at ${status.lastPoll.at}`
-          : `FAILING (${status.lastPoll.kind}: ${status.lastPoll.error}) since ${status.lastPoll.at}` +
-            `, ${status.consecutiveFailures} consecutive failure(s); last success ` +
-            `${status.lastSuccessAt ?? "never"}. Thread state is NOT current.`;
-      return (
-        `${status.watch}: ${status.pending} pending for this session; poll ${health}` +
-        (status.nextPollAt ? `; next poll ${status.nextPollAt}` : "")
-      );
+      const parts = [`${status.watch}: ${status.pending} pending for this session`];
+      if (!status.lastPoll) {
+        parts.push("not polled yet");
+      } else if (status.lastPoll.ok) {
+        parts.push(`poll ok at ${status.lastPoll.at}`);
+      } else {
+        parts.push(
+          `poll FAILING (${status.lastPoll.kind}: ${status.lastPoll.error}) since ${status.lastPoll.at}`,
+          `${status.consecutiveFailures} consecutive failure(s)`,
+          `last success ${status.lastSuccessAt ?? "never"}`,
+          "thread state is NOT current"
+        );
+      }
+      if (status.nextPollAt) {
+        parts.push(`next poll ${status.nextPollAt}`);
+      }
+      return parts.join("; ");
     })
     .join("\n");
 }

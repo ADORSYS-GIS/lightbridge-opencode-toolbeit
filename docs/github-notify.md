@@ -69,8 +69,10 @@ comment posted between "session started" and "first tool call" is still delivere
   fake one has the tag neutralised (`&lt;/untrusted-github-comment`); attribute values are stripped
   of quotes and angle brackets.
 - **Notices carry no third-party text.** The pushed notice is a fixed sentence plus counts and
-  thread names you configured. A comment saying "ignore previous instructions" cannot become a
-  session message by itself; the plugin itself never calls a tool or acts on comment content.
+  thread names you configured. This is load-bearing: on a real v2.2.7 host a `synthetic` message
+  reaches the model as a **`user`-role** message, i.e. with the user's authority. A comment saying
+  "ignore previous instructions" therefore must never travel that way, and does not; the plugin
+  itself never calls a tool or acts on comment content.
 - **Pagination links stay on the API origin.** A `Link: rel="next"` pointing anywhere else is
   refused, so the token is never sent off-host.
 - **Token handling.** From `gh auth token` (default), a command you configure, or an env var. Held
@@ -119,6 +121,22 @@ would replay or skip comments — delete it to restart that session from now.
 - `"enabled": false` in the plugin's options — the plugin registers nothing and does not poll.
 - `"notify": "off"` — keep the tools, stop pushing notices.
 - Remove the plugin entry, and delete the state directory above to drop all logs and cursors.
+
+## Verified on a real host
+
+Against a real OpenCode **v2.2.7** (`@opencode/cli`, standalone, fully sandboxed XDG roots),
+real GitHub (issue #158), and a scripted OpenAI-compatible model that issues exact tool calls:
+
+| Check | Result |
+| --- | --- |
+| Plugin loads; whole `dist/` graph resolves; events reach the host log sink | ✅ `github_notify_started`, no terminal mirror |
+| Tool exposure | ✅ direct tools `github_messages_{next,recent,status}` — requires `codemode: false` (without it v2 hides plugin tools behind Code Mode `execute`) |
+| Baseline of a real thread; ETag stored; `status` reports "poll ok" | ✅ |
+| Unreadable repo (404) | ✅ `not_found` to the model and in a `WARN`; healthy watch unaffected; backoff doubles |
+| Rejected token (401, env auth) | ✅ `unauthorized`; token string absent from logs, output and every state file |
+| New comment → notice via `ctx.session.synthetic` | ✅ queued and run in the same execution, as a `user`-role message with fixed text only |
+| `next` across two separate processes (restart) | ✅ delivered once, fenced as untrusted; second call returns nothing |
+| Host exiting mid-poll leaves the thread lock behind | ✅ fixed: a lock whose holder pid is dead is broken at once (was: polling blocked ≤ 2 min, silently) |
 
 ## Limits and follow-ups
 

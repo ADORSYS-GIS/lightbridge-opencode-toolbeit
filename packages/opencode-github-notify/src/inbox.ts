@@ -52,6 +52,8 @@ export interface WatchBatch {
   readonly remaining: number;
   /** The watch has not completed its first poll yet. */
   readonly pendingBaseline: boolean;
+  /** When `pendingBaseline`, why: the last poll's failure, if it failed. */
+  readonly lastError?: string;
 }
 
 export interface WatchStatus {
@@ -210,12 +212,14 @@ export function createInbox(deps: InboxDeps): Inbox {
             session.delivered[watch.key] = advanced;
             dirty = true;
           }
+          const failed = !state.baselined && state.lastPoll && !state.lastPoll.ok;
           batches.push({
             watch: watch.key,
             events,
             missed,
             remaining: pending.length - events.length,
-            pendingBaseline: !state.baselined
+            pendingBaseline: !state.baselined,
+            ...(failed ? { lastError: `${state.lastPoll?.kind}: ${state.lastPoll?.error}` } : {})
           });
         }
 

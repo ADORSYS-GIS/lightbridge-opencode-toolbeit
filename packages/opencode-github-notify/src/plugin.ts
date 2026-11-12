@@ -135,7 +135,11 @@ export function createNotifier(deps: NotifierDeps): Notifier {
     // Sequential: one thread at a time keeps request bursts small.
     for (const watch of options.watches) {
       try {
-        outcomes.push(await pollWatch(watch, pollDeps, { force }));
+        const outcome = await pollWatch(watch, pollDeps, { force });
+        if (outcome.status === "busy") {
+          logger.debug("github_notify_poll_busy", { watch: watch.key });
+        }
+        outcomes.push(outcome);
       } catch (error) {
         // Filesystem trouble (not a GitHub error, which pollWatch records itself).
         logger.error("github_notify_poll_crashed", {

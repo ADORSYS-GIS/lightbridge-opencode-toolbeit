@@ -66,6 +66,10 @@ The default auth uses the GitHub CLI, so `gh auth login` once on the machine (or
 | `github_messages_recent` | Re-reads the latest retained events without changing any cursor (`limit`, optional `watch`). The recovery path if a turn is lost. |
 | `github_messages_status` | Per thread: unread count for this session, last poll result (auth / rate limit / network errors are spelled out), next poll time. Calling it also subscribes the session to notices. |
 
+They are registered as **direct** tools (`codemode: false`). OpenCode v2 otherwise exposes a
+namespaced plugin tool only through Code Mode (`tools.github_messages.next()` inside `execute`),
+and the session notice needs to name a tool the model can call as-is.
+
 Tell your agent to call `github_messages_status` at the start of a session; after that, notices
 arrive on their own.
 
@@ -89,6 +93,7 @@ which is usually broader — use `auth.command` / `auth.env` with a narrower tok
 | `github_notify_events_recorded` | info | New events appended to a thread's log. |
 | `github_notify_poll_failed` | warn | GitHub error; `kind` is one of `no_token`, `unauthorized`, `forbidden`, `not_found`, `rate_limited`, `server`, `network`, `malformed`. |
 | `github_notify_listing_truncated` | warn | The thread has more pages than `maxPages`. |
+| `github_notify_poll_busy` | debug | Another process holds the thread's poll lock; this tick skips it. |
 | `github_notify_notice_sent` / `_failed` | info / warn | A notice was queued into a session / refused (that session stops receiving notices; its cursor is kept). |
 | `github_notify_delivered` | info | `github_messages_next` handed events to a session. |
 | `github_notify_state_reset` | error | A state file was unreadable; it was moved aside and the thread re-baselined. |

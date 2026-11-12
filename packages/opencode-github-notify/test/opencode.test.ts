@@ -33,6 +33,7 @@ afterEach(() => cleanup());
 
 type ToolInfo = {
   name: string;
+  options?: { namespace?: string; codemode?: boolean };
   execute: (
     input: unknown,
     context: { sessionID: string }
@@ -110,6 +111,9 @@ describe("plugin adapter", () => {
     const run = await start({ watches: [WATCH.key], stateDir: dir, notify: "off" });
     expect(run.namespaces).toEqual(["github_messages"]);
     expect(run.tools.map((t) => t.name)).toEqual(["next", "recent", "status"]);
+    // Direct tools, not Code Mode: on a real v2.2.7 host a namespaced plugin tool is
+    // otherwise only reachable from JS inside `execute`, and the notice names a tool.
+    expect(run.tools.every((t) => t.options?.codemode === false)).toBe(true);
 
     const [next, recent, status] = run.tools;
     expect((await call(status)).content).toContain("not polled yet");
