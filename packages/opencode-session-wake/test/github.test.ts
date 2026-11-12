@@ -453,6 +453,9 @@ describe("createGitHubTransport — checks", () => {
       if (url.includes("/pulls/")) {
         return json({ head: { sha: "abc" } });
       }
+      if (url.includes("/actions/")) {
+        return json({ total_count: 0, workflow_runs: [] });
+      }
       return json([]);
     });
     const transport = createGitHubTransport({
@@ -464,8 +467,154 @@ describe("createGitHubTransport — checks", () => {
     await transport.listTimeline({ owner: "a", repo: "b", number: 1, page: 1 });
     await transport.getPullRequest({ owner: "a", repo: "b", number: 1 });
     await transport.listCheckRuns({ owner: "a", repo: "b", ref: "c", page: 1 });
+    await transport.listWorkflowRuns({ owner: "a", repo: "b", page: 1 });
 
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(5);
     expect(calls.every((call) => call.method === "GET")).toBe(true);
+  });
+});
+
+function run(over: Record<string, unknown> = {}) {
+  return {
+    id: 11,
+    name: "CI",
+    display_title: "CI",
+    status: "in_progress",
+    conclusion: null,
+    head_branch: "main",
+    actor: { login: "alice" },
+    created_at: "2026-01-01T00:00:00Z",
+    run_started_at: "2026-01-01T00:00:05Z",
+    updated_at: "2026-01-01T00:00:10Z",
+    html_url: "https://github.com/acme/widgets/actions/runs/11",
+    ...over
+  };
+}
+
+function runsJson(runs: unknown[], headers: Record<string, string> = {}): Response {
+  return json({ total_count: runs.length, workflow_runs: runs }, { headers });
+}
+
+describe("createGitHubTransport — workflow runs", () => {
+  it("lists repository runs and maps one onto a run event", async () => {
+    const { transport, calls } = transportWith(() =>
+      runsJson([run()], { etag: 'W/"r"', link: '<https://api.github.com/x?page=2>; rel="next"' })
+    );
+
+    const result = await transport.listWorkflowRuns({ owner: "acme", repo: "widgets", page: 1 });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.init?.method).toBe("GET");
+    expect(calls[0]?.url).toBe(
+      "https://api.github.com/repos/acme/widgets/actions/runs?per_page=100&page=1"
+    );
+    expect(result.notModified).toBe(false);
+    expect(result.etag).toBe('W/"r"');
+    expect(result.hasNextPage).toBe(true);
+    expect(result.events[0]).toEqual({
+      id: "run:11:in_progress::2026-01-01T00:00:10Z",
+      kind: "run",
+      author: "alice",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:10Z",
+      url: "https://github.com/acme/widgets/actions/runs/11",
+      body: "",
+      title: "CI (main): in_progress"
+    });
+  });
+
+  it("uses the workflow endpoint for a file name or id and sends the branch filter", async () => {
+    const { transport, calls } = transportWith(() => runsJson([]));
+
+    await transport.listWorkflowRuns({
+      owner: "acme",
+      repo: "widgets",
+      workflow: "ci.yml",
+      branch: "release/1.0",
+      page: 2
+    });
+    await transport.listWorkflowRuns({ owner: "acme", repo: "widgets", workflow: "42", page: 1 });
+
+    expect(calls[0]?.url).toBe(
+      "https://api.github.com/repos/acme/widgets/actions/workflows/ci.yml/runs" +
+        "?per_page=100&page=2&branch=release%2F1.0"
+    );
+    expect(calls[1]?.url).toBe(
+      "https://api.github.com/repos/acme/widgets/actions/workflows/42/runs?per_page=100&page=1"
+    );
+  });
+
+  it("sends a conditional request and treats 304 as 'nothing changed'", async () => {
+    const { transport, calls } = transportWith(() => new Response(null, { status: 304 }));
+
+    const result = await transport.listWorkflowRuns({
+      owner: "acme",
+      repo: "widgets",
+      page: 1,
+      etag: 'W/"r"'
+    });
+
+    expect(result.notModified).toBe(true);
+    expect(result.events).toHaveLength(0);
+    const headers = calls[0]?.init?.headers as Record<string, string> | undefined;
+    expect(headers?.["if-none-match"]).toBe('W/"r"');
+  });
+
+  it("reports 401 as auth, a plain 403 as forbidden and 429 as rate-limit", async () => {
+    const auth = transportWith(() => new Response("{}", { status: 401 }));
+    await expect(
+      auth.transport.listWorkflowRuns({ owner: "a", repo: "b", page: 1 })
+    ).rejects.toMatchObject({ kind: "auth", status: 401 });
+
+    const forbidden = transportWith(() => new Response("{}", { status: 403 }));
+    await expect(
+      forbidden.transport.listWorkflowRuns({ owner: "a", repo: "b", page: 1 })
+    ).rejects.toMatchObject({ kind: "forbidden", status: 403 });
+
+    const limited = transportWith(
+      () => new Response("{}", { status: 429, headers: { "retry-after": "30" } })
+    );
+    await expect(
+      limited.transport.listWorkflowRuns({ owner: "a", repo: "b", page: 1 })
+    ).rejects.toMatchObject({ kind: "rate-limit", retryAfterMs: 30_000 });
+  });
+
+  it("rejects a malformed payload instead of treating it as empty", async () => {
+    const cases: Array<() => Response> = [
+      () => new Response("<html>", { status: 200 }),
+      () => json({ message: "not a run list" }),
+      () => json({ total_count: 1, workflow_runs: [{ status: "completed" }] }),
+      () =>
+        json({
+          total_count: 1,
+          workflow_runs: [
+            run({ created_at: undefined, run_started_at: undefined, updated_at: undefined })
+          ]
+        })
+    ];
+    for (const make of cases) {
+      const { transport } = transportWith(make);
+      await expect(
+        transport.listWorkflowRuns({ owner: "a", repo: "b", page: 1 })
+      ).rejects.toMatchObject({ kind: "malformed" });
+    }
+  });
+
+  it("maps a completed run attempt with its conclusion", async () => {
+    const { transport } = transportWith(() =>
+      runsJson([
+        run({
+          status: "completed",
+          conclusion: "success",
+          run_attempt: 2,
+          updated_at: "2026-01-01T00:30:00Z"
+        })
+      ])
+    );
+
+    const result = await transport.listWorkflowRuns({ owner: "acme", repo: "widgets", page: 1 });
+
+    expect(result.events[0]?.id).toBe("run:11:completed:success:2026-01-01T00:30:00Z");
+    expect(result.events[0]?.title).toBe("CI (main): completed / success");
   });
 });

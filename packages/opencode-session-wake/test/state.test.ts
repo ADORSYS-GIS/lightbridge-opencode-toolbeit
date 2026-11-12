@@ -367,3 +367,151 @@ describe("initial state", () => {
     expect(state.seen).toEqual([]);
   });
 });
+
+describe("github.actions state", () => {
+  it("keys an actions target by repository plus its filters, with an empty number segment", () => {
+    const base = {
+      apiBase: "https://api.github.com",
+      kind: "github.actions" as const,
+      owner: "Acme",
+      repo: "Widgets"
+    };
+    expect(watchKey(base)).toBe("https://api.github.com|github.actions|acme|widgets|");
+    expect(watchKey({ ...base, workflow: "ci.yml" })).toBe(
+      "https://api.github.com|github.actions|acme|widgets||workflow:ci.yml"
+    );
+    expect(watchKey({ ...base, workflow: "ci.yml", branch: "main" })).toBe(
+      "https://api.github.com|github.actions|acme|widgets||workflow:ci.yml|branch:main"
+    );
+    expect(watchKey({ ...base, workflow: "ci.yml" })).not.toBe(
+      watchKey({ ...base, workflow: "release.yml" })
+    );
+    // A crafted workflow name cannot forge the branch segment: the filters are
+    // percent-encoded, so these two targets keep distinct fetch identities.
+    expect(watchKey({ ...base, workflow: "a|branch:b" })).not.toBe(
+      watchKey({ ...base, workflow: "a", branch: "b" })
+    );
+  });
+
+  it("round-trips a number-less actions subscription", async () => {
+    const temp = await tempDir();
+    try {
+      const { store } = await makeStores(temp.dir);
+      const rec = record({
+        kind: "github.actions",
+        number: undefined,
+        workflow: "ci.yml",
+        branch: "main"
+      });
+      await store.put(rec);
+
+      const reopened = new SubscriptionStore({
+        dir: join(temp.dir, "subscriptions"),
+        logger: fakeLogger()
+      });
+      await reopened.load();
+
+      const loaded = reopened.get(rec.subscription.id);
+      expect(loaded?.subscription).toEqual(rec.subscription);
+      expect(loaded?.subscription.number).toBeUndefined();
+      expect(loaded?.subscription.workflow).toBe("ci.yml");
+      expect(loaded?.subscription.branch).toBe("main");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("round-trips an actions watch with its run floor", async () => {
+    const temp = await tempDir();
+    try {
+      const { watches } = await makeStores(temp.dir);
+      const rec = record({
+        kind: "github.actions",
+        number: undefined,
+        workflow: "ci.yml"
+      });
+      const target = targetOf(rec.subscription, "https://api.github.com");
+      const key = watchKey(target);
+      await watches.put({
+        key,
+        target,
+        state: {
+          ...initialWatchState(1_000, [rec.subscription.id]),
+          cursor: {
+            lastSeenAt: "2026-01-01T00:30:00Z",
+            lastEventID: "run:9:completed:failure:2026-01-01T00:30:00Z",
+            runFloor: "2026-01-01T00:10:00Z"
+          }
+        }
+      });
+
+      const reopened = new WatchStore({ dir: join(temp.dir, "watches"), logger: fakeLogger() });
+      await reopened.load();
+
+      const loaded = reopened.get(key);
+      expect(loaded?.target).toEqual(target);
+      expect(loaded?.target.number).toBeUndefined();
+      expect(loaded?.target.workflow).toBe("ci.yml");
+      expect(loaded?.state.cursor.runFloor).toBe("2026-01-01T00:10:00Z");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("rejects a stored subscription whose shape does not match its source", async () => {
+    const temp = await tempDir();
+    try {
+      const logger = fakeLogger();
+      const dir = join(temp.dir, "subscriptions");
+      await mkdir(dir, { recursive: true });
+      // A thread watch without a number and an actions watch with one are both
+      // unreachable through the tools; a hand-edited or truncated file must be
+      // skipped rather than polled forever as `malformed`.
+      for (const rec of [
+        record({ kind: "github.thread", number: undefined }),
+        record({ kind: "github.actions", number: 7 })
+      ]) {
+        await writeFile(join(dir, `${rec.subscription.id}.json`), JSON.stringify(rec), "utf8");
+      }
+
+      const store = new SubscriptionStore({ dir, logger });
+      await store.load();
+
+      expect(store.list()).toEqual([]);
+      expect(
+        logger.events.filter((entry) => entry.event === "wake_subscription_unreadable")
+      ).toHaveLength(2);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("skips a stored watch whose target shape does not match its source", async () => {
+    const temp = await tempDir();
+    try {
+      const logger = fakeLogger();
+      const dir = join(temp.dir, "watches");
+      await mkdir(dir, { recursive: true });
+      const target = {
+        apiBase: "https://api.github.com",
+        kind: "github.thread" as const,
+        owner: "acme",
+        repo: "widgets"
+      };
+      const key = watchKey(target);
+      await writeFile(
+        join(dir, watchFileFor(key)),
+        JSON.stringify({ key, target, state: initialWatchState(1_000) }),
+        "utf8"
+      );
+
+      const watches = new WatchStore({ dir, logger });
+      await watches.load();
+
+      expect(watches.list()).toEqual([]);
+      expect(logger.events.some((entry) => entry.event === "wake_watch_unreadable")).toBe(true);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+});

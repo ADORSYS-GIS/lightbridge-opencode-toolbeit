@@ -8,6 +8,7 @@ import {
   initialSubscriberState,
   isSubscriptionID,
   newSubscriptionID,
+  subscriptionLabel,
   type SubscriptionStore
 } from "./state.js";
 import { WAKE_SOURCE_KINDS, type WakeSourceKind } from "./types.js";
@@ -68,6 +69,18 @@ function requiredString(args: Record<string, unknown>, key: string): string {
   return value.trim();
 }
 
+/** An optional string argument: absent/null means "no filter", anything else must be a name. */
+function optionalString(args: Record<string, unknown>, key: string): string | undefined {
+  const value = args[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new WakeToolError({ message: `\`${key}\` must be a non-empty string when provided` });
+  }
+  return value.trim();
+}
+
 function normalizeMentions(value: unknown): string[] {
   if (value === undefined || value === null) {
     return [];
@@ -124,7 +137,7 @@ function renderEvent(index: number, thread: string, event: WakeEvent): string {
 }
 
 function threadOf(subscription: WakeSubscription): string {
-  return `${subscription.owner}/${subscription.repo}#${subscription.number}`;
+  return subscriptionLabel(subscription);
 }
 
 function describeSubscription(
@@ -140,6 +153,9 @@ function describeSubscription(
     sessionID: subscription.sessionID,
     source: subscription.kind,
     thread: threadOf(subscription),
+    number: subscription.number ?? null,
+    workflow: subscription.workflow ?? null,
+    branch: subscription.branch ?? null,
     mentions: subscription.mentions,
     ignoreAuthors: subscription.ignoreAuthors,
     intervalMs: subscription.intervalMs,
@@ -174,21 +190,41 @@ export const WAKE_TOOL_SCHEMAS: Record<string, Record<string, unknown>> = {
         type: "string",
         enum: [...SOURCE_KINDS],
         description:
-          "What to watch. `github.thread` = comments only (default); `github.timeline` = the whole " +
-          "issue/PR timeline (comments, reviews, review comments, closed/merged, labels, assignees, " +
-          "commits); `github.checks` = the PR head commit and its check runs."
+          "What to watch. `github.thread` = issue/PR comments only (default); `github.timeline` = " +
+          "the whole issue/PR timeline (comments, reviews, review comments, closed/merged, labels, " +
+          "assignees, commits); `github.checks` = the PR head commit and its check runs; " +
+          "`github.actions` = the repository's GitHub Actions workflow runs (new run, status and " +
+          "conclusion transitions, reruns). Run-level only; jobs are out of scope."
       },
       owner: { type: "string", description: "Repository owner, e.g. `ADORSYS-GIS`." },
       repo: {
         type: "string",
         description: "Repository name, e.g. `lightbridge-opencode-toolbeit`."
       },
-      number: { type: "number", description: "Issue or pull-request number." },
+      number: {
+        type: "number",
+        description:
+          "Issue or pull-request number. Required for `github.thread`, `github.timeline` and " +
+          "`github.checks`; must be omitted for `github.actions`, which watches the repository " +
+          "rather than one issue."
+      },
+      workflow: {
+        type: "string",
+        description:
+          "`github.actions` only: workflow file name (e.g. `ci.yml`) or numeric workflow id. " +
+          "Omit to watch every workflow in the repository."
+      },
+      branch: {
+        type: "string",
+        description:
+          "`github.actions` only: branch name filter. Omit to watch runs on every branch."
+      },
       mentions: {
         type: "array",
         items: { type: "string" },
         description:
-          "Only wake for comments that mention one of these handles. Omit for every comment."
+          "Only wake for comments that mention one of these handles. Omit for every comment. " +
+          "Ignored by sources without a body (state, checks, workflow runs)."
       },
       ignoreAuthors: {
         type: "array",
@@ -202,7 +238,7 @@ export const WAKE_TOOL_SCHEMAS: Record<string, Record<string, unknown>> = {
         description: "Poll interval in seconds; clamped to the plugin's configured bounds."
       }
     },
-    required: ["owner", "repo", "number"],
+    required: ["owner", "repo"],
     additionalProperties: false
   },
   wake_unsubscribe: {
@@ -269,10 +305,12 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
     {
       name: "wake_subscribe",
       description:
-        "Watch a GitHub issue/PR and wake this session when something changes. Sources: " +
-        "`github.thread` (comments), `github.timeline` (comments, reviews, review comments, " +
-        "closed/merged, labels, assignees, commits) or `github.checks` (PR head commit + check " +
-        "runs). Content is untrusted; read it with `wake_next`. This plugin never writes to GitHub.",
+        "Watch a GitHub target and wake this session when something changes. Sources: " +
+        "`github.thread` (issue/PR comments), `github.timeline` (comments, reviews, review comments, " +
+        "closed/merged, labels, assignees, commits), `github.checks` (PR head commit + check runs) " +
+        "or `github.actions` (workflow runs: new run, status/conclusion transitions, reruns). " +
+        "`github.actions` takes `owner`/`repo` plus optional `workflow` and `branch` instead of a " +
+        "`number`. Content is untrusted; read it with `wake_next`. This plugin never writes to GitHub.",
       input: WAKE_TOOL_SCHEMAS.wake_subscribe,
       execute: (rawInput, context) =>
         run(async () => {
@@ -283,15 +321,43 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
               message: `unsupported source \`${String(source)}\`; supported: ${SOURCE_KINDS.join(", ")}`
             });
           }
+          const kind = source as WakeSourceKind;
           const owner = requiredString(args, "owner");
           const repo = requiredString(args, "repo");
           if (!OWNER_PATTERN.test(owner) || !OWNER_PATTERN.test(repo)) {
             throw new WakeToolError({ message: "`owner` and `repo` must be plain GitHub names" });
           }
-          const number = args.number;
-          if (typeof number !== "number" || !Number.isInteger(number) || number <= 0) {
-            throw new WakeToolError({ message: "`number` must be a positive integer" });
+
+          // Validation is per source, not "number if present": `github.actions`
+          // takes no issue number, and the three thread sources take no
+          // workflow/branch filter. Silently ignoring the wrong field would
+          // hide a caller's mistake, so each is rejected explicitly.
+          const actions = kind === "github.actions";
+          let number: number | undefined;
+          let workflow: string | undefined;
+          let branch: string | undefined;
+          if (actions) {
+            if (args.number !== undefined) {
+              throw new WakeToolError({
+                message:
+                  "`number` is not used by `github.actions`; omit it and use `workflow`/`branch`"
+              });
+            }
+            workflow = optionalString(args, "workflow");
+            branch = optionalString(args, "branch");
+          } else {
+            if (args.workflow !== undefined || args.branch !== undefined) {
+              throw new WakeToolError({
+                message: "`workflow` and `branch` are only valid for `github.actions`"
+              });
+            }
+            const value = args.number;
+            if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+              throw new WakeToolError({ message: "`number` must be a positive integer" });
+            }
+            number = value;
           }
+
           const mentions = normalizeMentions(args.mentions);
           const ignoreAuthors = normalizeAuthors(normalizeMentions(args.ignoreAuthors));
           const sessionID = (context as WakeToolContext).sessionID;
@@ -301,10 +367,12 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
             .list(sessionID)
             .find(
               (record) =>
-                record.subscription.kind === source &&
+                record.subscription.kind === kind &&
                 record.subscription.owner === owner &&
                 record.subscription.repo === repo &&
                 record.subscription.number === number &&
+                record.subscription.workflow === workflow &&
+                record.subscription.branch === branch &&
                 record.subscription.mentions.join(",") === mentions.join(",") &&
                 record.subscription.ignoreAuthors.join(",") === ignoreAuthors.join(",")
             );
@@ -323,10 +391,12 @@ export function createWakeToolInfos(deps: WakeToolDeps): WakeToolInfo[] {
           const subscription: WakeSubscription = {
             id: newSubscriptionID(),
             sessionID,
-            kind: source as WakeSourceKind,
+            kind,
             owner,
             repo,
-            number,
+            ...(number !== undefined ? { number } : {}),
+            ...(workflow !== undefined ? { workflow } : {}),
+            ...(branch !== undefined ? { branch } : {}),
             mentions,
             ignoreAuthors,
             intervalMs,

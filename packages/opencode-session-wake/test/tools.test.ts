@@ -317,7 +317,7 @@ describe("registerWakeTools", () => {
       ]);
       expect(added[0]?.input).toMatchObject({
         type: "object",
-        required: ["owner", "repo", "number"]
+        required: ["owner", "repo"]
       });
     } finally {
       await temp.cleanup();
@@ -573,6 +573,169 @@ describe("loop prevention through the tools", () => {
         remaining[0]?.subscription.id
       ]);
       expect(store.get(mineId)).toBeUndefined();
+    } finally {
+      await temp.cleanup();
+    }
+  });
+});
+
+describe("wake_subscribe — github.actions", () => {
+  it("subscribes without a number and keeps the workflow/branch filters", async () => {
+    const { temp, store, watches, tool } = await harness();
+    try {
+      const result = await exec(
+        tool("wake_subscribe"),
+        {
+          source: "github.actions",
+          owner: "acme",
+          repo: "widgets",
+          workflow: "ci.yml",
+          branch: "main"
+        },
+        "ses_owner"
+      );
+
+      const rec = store.list("ses_owner")[0];
+      expect(rec?.subscription.kind).toBe("github.actions");
+      expect(rec?.subscription.number).toBeUndefined();
+      expect(rec?.subscription.workflow).toBe("ci.yml");
+      expect(rec?.subscription.branch).toBe("main");
+      expect(result.content).toContain("acme/widgets actions (workflow=ci.yml, branch=main)");
+      expect(result.metadata?.subscription).toMatchObject({
+        source: "github.actions",
+        number: null,
+        workflow: "ci.yml",
+        branch: "main"
+      });
+      expect(watches.get(keyOf(rec as never))).toBeDefined();
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("watches every workflow when no filter is given", async () => {
+    const { temp, store, tool } = await harness();
+    try {
+      const result = await exec(
+        tool("wake_subscribe"),
+        { source: "github.actions", owner: "acme", repo: "widgets" },
+        "ses_owner"
+      );
+      expect(store.list("ses_owner")[0]?.subscription.number).toBeUndefined();
+      expect(result.content).toContain("acme/widgets actions");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("is idempotent per target and treats a different branch as another watch", async () => {
+    const { temp, store, tool } = await harness();
+    try {
+      const args = {
+        source: "github.actions",
+        owner: "acme",
+        repo: "widgets",
+        workflow: "ci.yml",
+        branch: "main"
+      };
+      await exec(tool("wake_subscribe"), args, "ses_owner");
+      const second = await exec(tool("wake_subscribe"), args, "ses_owner");
+      expect(second.metadata?.created).toBe(false);
+      expect(store.list("ses_owner")).toHaveLength(1);
+
+      await exec(tool("wake_subscribe"), { ...args, branch: "dev" }, "ses_owner");
+      expect(store.list("ses_owner")).toHaveLength(2);
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("rejects a number for actions and workflow/branch for thread sources", async () => {
+    const { temp, tool } = await harness();
+    try {
+      await expect(
+        exec(tool("wake_subscribe"), {
+          source: "github.actions",
+          owner: "acme",
+          repo: "widgets",
+          number: 7
+        })
+      ).rejects.toThrow("`number` is not used by `github.actions`");
+
+      await expect(
+        exec(tool("wake_subscribe"), {
+          source: "github.thread",
+          owner: "acme",
+          repo: "widgets",
+          number: 7,
+          workflow: "ci.yml"
+        })
+      ).rejects.toThrow("only valid for `github.actions`");
+
+      await expect(
+        exec(tool("wake_subscribe"), {
+          source: "github.timeline",
+          owner: "acme",
+          repo: "widgets",
+          number: 7,
+          branch: "main"
+        })
+      ).rejects.toThrow("only valid for `github.actions`");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+
+  it("still requires a number for the thread sources", async () => {
+    const { temp, tool } = await harness();
+    try {
+      await expect(
+        exec(tool("wake_subscribe"), { source: "github.thread", owner: "acme", repo: "widgets" })
+      ).rejects.toThrow("`number` must be a positive integer");
+      await expect(
+        exec(tool("wake_subscribe"), {
+          source: "github.actions",
+          owner: "acme",
+          repo: "widgets",
+          workflow: ""
+        })
+      ).rejects.toThrow("`workflow` must be a non-empty string");
+    } finally {
+      await temp.cleanup();
+    }
+  });
+});
+
+describe("wake_next — workflow run events", () => {
+  it("renders a run event as untrusted data with its summary and url", async () => {
+    const { temp, store, tool } = await harness();
+    try {
+      const rec = record({
+        kind: "github.actions",
+        number: undefined,
+        workflow: "ci.yml"
+      });
+      rec.state.pending.push({
+        id: "run:9:completed:failure:2026-01-01T00:30:00Z",
+        kind: "run",
+        author: "alice",
+        createdAt: "2026-01-01T00:20:00Z",
+        updatedAt: "2026-01-01T00:30:00Z",
+        url: "https://github.com/acme/widgets/actions/runs/9",
+        body: "",
+        title: "CI: completed / failure"
+      });
+      await store.put(rec);
+
+      const result = await exec(tool("wake_next"), {}, "ses_owner");
+
+      expect(result.content).toContain("UNTRUSTED external content");
+      expect(result.content).toContain("acme/widgets actions (workflow=ci.yml)");
+      expect(result.content).toContain("run: CI: completed / failure");
+      expect(result.content).toContain("https://github.com/acme/widgets/actions/runs/9");
+      expect(result.metadata?.events).toMatchObject([
+        { id: "run:9:completed:failure:2026-01-01T00:30:00Z", untrusted: true }
+      ]);
     } finally {
       await temp.cleanup();
     }

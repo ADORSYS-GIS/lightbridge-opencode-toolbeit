@@ -35,15 +35,29 @@ export function isSubscriptionID(value: unknown): value is string {
  * one fetcher, one cursor and one ETag map. Owner/repo are lower-cased because
  * GitHub treats them case-insensitively — `Acme/Widgets` and `acme/widgets` must
  * not become two pollers.
+ *
+ * The first five segments are the original format, kept byte-identical so
+ * existing watch files are still found. `github.actions` has no number (the
+ * segment stays empty) and appends its workflow/branch filters, because two
+ * watches on different workflows are different targets. The filter values are
+ * percent-encoded so a name containing `|` (or the `branch:` prefix) cannot
+ * forge a segment and collide with another target's key.
  */
 export function watchKey(target: WatchTarget): string {
-  return [
+  const parts = [
     target.apiBase,
     target.kind,
     target.owner.toLowerCase(),
     target.repo.toLowerCase(),
-    String(target.number)
-  ].join("|");
+    target.number === undefined ? "" : String(target.number)
+  ];
+  if (target.workflow !== undefined) {
+    parts.push(`workflow:${encodeURIComponent(target.workflow)}`);
+  }
+  if (target.branch !== undefined) {
+    parts.push(`branch:${encodeURIComponent(target.branch)}`);
+  }
+  return parts.join("|");
 }
 
 /** Path-safe, stable file name for a watch key. */
@@ -98,7 +112,8 @@ const EVENT_KINDS: readonly WakeEventKind[] = [
   "label",
   "assignee",
   "commit",
-  "check"
+  "check",
+  "run"
 ];
 
 function isEvent(value: unknown): value is WakeEvent {
@@ -116,6 +131,31 @@ function isEvent(value: unknown): value is WakeEvent {
   );
 }
 
+/**
+ * The target shape a source actually needs. The three thread sources require an
+ * issue/PR number and take no filters; `github.actions` takes the opposite. A
+ * mismatch is corrupt state, not a watch to poll: accepting it would leave a
+ * watch that fails every tick (`malformed`) with no way to recover.
+ */
+function hasSourceShape(
+  kind: WakeSourceKind,
+  target: { number?: unknown; workflow?: unknown; branch?: unknown }
+): boolean {
+  const stringOrAbsent = (value: unknown): boolean =>
+    value === undefined || typeof value === "string";
+  if (!stringOrAbsent(target.workflow) || !stringOrAbsent(target.branch)) {
+    return false;
+  }
+  if (kind === "github.actions") {
+    return target.number === undefined;
+  }
+  return (
+    typeof target.number === "number" &&
+    target.workflow === undefined &&
+    target.branch === undefined
+  );
+}
+
 function isSubscription(value: unknown): value is WakeSubscription {
   const record = asRecord(value);
   return (
@@ -126,7 +166,7 @@ function isSubscription(value: unknown): value is WakeSubscription {
     WAKE_SOURCE_KINDS.includes(record.kind as WakeSourceKind) &&
     typeof record.owner === "string" &&
     typeof record.repo === "string" &&
-    typeof record.number === "number" &&
+    hasSourceShape(record.kind as WakeSourceKind, record) &&
     Array.isArray(record.mentions) &&
     record.mentions.every((mention) => typeof mention === "string") &&
     (record.ignoreAuthors === undefined ||
@@ -177,7 +217,8 @@ function parseCursor(value: unknown, fallback: string): WakeCursor {
   return {
     lastSeenAt: typeof record?.lastSeenAt === "string" ? record.lastSeenAt : fallback,
     ...(typeof record?.lastEventID === "string" ? { lastEventID: record.lastEventID } : {}),
-    ...(typeof record?.headSHA === "string" ? { headSHA: record.headSHA } : {})
+    ...(typeof record?.headSHA === "string" ? { headSHA: record.headSHA } : {}),
+    ...(typeof record?.runFloor === "string" ? { runFloor: record.runFloor } : {})
   };
 }
 
@@ -301,7 +342,9 @@ export class SubscriptionStore {
               kind: subscription.kind,
               owner: subscription.owner,
               repo: subscription.repo,
-              number: subscription.number
+              ...(subscription.number !== undefined ? { number: subscription.number } : {}),
+              ...(subscription.workflow !== undefined ? { workflow: subscription.workflow } : {}),
+              ...(subscription.branch !== undefined ? { branch: subscription.branch } : {})
             },
             cursor: parseCursor(legacy.cursor, new Date(this.now()).toISOString()),
             ...(parseEtags(legacy.etags) ? { etags: parseEtags(legacy.etags) } : {}),
@@ -374,8 +417,38 @@ export function targetOf(subscription: WakeSubscription, apiBase: string): Watch
     kind: subscription.kind,
     owner: subscription.owner,
     repo: subscription.repo,
-    number: subscription.number
+    ...(subscription.number !== undefined ? { number: subscription.number } : {}),
+    ...(subscription.workflow !== undefined ? { workflow: subscription.workflow } : {}),
+    ...(subscription.branch !== undefined ? { branch: subscription.branch } : {})
   };
+}
+
+/**
+ * Human-readable target for a notice or a log line. Thread sources keep the
+ * `owner/repo#number` shape they have always had; `github.actions` names the
+ * repository plus its filters, because a bare `#` would be meaningless there.
+ */
+export function targetLabel(target: {
+  readonly owner: string;
+  readonly repo: string;
+  readonly number?: number;
+  readonly workflow?: string;
+  readonly branch?: string;
+}): string {
+  const repo = `${target.owner}/${target.repo}`;
+  if (target.number !== undefined) {
+    return `${repo}#${target.number}`;
+  }
+  const filters = [
+    ...(target.workflow !== undefined ? [`workflow=${target.workflow}`] : []),
+    ...(target.branch !== undefined ? [`branch=${target.branch}`] : [])
+  ];
+  return filters.length > 0 ? `${repo} actions (${filters.join(", ")})` : `${repo} actions`;
+}
+
+/** The label of the watch a subscription belongs to. */
+export function subscriptionLabel(subscription: WakeSubscription): string {
+  return targetLabel(subscription);
 }
 
 /**
@@ -430,7 +503,7 @@ export class WatchStore {
           !WAKE_SOURCE_KINDS.includes(target.kind as WakeSourceKind) ||
           typeof target.owner !== "string" ||
           typeof target.repo !== "string" ||
-          typeof target.number !== "number"
+          !hasSourceShape(target.kind as WakeSourceKind, target)
         ) {
           this.options.logger.warn("wake_watch_unreadable", { file: entry });
           continue;
@@ -443,7 +516,9 @@ export class WatchStore {
             kind: target.kind as WakeSourceKind,
             owner: target.owner,
             repo: target.repo,
-            number: target.number
+            ...(typeof target.number === "number" ? { number: target.number } : {}),
+            ...(typeof target.workflow === "string" ? { workflow: target.workflow } : {}),
+            ...(typeof target.branch === "string" ? { branch: target.branch } : {})
           },
           state: parseWatchState(record.state, this.now())
         });

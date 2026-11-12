@@ -5,7 +5,7 @@ import { TransportFailure } from "../src/github.js";
 import { pollSource } from "../src/sources.js";
 import type { SourceState } from "../src/types.js";
 import type { WakeEvent, WakeSourceKind } from "../src/types.js";
-import { checksPage, fakeLogger, fakeTransport, timelinePage } from "./helpers.js";
+import { checksPage, fakeLogger, fakeTransport, runsPage, timelinePage } from "./helpers.js";
 
 const SINCE = "2026-01-01T00:00:00Z";
 
@@ -305,6 +305,304 @@ describe("pollSource — github.checks", () => {
   it("fails closed when the pull request has no head sha", async () => {
     const { transport, context: ctx } = context("github.checks", state());
     transport.setPull({ notModified: false, headSHA: "" });
+
+    await expect(pollSource(ctx)).rejects.toMatchObject({ kind: "malformed" });
+  });
+});
+
+function runEvent(
+  runID: string,
+  status: string,
+  conclusion: string | null,
+  createdAt: string,
+  updatedAt: string
+): WakeEvent {
+  return {
+    id: `run:${runID}:${status}:${conclusion ?? ""}:${updatedAt}`,
+    kind: "run",
+    author: "alice",
+    createdAt,
+    updatedAt,
+    url: `https://github.com/acme/widgets/actions/runs/${runID}`,
+    body: "",
+    title: `CI: ${status}${conclusion ? ` / ${conclusion}` : ""}`
+  };
+}
+
+const ACTIONS_NOW = "2026-01-01T01:00:00.000Z";
+
+function actionsContext(
+  state: SourceState,
+  over: { workflow?: string; branch?: string; maxPages?: number } = {}
+) {
+  const transport = fakeTransport();
+  return {
+    transport,
+    context: {
+      target: {
+        apiBase: "https://api.github.com",
+        kind: "github.actions" as const,
+        owner: "acme",
+        repo: "widgets",
+        ...(over.workflow !== undefined ? { workflow: over.workflow } : {}),
+        ...(over.branch !== undefined ? { branch: over.branch } : {})
+      },
+      state,
+      transport,
+      options: parseWakeOptions({ maxPages: over.maxPages ?? 3 }),
+      logger: fakeLogger(),
+      now: () => Date.parse(ACTIONS_NOW)
+    }
+  };
+}
+
+function actionsState(over: Partial<SourceState["cursor"]> = {}, etags?: Record<string, string>) {
+  return {
+    cursor: { lastSeenAt: SINCE, ...over },
+    ...(etags !== undefined ? { etags } : {})
+  } satisfies SourceState;
+}
+
+describe("pollSource — github.actions", () => {
+  it("records the first poll as a baseline and anchors the window floor", async () => {
+    const { transport, context: ctx } = actionsContext(actionsState());
+    transport.setRuns([
+      runsPage(
+        [
+          runEvent("2", "in_progress", null, "2026-01-01T00:20:00Z", "2026-01-01T00:20:10Z"),
+          runEvent("1", "completed", "success", "2026-01-01T00:10:00Z", "2026-01-01T00:15:00Z")
+        ],
+        { etag: 'W/"r"' }
+      )
+    ]);
+
+    const result = await pollSource(ctx);
+
+    expect(result.baseline).toBe(true);
+    expect(result.events).toHaveLength(2);
+    expect(result.cursor.runFloor).toBe("2026-01-01T00:10:00Z");
+    expect(result.cursor.lastSeenAt).toBe("2026-01-01T00:20:10Z");
+    expect(result.etags).toEqual({
+      "/repos/acme/widgets/actions/runs?per_page=100&page=1": 'W/"r"'
+    });
+  });
+
+  it("still anchors a floor when the repository has no runs yet", async () => {
+    const { transport, context: ctx } = actionsContext(actionsState());
+    transport.setRuns([runsPage([])]);
+
+    const result = await pollSource(ctx);
+
+    expect(result.baseline).toBe(true);
+    expect(result.events).toHaveLength(0);
+    expect(result.cursor.runFloor).toBe(ACTIONS_NOW);
+  });
+
+  it("reports a new run after the baseline and drops events older than the cursor", async () => {
+    const { transport, context: ctx } = actionsContext(
+      actionsState({ lastSeenAt: "2026-01-01T00:20:10Z", runFloor: "2026-01-01T00:10:00Z" })
+    );
+    transport.setRuns([
+      runsPage([
+        runEvent("3", "queued", null, "2026-01-01T00:25:00Z", "2026-01-01T00:25:00Z"),
+        runEvent("2", "in_progress", null, "2026-01-01T00:20:00Z", "2026-01-01T00:20:10Z"),
+        runEvent("1", "completed", "success", "2026-01-01T00:10:00Z", "2026-01-01T00:15:00Z")
+      ])
+    ]);
+
+    const result = await pollSource(ctx);
+
+    expect(result.baseline).toBeFalsy();
+    // The unchanged boundary run may be re-observed (same timestamp); the shared
+    // `seen` ring dedupes it. Anything strictly older is never returned.
+    expect(result.events.map((event) => event.id)).toEqual([
+      "run:3:queued::2026-01-01T00:25:00Z",
+      "run:2:in_progress::2026-01-01T00:20:10Z"
+    ]);
+    expect(result.cursor.lastSeenAt).toBe("2026-01-01T00:25:00Z");
+    expect(result.cursor.runFloor).toBe("2026-01-01T00:10:00Z");
+  });
+
+  it("turns queued → in_progress → success into three distinct events", async () => {
+    const baselineState = actionsState();
+    const first = actionsContext(baselineState);
+    first.transport.setRuns([
+      runsPage([runEvent("9", "queued", null, "2026-01-01T00:20:00Z", "2026-01-01T00:20:00Z")])
+    ]);
+    const baseline = await pollSource(first.context);
+    expect(baseline.baseline).toBe(true);
+
+    const second = actionsContext({
+      cursor: baseline.cursor,
+      etags: baseline.etags
+    });
+    second.transport.setRuns([
+      runsPage([runEvent("9", "in_progress", null, "2026-01-01T00:20:00Z", "2026-01-01T00:21:00Z")])
+    ]);
+    const running = await pollSource(second.context);
+
+    const third = actionsContext({ cursor: running.cursor, etags: running.etags });
+    third.transport.setRuns([
+      runsPage([
+        runEvent("9", "completed", "success", "2026-01-01T00:20:00Z", "2026-01-01T00:22:00Z")
+      ])
+    ]);
+    const done = await pollSource(third.context);
+
+    const ids = [...running.events, ...done.events].map((event) => event.id);
+    expect(ids).toEqual([
+      "run:9:in_progress::2026-01-01T00:21:00Z",
+      "run:9:completed:success:2026-01-01T00:22:00Z"
+    ]);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it("reports failure and cancelled conclusions", async () => {
+    for (const conclusion of ["failure", "cancelled", "skipped"]) {
+      const { transport, context: ctx } = actionsContext(
+        actionsState({ lastSeenAt: "2026-01-01T00:20:00Z", runFloor: "2026-01-01T00:20:00Z" })
+      );
+      transport.setRuns([
+        runsPage([
+          runEvent("5", "completed", conclusion, "2026-01-01T00:20:00Z", "2026-01-01T00:30:00Z")
+        ])
+      ]);
+
+      const result = await pollSource(ctx);
+
+      expect(result.events).toHaveLength(1);
+      expect(result.events[0]?.title).toContain(conclusion);
+      expect(result.events[0]?.id).toContain(`completed:${conclusion}:`);
+    }
+  });
+
+  it("reports a rerun of the same run id as a new fingerprint", async () => {
+    const { transport, context: ctx } = actionsContext(
+      actionsState({
+        lastSeenAt: "2026-01-01T00:30:00Z",
+        lastEventID: "run:7:completed:failure:2026-01-01T00:30:00Z",
+        runFloor: "2026-01-01T00:10:00Z"
+      })
+    );
+    transport.setRuns([
+      runsPage([runEvent("7", "in_progress", null, "2026-01-01T00:10:00Z", "2026-01-01T00:40:00Z")])
+    ]);
+
+    const result = await pollSource(ctx);
+
+    expect(result.events.map((event) => event.id)).toEqual([
+      "run:7:in_progress::2026-01-01T00:40:00Z"
+    ]);
+  });
+
+  it("pages until the page's oldest run reaches the window floor", async () => {
+    const { transport, context: ctx } = actionsContext(
+      actionsState({ lastSeenAt: "2026-01-01T00:05:00Z", runFloor: "2026-01-01T00:00:00Z" })
+    );
+    transport.setRuns([
+      runsPage(
+        [runEvent("3", "completed", "success", "2026-01-01T00:30:00Z", "2026-01-01T00:30:00Z")],
+        { hasNextPage: true, etag: 'W/"p1"' }
+      ),
+      runsPage([
+        runEvent("2", "completed", "success", "2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z")
+      ])
+    ]);
+
+    const result = await pollSource(ctx);
+
+    expect(transport.requests.runs.map((request) => request.page)).toEqual([1, 2]);
+    expect(result.events.map((event) => event.id)).toEqual([
+      "run:3:completed:success:2026-01-01T00:30:00Z",
+      "run:2:completed:success:2026-01-01T00:05:00Z"
+    ]);
+    // Two pages: no page-1 validator is reusable for the next poll.
+    expect(result.etags).toEqual({});
+  });
+
+  it("fails closed as backlog when new runs push the floor past maxPages", async () => {
+    const { transport, context: ctx } = actionsContext(
+      actionsState({ runFloor: "2026-01-01T00:00:00Z" }),
+      { maxPages: 2 }
+    );
+    transport.setRuns([
+      runsPage([runEvent("4", "queued", null, "2026-01-01T00:40:00Z", "2026-01-01T00:40:00Z")], {
+        hasNextPage: true
+      }),
+      runsPage([runEvent("3", "queued", null, "2026-01-01T00:30:00Z", "2026-01-01T00:30:00Z")], {
+        hasNextPage: true
+      })
+    ]);
+
+    await expect(pollSource(ctx)).rejects.toMatchObject({ kind: "backlog" });
+    expect(ctx.state.cursor.lastSeenAt).toBe(SINCE);
+    expect(ctx.state.cursor.runFloor).toBe("2026-01-01T00:00:00Z");
+  });
+
+  it("does not fail closed on a baseline deeper than maxPages", async () => {
+    const { transport, context: ctx } = actionsContext(actionsState(), { maxPages: 2 });
+    transport.setRuns([
+      runsPage([runEvent("4", "queued", null, "2026-01-01T00:40:00Z", "2026-01-01T00:40:00Z")], {
+        hasNextPage: true
+      }),
+      runsPage([runEvent("3", "queued", null, "2026-01-01T00:30:00Z", "2026-01-01T00:30:00Z")], {
+        hasNextPage: true
+      })
+    ]);
+
+    const result = await pollSource(ctx);
+
+    expect(result.baseline).toBe(true);
+    expect(result.cursor.runFloor).toBe("2026-01-01T00:30:00Z");
+  });
+
+  it("treats a 304 as 'nothing changed' and keeps the validators", async () => {
+    const etags = { "/repos/acme/widgets/actions/runs?per_page=100&page=1": 'W/"r"' };
+    const { transport, context: ctx } = actionsContext(
+      actionsState({ lastSeenAt: "2026-01-01T00:20:00Z", runFloor: "2026-01-01T00:00:00Z" }, etags)
+    );
+    transport.setRuns([runsPage([], { notModified: true })]);
+
+    const result = await pollSource(ctx);
+
+    expect(result.notModified).toBe(true);
+    expect(result.cursor.lastSeenAt).toBe("2026-01-01T00:20:00Z");
+    expect(result.etags).toEqual(etags);
+    expect(transport.requests.runs[0]?.etag).toBe('W/"r"');
+  });
+
+  it("passes the workflow and branch filters and keys the ETag by them", async () => {
+    const { transport, context: ctx } = actionsContext(actionsState(), {
+      workflow: "ci.yml",
+      branch: "main"
+    });
+    transport.setRuns([runsPage([], { etag: 'W/"f"' })]);
+
+    const result = await pollSource(ctx);
+
+    expect(transport.requests.runs[0]).toMatchObject({
+      workflow: "ci.yml",
+      branch: "main",
+      page: 1
+    });
+    expect(result.etags).toEqual({
+      "/repos/acme/widgets/actions/workflows/ci.yml/runs?per_page=100&page=1&branch=main": 'W/"f"'
+    });
+  });
+
+  it("fails closed when the token cannot read actions", async () => {
+    const { transport, context: ctx } = actionsContext(actionsState());
+    transport.fail(
+      new TransportFailure("forbidden", "GitHub refused the request (403)", { status: 403 })
+    );
+
+    await expect(pollSource(ctx)).rejects.toMatchObject({ kind: "forbidden" });
+    expect(ctx.state.cursor.runFloor).toBeUndefined();
+  });
+
+  it("fails closed on a malformed run payload", async () => {
+    const { transport, context: ctx } = actionsContext(actionsState());
+    transport.fail(new TransportFailure("malformed", "workflow run without a usable id"));
 
     await expect(pollSource(ctx)).rejects.toMatchObject({ kind: "malformed" });
   });

@@ -15,13 +15,22 @@
  *   `github.thread`; do not watch the same thread with both.
  * - `github.checks` — the PR's **head commit and check runs** (status +
  *   conclusion + URL). Requires a pull-request number.
+ * - `github.actions` — **workflow runs** for a repository (new run, status and
+ *   conclusion transitions, reruns), optionally narrowed to one workflow file
+ *   or id and one branch. Run-level only: jobs are out of scope. Takes no
+ *   issue/PR number; the target is `owner`/`repo` plus the optional filters.
  */
-export type WakeSourceKind = "github.thread" | "github.timeline" | "github.checks";
+export type WakeSourceKind =
+  | "github.thread"
+  | "github.timeline"
+  | "github.checks"
+  | "github.actions";
 
 export const WAKE_SOURCE_KINDS: readonly WakeSourceKind[] = [
   "github.thread",
   "github.timeline",
-  "github.checks"
+  "github.checks",
+  "github.actions"
 ];
 
 /** This plugin's log tiers. */
@@ -37,7 +46,15 @@ export interface WatchTarget {
   readonly kind: WakeSourceKind;
   readonly owner: string;
   readonly repo: string;
-  readonly number: number;
+  /**
+   * Issue/PR number for the three thread sources. Absent for `github.actions`,
+   * which watches a repository's workflow runs rather than one issue.
+   */
+  readonly number?: number;
+  /** `github.actions` only: workflow id or file name (e.g. `ci.yml`). */
+  readonly workflow?: string;
+  /** `github.actions` only: branch name filter. */
+  readonly branch?: string;
 }
 
 /** A subscription is owned by exactly one session: the one whose tool call created it. */
@@ -47,7 +64,12 @@ export interface WakeSubscription {
   readonly kind: WakeSourceKind;
   readonly owner: string;
   readonly repo: string;
-  readonly number: number;
+  /** Absent for `github.actions`. */
+  readonly number?: number;
+  /** `github.actions` only: workflow id or file name. */
+  readonly workflow?: string;
+  /** `github.actions` only: branch filter. */
+  readonly branch?: string;
   /** Handles to filter on (`@name`); empty means "everything". */
   readonly mentions: readonly string[];
   /** Authors whose events are dropped at fan-out (lowercase logins, no `@`). */
@@ -69,7 +91,8 @@ export type WakeEventKind =
   | "label"
   | "assignee"
   | "commit"
-  | "check";
+  | "check"
+  | "run";
 
 /**
  * One observed event. `body` and `title` are UNTRUSTED external content: they
@@ -97,6 +120,13 @@ export interface WakeCursor {
   lastEventID?: string;
   /** `github.checks` only: the head commit the stored check state belongs to. */
   headSHA?: string;
+  /**
+   * `github.actions` only: `created_at` of the oldest run inside the tracked
+   * window. Runs are creation-ordered and GitHub offers no `updated`/`since`
+   * filter, so each poll re-reads down to this floor; a floor pushed deeper
+   * than `maxPages` by new runs fails closed as `backlog`.
+   */
+  runFloor?: string;
 }
 
 /** The part of a watch's state the source strategies read and write. */

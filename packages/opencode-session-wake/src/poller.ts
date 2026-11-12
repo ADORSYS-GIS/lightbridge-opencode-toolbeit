@@ -5,6 +5,8 @@ import type { Logger } from "./logging.js";
 import { pollSource, type SourceResult } from "./sources.js";
 import {
   initialWatchState,
+  subscriptionLabel,
+  targetLabel,
   type SubscriptionStore,
   targetOf,
   watchKey,
@@ -133,7 +135,7 @@ export function matchesMention(event: WakeEvent, mentions: readonly string[]): b
  * readable through `wake_next`, where they are labelled untrusted.
  */
 export function buildNotice(subscription: WakeSubscription, count: number): WakeNotice {
-  const thread = `${subscription.owner}/${subscription.repo}#${subscription.number}`;
+  const thread = subscriptionLabel(subscription);
   return {
     sessionID: subscription.sessionID,
     subscriptionID: subscription.id,
@@ -283,7 +285,7 @@ export function createPoller(deps: PollerDeps): Poller {
       logger.warn("wake_poll_failed", {
         key: watch.key,
         source: watch.target.kind,
-        thread: `${watch.target.owner}/${watch.target.repo}#${watch.target.number}`,
+        thread: targetLabel(watch.target),
         failure: failure.kind,
         status: failure.status,
         subscribers: subscribers.length,
