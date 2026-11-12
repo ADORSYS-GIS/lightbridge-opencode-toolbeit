@@ -33,6 +33,19 @@ export function signInPath(name: string): string {
 }
 
 /**
+ * The terminal equivalent of {@link signInPath}: `opencode auth login <id>`.
+ * `auth.id` is only trimmed by config validation, so an id with spaces or quote
+ * characters is single-quoted (POSIX shell rules) to keep the printed command
+ * copy-pasteable and unambiguous. Log string only: nothing is executed.
+ */
+export function signInCommand(integrationID: string): string {
+  const arg = /^[A-Za-z0-9_][A-Za-z0-9_.:@/-]*$/.test(integrationID)
+    ? integrationID
+    : `'${integrationID.replaceAll("'", `'\\''`)}'`;
+  return `opencode auth login ${arg}`;
+}
+
+/**
  * Display-only account label (email / username) read from the access token's
  * claims. Deliberately UNVERIFIED: nothing security-relevant ever reads it, it
  * only decorates the host's connection row. Opaque (non-JWT) tokens and any
@@ -201,12 +214,16 @@ export interface SignInNotice {
 
 /**
  * Emit `lightbridge_sign_in_required` at most once per arming, naming the exact
- * path to sign in. Every non-interactive caller that finds no usable token
+ * UI path and the terminal command to sign in. Every non-interactive caller that finds no usable token
  * (startup check, gateway header, OTEL token source, the register sync) reports
  * through this one latch; each call is also recorded at `debug` as
  * `lightbridge_sign_in_required_seen` so the sources stay observable.
  */
-export function createSignInRequiredNotifier(logger: Logger, name: string): SignInNotice {
+export function createSignInRequiredNotifier(
+  logger: Logger,
+  name: string,
+  integrationID: string
+): SignInNotice {
   let notified = false;
   return {
     notify(source) {
@@ -215,9 +232,11 @@ export function createSignInRequiredNotifier(logger: Logger, name: string): Sign
         return;
       }
       notified = true;
+      const command = signInCommand(integrationID);
       logger.warn("lightbridge_sign_in_required", {
         source,
-        message: `lightbridge is not signed in: open ${signInPath(name)}`
+        command,
+        message: `lightbridge is not signed in: open ${signInPath(name)}, or in a terminal run \`${command}\``
       });
     },
     reset() {

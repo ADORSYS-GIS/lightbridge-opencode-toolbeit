@@ -128,7 +128,7 @@ stateDiagram-v2
    `syncServer`, `ensureAccessToken`); the OTEL `TokenSource` was already non-interactive. When no
    usable token exists the plugin logs `lightbridge_sign_in_required` at `warn`, **once until
    re-armed** (a successful sign-in or a host disconnect re-arms it), naming *Settings → Providers →
-   Show more providers → (Integrations dialog) search the provider name → Sign in*. It fires only for
+   Show more providers → (Integrations dialog) search the provider name → Sign in* and the equivalent `opencode auth login <auth.id>`. It fires only for
    the "interactive authentication required" error class (not for a network or IdP outage) and only
    when the sign-in method is actually registered (`device_code`). That is *one notice*, not one log
    line: while signed out, other events still repeat by design — the register engine's
@@ -163,8 +163,9 @@ validated first: `https:` only (`http:` for a loopback IdP); an unsafe `verifica
 dropped in favour of `verification_uri`, and an unsafe `verification_uri` fails `authorize`. The
 device code's `expires_in` is clamped to 30 minutes. The path to the button is *Settings → Providers
 → Show more providers → (Integrations dialog) search the provider name → Sign in*.
-That path is the string in the `lightbridge_sign_in_required` warning, so the log line is a complete
-instruction, unlike the stderr prompt it replaces.
+That path, plus the terminal command below (with the real `auth.id`, shell-quoted when needed, also
+emitted as a `command` field), is the string in the `lightbridge_sign_in_required` warning, so the log
+line is a complete instruction for both audiences, unlike the stderr prompt it replaces.
 
 The host's CLI renders the same registered method: `opencode auth login <auth.id>` prints the code
 and URL in the terminal and reports `Connected to <name>`, which covers TUI-only and SSH users

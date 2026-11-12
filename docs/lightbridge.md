@@ -43,7 +43,7 @@ flowchart LR
    credential with `refresh: ""`). This is the **only** place an interactive login can start: the
    gateway hook, the OTEL token source, the `register` sync (warmup and scheduled) and the startup
    check are all refresh-only. When there is no usable token the plugin logs one
-   `lightbridge_sign_in_required` warning that names this exact path. `authorization_code` has no
+   `lightbridge_sign_in_required` warning that names this exact path and the terminal command. `authorization_code` has no
    sign-in surface any more (`lightbridge_sign_in_unsupported_flow`); use `device_code`.
    Disconnecting the integration in the host signs lightbridge out too (the state file is cleared);
    a host with no credential at startup does **not** — existing logins keep working.
@@ -118,8 +118,9 @@ opencode auth login <auth.id>
 
 The CLI prints the confirmation code and the verification URL, waits while you approve in any
 browser, then prints `Connected to <provider name>`. Pass `--method device` if the host asks which
-method to use. The `lightbridge_sign_in_required` warning names only the Settings path; the command
-above is equivalent.
+method to use. The `lightbridge_sign_in_required` warning names both: the Settings path (with the display
+name) and this command (with the real `auth.id`, shell-quoted if it contains spaces or quotes), and
+carries the command as a structured `command` field.
 
 ### Accounts, duplicates and signing out
 
