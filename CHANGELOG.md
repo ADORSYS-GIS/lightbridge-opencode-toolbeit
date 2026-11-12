@@ -4,7 +4,21 @@ All notable changes to the **OpenCode Toolbelt** — the `@vymalo/*` plugin suit
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-All sixteen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`). PR references link to the change.
+All seventeen workspace packages move on **one version line** and are released together, so a single entry covers the whole suite. Each line is tagged with the package it touches (`oauth2`, `auth-core`, `models-info`, `ratelimit`, `browser`, `browser-mcp`, `browser-extension`, `oauth2-bundle`, `devtools`, `devtools-mcp`, `otel`, `core-otel`, `provider-sync`, `repo-auth`, `lightbridge`, `github-notify`). PR references link to the change.
+
+## [Unreleased]
+
+### Added
+
+- **github-notify (new package):** `@vymalo/opencode-github-notify` bridges GitHub issue/PR thread comments into running OpenCode sessions ([#158](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/issues/158), [ADR-0024](docs/adr/0024-github-thread-bridge.md)). It polls configured threads with conditional requests (no webhook), diffs the comment listing into created/edited/deleted events, and commits events + snapshot atomically under a strict cross-process lock. Each session has its own cursor, so several agents on one account each receive every comment once, across restarts. Delivery is through `github_messages_next` / `_recent` / `_status`, with comment bodies fenced as untrusted; an optional fixed-text notice (`notify: queue | wake | off`) is queued via `ctx.session.synthetic` and never carries comment text. Read-only (GET only); the token comes from `gh auth token`, a command or an env var and is never written. State lives under the STATE root. **Before the first release:** the package name must be bootstrapped on npm and its Trusted Publisher attached (see *Adding a new published package* in `CLAUDE.md`).
+
+### Fixed
+
+- **release scripts:** `dist-tag` now skips a package first published after the version being tagged (e.g. github-notify for `opencode-v1` → `0.17.0`) instead of failing the plan; a package that existed at that version but lacks it still fails.
+
+### Documentation
+
+- **docs:** [`github-notify.md`](docs/github-notify.md), the package README, [ADR-0024](docs/adr/0024-github-thread-bridge.md) (Proposed), and the package tables in `README.md`, `CLAUDE.md` / `AGENTS.md` and `docs/README.md`.
 
 ## [0.20.0] — 2026-11-10
 

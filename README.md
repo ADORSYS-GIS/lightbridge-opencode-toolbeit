@@ -47,6 +47,7 @@ The **OpenCode Toolbelt** is the set of `@vymalo/*` plugins that fill those gaps
 | **devtools** | [`@vymalo/opencode-devtools`](packages/opencode-devtools) | A belt of everyday **local utilities** the model can call — `math` (precise eval, units, stats), `codec` (base64/hex/url, JWT decode, gzip), `crypto` (hash/hmac, uuid/ulid, keypairs), `datetime` (parse/format/diff, timezones, cron), `convert` (JSON/YAML/TOML/CSV + JSONPath), and an opt-in, SSRF-guarded `http` client. Deterministic, zero-auth, no server. |
 | **devtools-mcp** | [`@vymalo/opencode-devtools-mcp`](packages/opencode-devtools-mcp) | The same utilities, exposed as an **MCP stdio server** for any MCP client. |
 | **otel** | [`@vymalo/opencode-otel`](packages/opencode-otel) | See what your agent is actually doing and costing: **OTLP traces, metrics and logs** — real USD cost, all five token types (cache read/write included), tool results, permission decisions, API errors, lines of code, repository metadata, and export-failure visibility. Inert until an endpoint is configured. What [Claude Code](https://code.claude.com/docs/en/monitoring-usage) and [Codex](https://learn.chatgpt.com/docs/config-file/config-advanced) export, for OpenCode. |
+| 📬 **github-notify** | [`@vymalo/opencode-github-notify`](packages/opencode-github-notify) | Stop agents missing decisions on a **GitHub issue / PR thread**. Polls the threads you list (no webhook), records each new, edited or deleted comment once, and hands every session its unread comments through a tool — fenced as untrusted text — with an optional notice pushed into the session. Read-only. |
 | 🧩 **extension** | [`apps/browser-extension`](apps/browser-extension) | The companion Chromium + Firefox extension that the browser plugin / MCP server talk to. Private — ships as a Release asset and on the Chrome Web Store / Firefox AMO. |
 
 ```mermaid
@@ -255,7 +256,7 @@ Never run it on the same provider as `oauth2` (both set `Authorization`). Full r
 
 ## 🧱 Stacking the belt
 
-The plugins are decoupled at the import level, so you can snap several onto one provider. Order matters in one place — list `@vymalo/opencode-oauth2` **before** `@vymalo/opencode-models-info` (which inherits the bearer oauth2 stamps on the provider headers when it fetches metadata) and before `@vymalo/opencode-lightbridge` (which looks for the `settings.oauth2` marker oauth2 stamps). ratelimit, browser, devtools and otel have no ordering requirement:
+The plugins are decoupled at the import level, so you can snap several onto one provider. Order matters in one place — list `@vymalo/opencode-oauth2` **before** `@vymalo/opencode-models-info` (which inherits the bearer oauth2 stamps on the provider headers when it fetches metadata) and before `@vymalo/opencode-lightbridge` (which looks for the `settings.oauth2` marker oauth2 stamps). ratelimit, browser, devtools, otel and github-notify have no ordering requirement:
 
 ```jsonc
 {
@@ -298,6 +299,7 @@ Full index: [`docs/README.md`](docs/README.md). The highlights:
 | [`docs/browser.md`](docs/browser.md) | Browser automation — topology, wire protocol, full tool reference, executors, multi-client routing, store publishing |
 | [`docs/devtools.md`](docs/devtools.md) | Devtools utilities — tool groups, full reference, the `math`/`http` security model, plugin + MCP config |
 | [`docs/otel.md`](docs/otel.md) | OpenTelemetry export — config precedence, every metric/log/span, privacy & cardinality |
+| [`docs/github-notify.md`](docs/github-notify.md) | GitHub thread bridge — poll/diff/commit, exactly-once guarantees, the untrusted-content model, token scopes, local state |
 | [`docs/lightbridge.md`](docs/lightbridge.md) | The single-auth umbrella — one `TokenRuntime` across the gateway + OTEL, config, the MCP-out-of-scope rationale |
 | [`docs/recommended-mcps.md`](docs/recommended-mcps.md) | Mature third-party MCP servers to **adopt** (memory, android/iOS, database) instead of rebuilding |
 | [`docs/security.md`](docs/security.md) | Consolidated security model across all plugins — token cache, the browser bridge, blast radius |
@@ -309,7 +311,7 @@ Full index: [`docs/README.md`](docs/README.md). The highlights:
 
 ## 🗂️ Workspace layout
 
-This is a [pnpm](https://pnpm.io) monorepo. Thirteen packages publish to npm under `@vymalo`; four are private.
+This is a [pnpm](https://pnpm.io) monorepo. Fourteen packages publish to npm under `@vymalo`; four are private.
 
 | Package | Published as | |
 | --- | --- | --- |
@@ -323,6 +325,7 @@ This is a [pnpm](https://pnpm.io) monorepo. Thirteen packages publish to npm und
 | [`packages/opencode-otel`](packages/opencode-otel) | `@vymalo/opencode-otel` | Auth-agnostic OpenTelemetry export (traces, metrics, logs) |
 | [`packages/opencode-repo-auth`](packages/opencode-repo-auth) | `@vymalo/opencode-repo-auth` | Repo/project-scoped bearer via RFC 8693 exchange |
 | [`packages/opencode-lightbridge`](packages/opencode-lightbridge) | `@vymalo/opencode-lightbridge` | Umbrella — one credential across the gateway + OTEL |
+| [`packages/opencode-github-notify`](packages/opencode-github-notify) | `@vymalo/opencode-github-notify` | Read-only GitHub issue/PR thread bridge into running sessions |
 | [`packages/opencode-auth-core`](packages/opencode-auth-core) | `@vymalo/opencode-auth-core` | Shared OAuth2/OIDC token core (oauth2, repo-auth, lightbridge) |
 | [`packages/opencode-core-otel`](packages/opencode-core-otel) | `@vymalo/opencode-core-otel` | Shared OpenTelemetry engine (otel, lightbridge) |
 | [`packages/opencode-provider-sync`](packages/opencode-provider-sync) | `@vymalo/opencode-provider-sync` | Shared provider-registration + model-sync engine (oauth2 today; lightbridge next) |

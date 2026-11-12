@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { apply, main, npmMeetsFloor, plan, validateInputs } from "../dist-tag.mjs";
+import { apply, compareVersions, main, npmMeetsFloor, plan, validateInputs } from "../dist-tag.mjs";
 import { PUBLISH_ORDER, readPackage } from "../publish-guard.mjs";
 
 const json = (status, body) => ({ status, json: async () => body });
@@ -10,8 +10,17 @@ const env = {
   GITHUB_REPOSITORY: "o/r"
 };
 
-/** tags: name -> tags object; `missing` => version 404; `noPublisher` => OIDC exchange 404. */
-function fakeFetch({ tags = {}, missing = [], noPublisher = [] } = {}) {
+/**
+ * tags: name -> tags object; `missing` => version 404; `noPublisher` => OIDC exchange 404;
+ * `versions`: name -> versions the packument lists (default ["0.17.0"]); `unpublished`: packument 404.
+ */
+function fakeFetch({
+  tags = {},
+  missing = [],
+  noPublisher = [],
+  versions = {},
+  unpublished = []
+} = {}) {
   return vi.fn(async (url) => {
     const u = String(url);
     if (u.startsWith("https://gh/token")) return json(200, { value: "idtok" });
@@ -23,9 +32,14 @@ function fakeFetch({ tags = {}, missing = [], noPublisher = [] } = {}) {
       const name = decodeURIComponent(u.split("/-/package/")[1].replace("/dist-tags", ""));
       return json(200, tags[name] ?? { latest: "0.18.0" });
     }
-    const name = decodeURIComponent(
-      u.replace("https://registry.npmjs.org/", "").replace(/\/[^/]+$/, "")
-    );
+    const path = u.replace("https://registry.npmjs.org/", "");
+    if (!path.includes("/")) {
+      const name = decodeURIComponent(path);
+      if (unpublished.includes(name)) return json(404, {});
+      const list = versions[name] ?? ["0.17.0"];
+      return json(200, { versions: Object.fromEntries(list.map((v) => [v, {}])) });
+    }
+    const name = decodeURIComponent(path.replace(/\/[^/]+$/, ""));
     return missing.includes(name) ? json(404, {}) : json(200, {});
   });
 }
@@ -59,7 +73,7 @@ describe("npmMeetsFloor", () => {
 });
 
 describe("plan", () => {
-  it("plans all thirteen and records latest", async () => {
+  it("plans every published package and records latest", async () => {
     const r = await plan({
       packages,
       tag: "opencode-v1",
@@ -68,7 +82,7 @@ describe("plan", () => {
       fetch: fakeFetch()
     });
     expect(r.problems).toEqual([]);
-    expect(r.todo).toHaveLength(13);
+    expect(r.todo).toHaveLength(packages.length);
     expect(r.todo[0].latestBefore).toBe("0.18.0");
   });
   it("skips packages already tagged (idempotent)", async () => {
@@ -94,6 +108,32 @@ describe("plan", () => {
     expect(r.problems).toHaveLength(3);
     expect(r.problems.join("\n")).toContain("dist-tag.yml");
   });
+  it("skips a package first published after the version, but not a hole in the line", async () => {
+    const [newer, neverPublished, holed] = packages.map((p) => p.name);
+    const f = fakeFetch({
+      missing: [newer, neverPublished, holed],
+      versions: { [newer]: ["0.21.0"], [holed]: ["0.16.0", "0.18.0"] },
+      unpublished: [neverPublished]
+    });
+    const r = await plan({ packages, tag: "opencode-v1", version: "0.17.0", env, fetch: f });
+    expect(r.lines.filter((l) => l.startsWith("skip"))).toEqual([
+      `skip  ${newer}@0.17.0: package first published after 0.17.0 — nothing to tag`,
+      `skip  ${neverPublished}@0.17.0: package first published after 0.17.0 — nothing to tag`
+    ]);
+    expect(r.problems).toEqual([
+      `${holed}@0.17.0: that version is not on the registry — nothing to tag`
+    ]);
+    expect(r.todo).toHaveLength(packages.length - 3);
+  });
+});
+
+describe("compareVersions", () => {
+  it.each([
+    ["0.17.0", "0.17.0", 0],
+    ["0.9.0", "0.17.0", -1],
+    ["1.0.0", "0.99.99", 1],
+    ["0.17.0-rc.1", "0.17.0", 0]
+  ])("%s vs %s", (a, b, sign) => expect(Math.sign(compareVersions(a, b))).toBe(sign));
 });
 
 describe("apply", () => {
@@ -142,11 +182,11 @@ describe("main", () => {
     expect(await main("plan", { env: e(), fetch: fakeFetch(), getNpmVersion: ok, run })).toBe(0);
     expect(run).not.toHaveBeenCalled();
   });
-  it("apply tags all thirteen", async () => {
+  it("apply tags every published package", async () => {
     quiet();
     const run = vi.fn(() => 0);
     expect(await main("apply", { env: e(), fetch: fakeFetch(), getNpmVersion: ok, run })).toBe(0);
-    expect(run).toHaveBeenCalledTimes(13);
+    expect(run).toHaveBeenCalledTimes(packages.length);
   });
   it("a failed plan blocks apply entirely", async () => {
     quiet();

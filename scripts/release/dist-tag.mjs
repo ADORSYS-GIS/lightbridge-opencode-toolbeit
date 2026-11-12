@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Dist-tag guard — points ONE npm dist-tag at ONE existing version for all thirteen published
- * packages, from CI, on npm Trusted Publishing (OIDC). Driven by .github/workflows/dist-tag.yml.
+ * Dist-tag guard — points ONE npm dist-tag at ONE existing version for every published package
+ * (`PUBLISH_ORDER`) that existed at that version, from CI, on npm Trusted Publishing (OIDC). Driven by .github/workflows/dist-tag.yml.
  *
  * It never publishes, never changes a version, and refuses to touch `latest`. Re-running is safe:
  * a package whose tag already points at the version is skipped.
@@ -73,6 +73,16 @@ export function npmMeetsFloor(v) {
 
 const encode = (name) => name.replace("/", "%2f");
 
+/** Numeric X.Y.Z comparison; prerelease suffixes are ignored (they never carry dist-tags here). */
+export function compareVersions(a, b) {
+  const pa = a.split("-")[0].split(".").map(Number);
+  const pb = b.split("-")[0].split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) - (pb[i] ?? 0);
+  }
+  return 0;
+}
+
 async function getJson(fetchImpl, url) {
   const res = await fetchImpl(url, { headers: { Accept: "application/json" } });
   return { status: res.status, body: res.status === 200 ? await res.json() : undefined };
@@ -104,6 +114,16 @@ export async function plan({
     const id = `${pkg.name}@${version}`;
     const v = await getJson(fetchImpl, `${REGISTRY}/${encode(pkg.name)}/${version}`);
     if (v.status === 404) {
+      // A package added to the suite after `version` (e.g. github-notify vs the 0.17.0 v1 line)
+      // has nothing to tag and is skipped. One that DID exist then but lacks this version is a
+      // real problem — a hole in the line — and still fails the plan.
+      const doc = await getJson(fetchImpl, `${REGISTRY}/${encode(pkg.name)}`);
+      const published = Object.keys(doc.body?.versions ?? {});
+      const existedThen = published.some((p) => compareVersions(p, version) <= 0);
+      if (doc.status === 404 || (doc.status === 200 && !existedThen)) {
+        lines.push(`skip  ${id}: package first published after ${version} — nothing to tag`);
+        continue;
+      }
       problems.push(`${id}: that version is not on the registry — nothing to tag`);
       continue;
     }

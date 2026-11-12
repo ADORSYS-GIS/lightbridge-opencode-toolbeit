@@ -48,6 +48,7 @@ export const PUBLISH_ORDER = [
   "opencode-browser-mcp",
   "opencode-devtools",
   "opencode-devtools-mcp",
+  "opencode-github-notify",
   "opencode-otel",
   "opencode-lightbridge"
 ];

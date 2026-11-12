@@ -31,6 +31,12 @@ install; come here when you need depth on a specific topic.
 | --- | --- |
 | [ratelimit.md](ratelimit.md) | Reading Envoy `x-ratelimit-*` headers, throttle/backoff state machine, tiers & scope, the timeout caveat |
 
+### `@vymalo/opencode-github-notify` — GitHub thread bridge
+| Page | When you need it |
+| --- | --- |
+| [github-notify.md](github-notify.md) | Getting issue/PR comments into running sessions: poll/diff/commit, exactly-once guarantees, the untrusted-content model, token scopes, local state, disabling |
+| [adr/0024-github-thread-bridge.md](adr/0024-github-thread-bridge.md) | Why a per-session cursor (not a consume-once queue), full-listing diff, strict locks, tool-first delivery |
+
 ### `@vymalo/opencode-browser` (+ `-mcp`) — browser automation
 | Page | When you need it |
 | --- | --- |
