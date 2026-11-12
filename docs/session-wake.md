@@ -161,7 +161,7 @@ Adoption changes **only** `subscription.sessionID`. Every other value is left un
 | Preserved | Why it matters |
 | --- | --- |
 | `state.pending` (unread events) | The new session can `wake_next` exactly what the old one had not read. |
-| `state.seen` ring and `state.lastError` | No event is re-appended or re-delivered after adoption. |
+| `state.seen` ring and `state.lastError` | Adoption does not re-append or re-deliver an event. (The separate multi-poller duplicate-delivery limitation is unchanged.) |
 | `state.loop` (`wakes`, `suppressed`, `loopSuspected`, `cooldownUntil`) | A crash loop cannot reset its budget by adopting. |
 | shared `watches/<hash>.json` — `cursor`, `etags`, `seen`, `consecutiveFailures`, `nextPollAt`, `subscribers` | The shared fetcher is not reset and does not re-fetch history; the subscription id (the refcount key) is unchanged. |
 | subscription `id`, source, filters, interval, `createdAt` | Adoption is a move, not a re-subscribe. |
@@ -199,7 +199,8 @@ session.
 4. `wake_resume` (or `wake_adopt`) changes the owner to the new session. Pending stays `N`; cursor,
    ETags, shared `seen` and the refcount are unchanged.
 5. `wake_next` drains the old pending events. The next poll delivers only genuinely new events, to
-   the new session; the shared `seen` ring prevents a duplicate.
+   the new session; the shared `seen` ring prevents a duplicate **within that poller**. The separate
+   multi-poller duplicate-delivery gap described under Known limitations is not changed by adoption.
 
 ## Tools
 
@@ -422,12 +423,27 @@ watch keeps its cursor — no partial state is claimed.
 
 ## Known limitations
 
-- **In-process only (Phase 3).** The registry is a per-process singleton. Two OpenCode processes
-  sharing one state directory still poll the same key twice and could deliver twice: there is **no
-  cross-process leader/lease** yet. The documented Phase 3 plan is a lease file (or a small local
-  broker) so one process polls a key while the others consume shared state. Until then, dedupe is
-  per process. Adoption has the same boundary: it is a read-modify-write with no cross-process lock,
-  so two processes adopting the same record concurrently are last-writer-wins.
+- **Duplicate delivery across poller instances (observed live, not fixed here).** The registry is
+  per plugin instance, and `inflight` only dedupes overlapping ticks **inside one poller**. Two
+  poller instances over one state root — two OpenCode processes, or the plugin loaded twice in one
+  process — each load the same subscriptions, each poll the same watch, and each call
+  `ctx.session.synthetic` for the subscriber. A live run produced:
+
+  ```text
+  14:01:14.474 wake_notice_delivered subscriptionID=wake_5c18f0478692c558 sessionID=ses_e3637cfddffeKGnvtGJihmjQhZ count=1
+  14:01:14.623 wake_notice_delivered subscriptionID=wake_5c18f0478692c558 sessionID=ses_e3637cfddffeKGnvtGJihmjQhZ count=1
+  ```
+
+  — two notices for the same `subscriptionID` and `sessionID` 149 ms apart. A later notice arrived
+  with `pending=0` and an unchanged cursor, and `wake_next` answered "No unread comments." There is
+  **no cross-instance or cross-process lease/leader** yet. The fix is a single-owner guard — e.g. a
+  lease file per watch key (`owner` + expiry, renewed each poll) so only one live poller delivers,
+  with lease-expiry failover after a crash — plus a state reload for tool calls served by a
+  non-owner. **Adoption does not fix this**: "no duplicate wake" in the adoption section means
+  adoption itself neither re-delivers nor loses an event within one poller; the multi-poller gap is
+  pre-existing and remains. Adoption is also a read-modify-write with no cross-process lock, so two
+  processes adopting the same record concurrently are last-writer-wins. The Phase 3 plan is a lease
+  (or a small local broker) so one process polls a key while the others consume shared state.
 - **Adoption moves ownership, it does not share it.** After `wake_adopt` / `wake_resume` the previous
   session can no longer list, drain, unsubscribe or receive wakes for that watch. An already-queued
   synthetic notice in the old session cannot be recalled (it can still be seen, but `wake_next`
@@ -480,7 +496,7 @@ watch keeps its cursor — no partial state is claimed.
 | `github.timeline` / `github.checks` against the live GitHub API | Not yet verified live; covered by tests with a fake transport and by mapping tests over real GitHub payload shapes |
 | `github.actions` against the live GitHub API | Not yet verified live; covered by tests with a fake transport, mapping tests over real workflow-run payload shapes, and a typed `actions: read` failure test |
 | Shared registry (two sessions, one fetcher, one wake each) | **Not yet verified live — required** (steps below) |
-| Restart adoption (`wake_list` orphans → `wake_resume` → `wake_next`, no duplicate) | **Not yet verified live — required** (steps below); covered by the restart-simulation test with two stores over one state directory |
+| Restart adoption (`wake_list` orphans → `wake_resume` → `wake_next`, no adoption-induced duplicate) | **Not yet verified live — required** (steps below); covered by the restart-simulation test with two stores over one state directory. This does not cover the separate multi-poller duplicate-delivery gap. |
 | Loop guard / `ignoreAuthors` against a real comment | Not yet verified live |
 
 ### Manual two-session test (required before claiming multi-session behaviour)
