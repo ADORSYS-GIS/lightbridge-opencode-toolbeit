@@ -457,7 +457,7 @@ export function createLightbridgePlugin(
       const reloadProviders = (): Promise<void> => runInHost(hostContext, ctx.provider.reload());
 
       const signInName = parsed.register?.name ?? parsed.auth.id;
-      const signInNotice = createSignInRequiredNotifier(logger, signInName);
+      const signInNotice = createSignInRequiredNotifier(logger, signInName, parsed.auth.id);
       // Only meaningful when the Connect dialog can actually be used to fix it.
       const notifySignInRequired = (source: string): void => {
         if (signInEnabled) {

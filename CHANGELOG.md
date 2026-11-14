@@ -8,6 +8,10 @@ All seventeen workspace packages move on **one version line** and are released t
 
 ## [Unreleased]
 
+### Changed
+
+- **lightbridge:** The `lightbridge_sign_in_required` warning now also names the terminal sign-in, `opencode auth login <auth.id>`, next to the Settings path, and carries it as a separate `command` field. The id is the real `auth.id` (not the display name) and is shell-quoted when it is not a plain word. ([#167](https://github.com/ADORSYS-GIS/lightbridge-opencode-toolbeit/pull/167))
+
 ## [0.20.2] — 2026-11-12
 
 > **session-wake gains workflow-run watches, restart adoption and cross-poller dedupe.** Three changes ship together so one reinstall fixes what the 0.20.1 watch loop could not do: it could not watch GitHub Actions, it lost every watch on an OpenCode restart, and two pollers over one state root woke a session for the same event more than once. No behaviour changes for the other packages.
