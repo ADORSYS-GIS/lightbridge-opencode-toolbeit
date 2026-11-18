@@ -41,6 +41,15 @@ export async function runInPage<Args extends unknown[], Result>(
     func: func as (...a: unknown[]) => unknown,
     args
   });
+  // An exception inside the injected function surfaces as `injection.error`
+  // with `result` unset. Swallowing it turned every page-action failure into a
+  // silent `undefined` (seen with `browser_eval`, whose `globalThis.eval` is
+  // blocked by the MV3 isolated-world CSP on Chromium). Surface it instead.
+  if (injection?.error) {
+    const detail = injection.error as { message?: string } | string
+    const message = typeof detail === "string" ? detail : (detail.message ?? String(detail))
+    throw new Error(`page action failed: ${message}`)
+  }
   return injection?.result as Result;
 }
 

@@ -179,6 +179,31 @@ export class CdpExecutor implements Executor {
     await this.cdp.send(tabId, "DOM.setFileInputFiles", { nodeId: found.nodeId, files: paths });
   }
 
+  async eval(tabId: number, code: string): Promise<{ result: unknown }> {
+    await this.cdp.attach(tabId);
+    // Runtime.evaluate runs in the page's main world with no CSP restriction
+    // (unlike the content-script `globalThis.eval` fallback), and returns the
+    // value serialized via `returnByValue`.
+    const res = await this.cdp.send<{
+      exceptionDetails?: { text?: string; exception?: { description?: string } };
+      result?: { type: string; subtype?: string; value?: unknown; description?: string };
+    }>(tabId, "Runtime.evaluate", {
+      expression: code,
+      returnByValue: true,
+      awaitPromise: true,
+      userGesture: true
+    });
+    if (res.exceptionDetails) {
+      const d = res.exceptionDetails;
+      throw new Error(`eval threw: ${d.exception?.description ?? d.text ?? "unknown exception"}`);
+    }
+    const r = res.result;
+    if (r?.subtype === "error") {
+      throw new Error(`eval threw: ${r.description ?? r.type}`);
+    }
+    return { result: r?.value ?? null };
+  }
+
   async setViewport(tabId: number, viewport: Viewport): Promise<void> {
     await this.cdp.attach(tabId);
     await this.cdp.send(tabId, "Emulation.setDeviceMetricsOverride", {

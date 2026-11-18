@@ -38,6 +38,7 @@ function fakeExecutor() {
     type: vi.fn().mockResolvedValue(undefined),
     pressKey: vi.fn().mockResolvedValue(undefined),
     upload: vi.fn().mockResolvedValue(undefined),
+    eval: vi.fn().mockResolvedValue({ result: null }),
     handleDialog: vi.fn().mockResolvedValue(undefined),
     setViewport: vi.fn().mockResolvedValue(undefined),
     screenshot: vi.fn().mockResolvedValue({ base64: "AA", width: 10, height: 20 }),
