@@ -101,6 +101,13 @@ export class ContentExecutor implements Executor {
     throw CDP_ONLY("browser_upload");
   }
 
+  async eval(): Promise<{ result: unknown }> {
+    // The content-script fallback for eval (pageDispatch's `globalThis.eval`)
+    // stays reachable through the command router's Firefox path; as a plain
+    // Executor method, eval is CDP-only like upload.
+    throw CDP_ONLY("browser_eval");
+  }
+
   async setViewport(): Promise<void> {
     throw CDP_ONLY("browser_set_viewport");
   }

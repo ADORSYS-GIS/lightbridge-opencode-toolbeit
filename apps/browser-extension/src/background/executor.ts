@@ -46,6 +46,13 @@ export interface Executor {
   screenshot(tabId: number, fullPage: boolean): Promise<ScreenshotData>;
   /** Set a file input's files. CDP-only — the content executor throws. */
   upload(tabId: number, target: Target, paths: string[]): Promise<void>;
+  /**
+   * Evaluate JavaScript in the page's main world and return the
+   * JSON-serializable result. CDP-only — the content executor throws (the
+   * content-script fallback's `globalThis.eval` is blocked by the MV3
+   * isolated-world CSP on Chromium).
+   */
+  eval(tabId: number, code: string): Promise<{ result: unknown }>;
   /** Emulate a viewport. CDP-only — the content executor throws. */
   setViewport(tabId: number, viewport: Viewport): Promise<void>;
   /** Recent console output. CDP-only — the content executor throws. */

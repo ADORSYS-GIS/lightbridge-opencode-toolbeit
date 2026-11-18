@@ -252,7 +252,20 @@ export class CommandRouter {
         return { data, summary: `${data.count} match(es)` };
       }
       case "eval": {
-        const data = await runPageAction(this.tab(group, params), "eval", { code: params.code });
+        const tabId = this.tab(group, params);
+        let data: { result?: unknown };
+        if (this.executor.kind === "cdp") {
+          // Preferred path: CDP Runtime.evaluate in the page's main world —
+          // no CSP restriction, real return values. The content-script
+          // fallback's `globalThis.eval` is blocked by the MV3 isolated-world
+          // CSP on Chromium and silently returned `undefined` before
+          // injection errors were surfaced.
+          data = await this.executor.eval(tabId, params.code as string);
+        } else {
+          data = await runPageAction<{ result?: unknown }>(tabId, "eval", {
+            code: params.code
+          });
+        }
         return { data, summary: "evaluated" };
       }
       case "console": {
