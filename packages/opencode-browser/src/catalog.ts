@@ -572,7 +572,7 @@ export const BROWSER_TOOLS: readonly ToolSpec[] = [
     group: "debug",
     action: "console",
     description:
-      "Return recent console output (logs, warnings, errors). CDP executor only (Chromium).",
+      "Return recent console output (logs, warnings, errors). CDP on Chromium, a page hook on Firefox.",
     input: { group, tabId },
     result: (data) => {
       const entries = (rec(data).entries as unknown[]) ?? [];
@@ -584,7 +584,7 @@ export const BROWSER_TOOLS: readonly ToolSpec[] = [
     group: "debug",
     action: "network",
     description:
-      "Return recent network requests (method, URL, status). CDP executor only (Chromium).",
+      "Return recent network requests (method, URL, status). CDP on Chromium, webRequest on Firefox.",
     input: { group, tabId },
     result: (data) => {
       const entries = (rec(data).entries as unknown[]) ?? [];
@@ -596,7 +596,7 @@ export const BROWSER_TOOLS: readonly ToolSpec[] = [
     group: "debug",
     action: "handle_dialog",
     description:
-      "Accept or dismiss a pending JavaScript dialog (alert/confirm/prompt). CDP executor only (Chromium).",
+      "Accept or dismiss a pending JavaScript dialog (alert/confirm/prompt). On Firefox dialogs are auto-answered instead (alert → ok, confirm → false, prompt → null) and recorded in its console output.",
     input: {
       group,
       accept: { type: "boolean", optional: true, description: "Accept (default true) or dismiss." },

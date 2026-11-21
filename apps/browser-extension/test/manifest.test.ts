@@ -35,7 +35,12 @@ describe("manifest permissions", () => {
   });
 
   it("drops the Chromium-only permissions on Firefox", () => {
-    expect(manifestFor("firefox").permissions).toEqual(["tabs", "scripting", "cookies"]);
+    expect(manifestFor("firefox").permissions).toEqual([
+      "tabs",
+      "scripting",
+      "cookies",
+      "webRequest" // network-recorder: no CDP on Firefox, so use webRequest
+    ]);
   });
 
   it.each(["chrome", "firefox"])("declares no unused permission on %s", (browser) => {
