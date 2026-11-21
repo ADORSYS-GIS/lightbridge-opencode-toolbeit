@@ -53,7 +53,9 @@ Pick whichever is easiest:
 - **CDP** (`chrome.debugger`, Chromium) — trusted input, full-page capture, console & network
   logs. Shows the debugger banner.
 - **Content script** — synthetic events + `captureVisibleTab`; the Firefox-safe fallback, also
-  used when CDP is unavailable.
+  used when CDP is unavailable. On Firefox it still reports console output and dialogs (via a
+  `document_start` page hook) and network requests (via `webRequest`), so only trusted input,
+  viewport emulation and file uploads remain Chromium-only.
 - **Auto** (default) — CDP on Chromium when the `debugger` permission is granted, else content.
 
 The host plugin/MCP can advertise a preferred executor; the dashboard setting wins for your
@@ -122,5 +124,5 @@ The Firefox add-on id is pinned to `opencode-browser@vymalo.com`. Full store-set
 | --- | --- |
 | "Disconnected" in the dashboard | Check the bridge URL/port and that an agent is hosting it; re-copy the token. |
 | Auth rejected | Token mismatch — paste exactly what the plugin/MCP logged. |
-| Actions do nothing on Firefox | Some features are CDP/Chromium-only; Firefox uses the content executor. |
+| Actions do nothing on Firefox | Trusted input, viewport emulation and file uploads are CDP/Chromium-only; everything else runs on the content executor. |
 | Banner won't go away | Released on `browser_release` or when the agent exits — expected otherwise. |

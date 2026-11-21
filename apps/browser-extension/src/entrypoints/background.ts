@@ -7,11 +7,17 @@ import { ContentExecutor } from "../background/content-executor";
 import { detectCapabilities, type Executor, resolveExecutorKind } from "../background/executor";
 import { getActiveFeedbackSession } from "../background/feedback-side-panel";
 import { GroupRegistry } from "../background/group-registry";
+import { startNetworkRecorder } from "../background/network-recorder";
 import { getSettings, getStatus, saveSettings, setStatus } from "../shared/db";
 import type { FeedbackPendingResponse, UiMessage, UiMessageResponse } from "../shared/messages";
 import type { ExecutorKind, ExecutorMode } from "../shared/types";
 
 export default defineBackground(() => {
+  // Firefox has no CDP, so network comes from webRequest and console/dialogs
+  // from the `hooks.content` entrypoint (installed at document_start). All of it
+  // is passive: no debugger banner.
+  startNetworkRecorder();
+
   let executor: Executor = new ContentExecutor();
   let registry = new GroupRegistry(executor);
   let router = new CommandRouter(registry, executor);

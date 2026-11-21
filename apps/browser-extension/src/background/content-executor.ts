@@ -2,6 +2,8 @@ import { browser } from "wxt/browser";
 
 import type { ConsoleEntry, Executor, NetworkEntry, ScreenshotData } from "./executor";
 import { captureFullPage } from "./full-page";
+import { clearNetwork, getNetworkEntries } from "./network-recorder";
+import { markDialogsHandled, readConsole, readDialogs } from "./page-hooks";
 import { runInPage, runPageAction, type Target } from "./page-actions";
 
 const CDP_ONLY = (feature: string) =>
@@ -105,23 +107,28 @@ export class ContentExecutor implements Executor {
     throw CDP_ONLY("browser_set_viewport");
   }
 
-  async getConsole(): Promise<ConsoleEntry[]> {
-    throw CDP_ONLY("browser_console");
+  async getConsole(tabId: number): Promise<ConsoleEntry[]> {
+    return readConsole(tabId);
   }
 
-  async getNetwork(): Promise<NetworkEntry[]> {
-    throw CDP_ONLY("browser_network");
+  async getNetwork(tabId: number): Promise<NetworkEntry[]> {
+    return getNetworkEntries(tabId);
   }
 
-  async handleDialog(): Promise<void> {
-    throw CDP_ONLY("browser_handle_dialog");
+  async handleDialog(tabId: number): Promise<void> {
+    // The MAIN-world hook answers dialogs immediately (alert → ok, confirm →
+    // false, prompt → null) instead of blocking the page, and records what was
+    // asked. Nothing is pending by the time we get here; clear the handled flag
+    // so a later call reports only new dialogs.
+    await readDialogs(tabId);
+    await markDialogsHandled(tabId);
   }
 
-  async release(_tabId: number): Promise<void> {
-    // Nothing to release — no persistent attachment.
+  async release(tabId: number): Promise<void> {
+    clearNetwork(tabId);
   }
 
   async releaseAll(): Promise<void> {
-    // No persistent attachments.
+    clearNetwork();
   }
 }

@@ -19,6 +19,10 @@ export default defineConfig({
     // `sidePanel` is the Chromium permission for the feedback side panel; on
     // Firefox the sidepanel entrypoint maps to `sidebar_action` (no permission).
     const chromiumOnly = isFirefox ? [] : ["debugger", "tabGroups", "sidePanel"];
+    // Firefox has no CDP, so the content executor gets network via webRequest.
+    // Chromium keeps using the debugger instead (a permission the store would
+    // otherwise flag as unused).
+    const firefoxOnly = isFirefox ? ["webRequest"] : [];
     return {
       name: "OpenCode Browser",
       description:
@@ -29,7 +33,7 @@ export default defineConfig({
       // permission). `activeTab` is likewise redundant next to the `<all_urls>`
       // host access the agent genuinely needs. Before adding one back, point at
       // the call site.
-      permissions: ["tabs", "scripting", "cookies", ...chromiumOnly],
+      permissions: ["tabs", "scripting", "cookies", ...firefoxOnly, ...chromiumOnly],
       host_permissions: ["<all_urls>"],
       // Firefox (AMO) only: a stable add-on id (so it isn't auto-assigned on
       // first upload) and Mozilla's now-required data-consent declaration. The
